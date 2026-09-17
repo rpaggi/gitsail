@@ -221,6 +221,7 @@ impl RepositoryReadPort for GitCliProvider {
     }
 
     fn status(&self, repo: &Repository) -> Result<RepositoryStatus, GitSailError> {
+        require_worktree(repo, "status")?;
         let output = self.run(
             vec![
                 "status".to_string(),
@@ -348,8 +349,19 @@ impl RepositoryReadPort for GitCliProvider {
     }
 
     fn diff(&self, repo: &Repository, request: &DiffRequest) -> Result<Diff, GitSailError> {
+        // `from`/`to` of `None` resolve to the working tree/index (see
+        // `DiffRequest`'s docs), which a bare repository does not have.
+        if request.from.is_none() || request.to.is_none() {
+            require_worktree(repo, "diff")?;
+        }
         let context_lines = request.context_lines.unwrap_or(3);
         let mut args = vec![
+            // Disabled as a global option (must precede the subcommand):
+            // without it, Git C-style-quotes any path byte >= 0x80 (e.g.
+            // Unicode) in the `---`/`+++`/`diff --git` header lines this
+            // adapter parses, which this parser does not unescape (US-008).
+            "-c".to_string(),
+            "core.quotePath=false".to_string(),
             "diff".to_string(),
             "--no-color".to_string(),
             "--no-ext-diff".to_string(),
@@ -393,6 +405,23 @@ impl RepositoryReadPort for GitCliProvider {
 
 fn parse_err(message: impl Into<String>) -> GitSailError {
     GitSailError::new(ErrorCode::ParseFailure, message.into())
+}
+
+/// Rejects `operation` up front, with an explicit error, when `repo` is
+/// bare: a bare repository has no working tree, so `git` itself would
+/// otherwise fail with an opaque, locale-dependent message (SAD §8, US-007
+/// criterion 3: "bare repo ... operações dependentes de worktree retornam
+/// limitação explícita").
+fn require_worktree(repo: &Repository, operation: &str) -> Result<(), GitSailError> {
+    if repo.is_bare {
+        Err(GitSailError::new(
+            ErrorCode::InvalidRepositoryState,
+            format!("{operation} requires a working tree, but this repository is bare"),
+        )
+        .with_remediation("open a non-bare repository, or a worktree of this bare repository"))
+    } else {
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------
@@ -971,7 +1000,13 @@ fn parse_diff_block(lines: Vec<&str>) -> Result<FileDiff, GitSailError> {
     })
 }
 
+/// Strips `prefix` (`a/`/`b/`) from a `---`/`+++` marker path. Git appends a
+/// trailing tab to disambiguate the filename from the (omitted) legacy
+/// unified-diff timestamp whenever the name itself contains whitespace
+/// (US-008: e.g. a Unicode filename with a space) — stripped here so it
+/// never leaks into the parsed path.
 fn strip_diff_path_prefix(raw: &str, prefix: &str) -> Option<PathBuf> {
+    let raw = raw.strip_suffix('\t').unwrap_or(raw);
     if raw == "/dev/null" {
         None
     } else if let Some(stripped) = raw.strip_prefix(prefix) {

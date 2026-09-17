@@ -199,6 +199,159 @@ fn fetching_an_unknown_commit_hash_reports_repository_not_found() {
 }
 
 // ---------------------------------------------------------------------
+// US-006: current dir, root and subdirectory resolve the same repository;
+// nonexistent/non-repository paths fail without mutating anything.
+// ---------------------------------------------------------------------
+
+#[test]
+fn opening_from_root_or_a_subdirectory_resolves_the_same_repository() {
+    let repo_dir = init_repo("open-subdir");
+    write_file(repo_dir.path(), "a.txt", "hello\n");
+    std::fs::create_dir_all(repo_dir.path().join("nested/deeper")).unwrap();
+    write_file(&repo_dir.path().join("nested/deeper"), "b.txt", "hi\n");
+    commit_all(repo_dir.path(), "first commit");
+
+    let provider = provider();
+    let from_root = provider.discover(repo_dir.path()).unwrap();
+    let from_subdir = provider
+        .discover(&repo_dir.path().join("nested"))
+        .unwrap();
+    let from_deeper = provider
+        .discover(&repo_dir.path().join("nested/deeper"))
+        .unwrap();
+
+    assert_eq!(from_root.id, from_subdir.id);
+    assert_eq!(from_root.id, from_deeper.id);
+    assert_eq!(from_root.root_path, from_subdir.root_path);
+    assert_eq!(from_root.root_path, from_deeper.root_path);
+    assert_eq!(from_subdir.head_state, from_root.head_state);
+}
+
+#[test]
+fn opening_a_linked_worktree_does_not_assume_dot_git_is_a_directory() {
+    let repo_dir = init_repo("open-linked-worktree");
+    write_file(repo_dir.path(), "a.txt", "hello\n");
+    commit_all(repo_dir.path(), "first commit");
+    let worktree_dir = TempDir::new("open-linked-worktree-wt");
+    // Remove the freshly created dir so `git worktree add` can create it.
+    std::fs::remove_dir_all(worktree_dir.path()).unwrap();
+    git(
+        repo_dir.path(),
+        &[
+            "worktree",
+            "add",
+            "--quiet",
+            "-b",
+            "wt-branch",
+            worktree_dir.path().to_str().unwrap(),
+        ],
+    );
+    // A linked worktree's `.git` is a *file* pointing at the main
+    // repository's gitdir, not a directory — proving discovery does not
+    // hardcode that assumption.
+    assert!(worktree_dir.path().join(".git").is_file());
+
+    let provider = provider();
+    let repo = provider
+        .discover(worktree_dir.path())
+        .expect("discovering a linked worktree should succeed");
+
+    assert!(!repo.is_bare);
+    assert_eq!(repo.worktree_path.as_deref(), Some(repo.root_path.as_path()));
+    match &repo.head_state {
+        HeadState::Attached { branch } => assert_eq!(branch.as_str(), "wt-branch"),
+        other => panic!("expected Attached, got {other:?}"),
+    }
+}
+
+#[test]
+fn discovering_a_nonexistent_path_fails_without_creating_anything() {
+    let parent = TempDir::new("open-missing-parent");
+    let missing = parent.path().join("does-not-exist");
+    let before: Vec<_> = std::fs::read_dir(parent.path()).unwrap().collect();
+    assert!(before.is_empty());
+
+    let provider = provider();
+    let err = provider
+        .discover(&missing)
+        .expect_err("discovering a nonexistent path should fail");
+    assert!(err.diagnostic().is_some() || !err.message().is_empty());
+
+    let after: Vec<_> = std::fs::read_dir(parent.path()).unwrap().collect();
+    assert!(
+        after.is_empty(),
+        "discover must never create files/directories on failure"
+    );
+}
+
+#[test]
+fn discovering_a_directory_outside_any_repository_reports_repository_not_found() {
+    let dir = TempDir::new("open-non-repo");
+    let before: Vec<_> = std::fs::read_dir(dir.path()).unwrap().collect();
+    assert!(before.is_empty());
+
+    let provider = provider();
+    let err = provider
+        .discover(dir.path())
+        .expect_err("discovering a non-Git directory should fail");
+    assert_eq!(err.code(), ErrorCode::RepositoryNotFound);
+
+    let after: Vec<_> = std::fs::read_dir(dir.path()).unwrap().collect();
+    assert!(
+        after.is_empty(),
+        "discover must never create files/directories on failure"
+    );
+}
+
+// ---------------------------------------------------------------------
+// US-008: paths are preserved verbatim — Unicode and spaces in both the
+// repository directory itself and in tracked file paths.
+// ---------------------------------------------------------------------
+
+#[test]
+fn opens_a_repository_whose_own_path_contains_unicode_and_spaces() {
+    let parent = TempDir::new("unicode-parent");
+    let repo_path = parent.path().join("Projeto Ação ☃ café");
+    std::fs::create_dir_all(&repo_path).unwrap();
+    git(&repo_path, &["init", "--quiet", "--initial-branch=main"]);
+    git(&repo_path, &["config", "user.name", "Test User"]);
+    git(&repo_path, &["config", "user.email", "test@example.com"]);
+    write_file(&repo_path, "a.txt", "hello\n");
+    commit_all(&repo_path, "first commit");
+
+    let provider = provider();
+    let repo = provider
+        .discover(&repo_path)
+        .expect("discover should succeed for a Unicode, space-containing repo path");
+
+    assert_eq!(repo.root_path, repo_path.canonicalize().unwrap());
+    let status = provider.status(&repo).expect("status should succeed");
+    assert!(status.is_clean());
+}
+
+#[test]
+fn preserves_unicode_and_space_containing_file_paths_in_status_and_diff() {
+    let repo_dir = init_repo("unicode-file-paths");
+    let filename = "arquivo com espaço e açúcar ☃.txt";
+    write_file(repo_dir.path(), filename, "conteúdo inicial\n");
+    commit_all(repo_dir.path(), "first commit");
+    write_file(repo_dir.path(), filename, "conteúdo alterado\n");
+
+    let provider = provider();
+    let repo = provider.discover(repo_dir.path()).unwrap();
+
+    let status = provider.status(&repo).expect("status should succeed");
+    assert_eq!(status.files.len(), 1);
+    assert_eq!(status.files[0].path, Path::new(filename));
+
+    let diff = provider
+        .diff(&repo, &DiffRequest::default())
+        .expect("diff should succeed");
+    assert_eq!(diff.files.len(), 1);
+    assert_eq!(diff.files[0].path, Path::new(filename));
+}
+
+// ---------------------------------------------------------------------
 // Multiple branches.
 // ---------------------------------------------------------------------
 
@@ -265,6 +418,57 @@ fn discovers_a_detached_head() {
         other => panic!("expected Detached in status, got {other:?}"),
     }
     assert!(status.branch.is_none());
+}
+
+// ---------------------------------------------------------------------
+// Bare repository.
+// ---------------------------------------------------------------------
+
+fn init_bare_repo(label: &str) -> TempDir {
+    let dir = TempDir::new(label);
+    git(dir.path(), &["init", "--quiet", "--bare", "--initial-branch=main"]);
+    dir
+}
+
+#[test]
+fn discovers_a_bare_repository_and_reports_no_worktree() {
+    let repo_dir = init_bare_repo("bare-discover");
+    let provider = provider();
+
+    let repo = provider
+        .discover(repo_dir.path())
+        .expect("discover should succeed for a bare repository");
+
+    assert!(repo.is_bare);
+    assert_eq!(repo.worktree_path, None);
+    assert_eq!(repo.head_state, HeadState::Unborn);
+}
+
+#[test]
+fn status_on_a_bare_repository_reports_an_explicit_limitation() {
+    let repo_dir = init_bare_repo("bare-status");
+    let provider = provider();
+    let repo = provider.discover(repo_dir.path()).unwrap();
+
+    let err = provider
+        .status(&repo)
+        .expect_err("status must reject a bare repository explicitly");
+
+    assert_eq!(err.code(), ErrorCode::InvalidRepositoryState);
+    assert!(err.remediation().is_some());
+}
+
+#[test]
+fn working_tree_diff_on_a_bare_repository_reports_an_explicit_limitation() {
+    let repo_dir = init_bare_repo("bare-diff");
+    let provider = provider();
+    let repo = provider.discover(repo_dir.path()).unwrap();
+
+    let err = provider
+        .diff(&repo, &DiffRequest::default())
+        .expect_err("a working-tree diff must reject a bare repository explicitly");
+
+    assert_eq!(err.code(), ErrorCode::InvalidRepositoryState);
 }
 
 // ---------------------------------------------------------------------
