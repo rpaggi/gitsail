@@ -6,6 +6,15 @@
 
 All new project artifacts must be written in English: source code, identifiers, comments, tests, UI text, error messages, technical documentation, and automation output. Historical Portuguese planning documents are source material and must not be translated unless a task explicitly requests it.
 
+## Knowledge base conventions
+
+- The project wiki stores business rules only. Any other kind of document (architecture, product planning, guides, ADRs, contribution process, etc.) belongs under `docs/`, not the wiki.
+- Always consult the knowledge base before starting any task.
+
+## Skills
+
+The canonical installed skills live under `.agents/skills/`. They are imported from the Takumi skill catalog's `core` tier. Consult the relevant `SKILL.md` before planning or implementing work in its domain. Do not edit imported skill files locally; refresh them from the catalog when the project adopts the Takumi Skills CLI and lockfile. The installed skills are not enumerated here: the directory tree is the current source of truth.
+
 ## Architecture and workflow
 
 - Read the applicable document under `docs/architecture/` and `docs/product/` before changing product behavior.
