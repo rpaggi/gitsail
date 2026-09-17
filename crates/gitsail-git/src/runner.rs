@@ -7,7 +7,7 @@
 //! blocking, relying on `std::process` and cooperative polling only.
 
 use std::fmt;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -142,6 +142,10 @@ pub struct ProcessRequest {
     pub cwd: PathBuf,
     pub env: Vec<(String, String)>,
     pub timeout: Option<Duration>,
+    /// Bytes written to the child's stdin, then closed so it observes EOF.
+    /// `None` (the default) gives the child no stdin at all
+    /// ([`Stdio::null`]), matching every read-only invocation.
+    pub stdin: Option<Vec<u8>>,
 }
 
 impl ProcessRequest {
@@ -151,6 +155,7 @@ impl ProcessRequest {
             cwd,
             env: Vec::new(),
             timeout: None,
+            stdin: None,
         }
     }
 
@@ -163,6 +168,12 @@ impl ProcessRequest {
     #[must_use]
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = Some(timeout);
+        self
+    }
+
+    #[must_use]
+    pub fn with_stdin(mut self, stdin: Vec<u8>) -> Self {
+        self.stdin = Some(stdin);
         self
     }
 }
@@ -224,6 +235,7 @@ impl GitProcessRunner {
             cwd,
             env: Vec::new(),
             timeout: self.default_timeout,
+            stdin: None,
         })
     }
 
@@ -246,16 +258,21 @@ impl GitProcessRunner {
 /// against arbitrary executables, not only `git`.
 pub fn run_process(
     executable: &Path,
-    request: ProcessRequest,
+    mut request: ProcessRequest,
     cancel: &CancellationToken,
 ) -> Result<ProcessOutput, GitSailError> {
     let safe_args = redact_args(&request.args);
+    let stdin_bytes = request.stdin.take();
 
     let mut command = Command::new(executable);
     command
         .args(&request.args)
         .current_dir(&request.cwd)
-        .stdin(Stdio::null())
+        .stdin(if stdin_bytes.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     // The child inherits the parent's environment (PATH, HOME, credential
@@ -270,6 +287,17 @@ pub fn run_process(
             .with_remediation("verify the configured git executable is accessible")
             .with_source(err)
     })?;
+
+    // Written on its own thread and dropped (closing the pipe, signalling
+    // EOF to the child) as soon as the write completes: a child that reads
+    // stdin before producing output would otherwise deadlock against a
+    // parent still waiting to write everything up front.
+    let stdin_handle = stdin_bytes.map(|bytes| {
+        let mut stdin_pipe = child.stdin.take().expect("stdin was piped");
+        thread::spawn(move || {
+            let _ = stdin_pipe.write_all(&bytes);
+        })
+    });
 
     let mut stdout_pipe = child.stdout.take().expect("stdout was piped");
     let mut stderr_pipe = child.stderr.take().expect("stderr was piped");
@@ -293,6 +321,9 @@ pub fn run_process(
 
     let stdout = stdout_handle.join().unwrap_or_default();
     let stderr = stderr_handle.join().unwrap_or_default();
+    if let Some(handle) = stdin_handle {
+        let _ = handle.join();
+    }
 
     match outcome {
         WaitOutcome::Exited(status) => {

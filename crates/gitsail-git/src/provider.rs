@@ -19,7 +19,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use gitsail_application::{CommitQuery, DiffRequest, Page, RepositoryReadPort};
+use gitsail_application::{CommitQuery, DiffRequest, Page, RepositoryReadPort, RepositoryWritePort};
 use gitsail_domain::{
     Blame, BlameLine, Branch, BranchKind, BranchName, ChangeType, Commit, CommitHash, Decoration,
     Diff, DiffHunk, DiffLine, DiffLineOrigin, ErrorCode, FileChange, FileDiff, FileStatusCode,
@@ -350,9 +350,15 @@ impl RepositoryReadPort for GitCliProvider {
 
     fn diff(&self, repo: &Repository, request: &DiffRequest) -> Result<Diff, GitSailError> {
         // `from`/`to` of `None` resolve to the working tree/index (see
-        // `DiffRequest`'s docs), which a bare repository does not have.
-        if request.from.is_none() || request.to.is_none() {
+        // `DiffRequest`'s docs), and `staged` compares the index itself;
+        // none of those exist in a bare repository.
+        if request.staged || request.from.is_none() || request.to.is_none() {
             require_worktree(repo, "diff")?;
+        }
+        if request.staged && request.to.is_some() {
+            return Err(parse_err(
+                "DiffRequest::to must be None when staged is true (git diff --cached compares the index against a single tree)",
+            ));
         }
         let context_lines = request.context_lines.unwrap_or(3);
         let mut args = vec![
@@ -368,6 +374,9 @@ impl RepositoryReadPort for GitCliProvider {
             "-M".to_string(),
             format!("-U{context_lines}"),
         ];
+        if request.staged {
+            args.push("--cached".to_string());
+        }
         if let Some(from) = &request.from {
             args.push(from.as_str().to_string());
         }
@@ -400,6 +409,319 @@ impl RepositoryReadPort for GitCliProvider {
         let output = self.run(args, &repo.root_path)?;
         let stdout = Self::stdout_string(&output)?;
         parse_blame(&stdout)
+    }
+}
+
+impl RepositoryWritePort for GitCliProvider {
+    fn stage_files(&self, repo: &Repository, paths: &[PathBuf]) -> Result<(), GitSailError> {
+        require_worktree(repo, "stage")?;
+        if paths.is_empty() {
+            return Ok(());
+        }
+        let mut args = vec!["add".to_string(), "--".to_string()];
+        args.extend(paths.iter().map(|p| p.to_string_lossy().into_owned()));
+        self.run(args, &repo.root_path)?;
+        Ok(())
+    }
+
+    fn unstage_files(&self, repo: &Repository, paths: &[PathBuf]) -> Result<(), GitSailError> {
+        require_worktree(repo, "unstage")?;
+        if paths.is_empty() {
+            return Ok(());
+        }
+
+        // Before the first commit, there is no HEAD for `git restore
+        // --staged` to read from (it fails with "could not resolve HEAD");
+        // `git rm --cached` unstages by editing the index directly and
+        // works regardless of HEAD, leaving the working tree untouched.
+        if matches!(self.determine_head_state(&repo.root_path)?, HeadState::Unborn) {
+            let mut args = vec![
+                "rm".to_string(),
+                "--cached".to_string(),
+                "-q".to_string(),
+                "--".to_string(),
+            ];
+            args.extend(paths.iter().map(|p| p.to_string_lossy().into_owned()));
+            self.run(args, &repo.root_path)?;
+            return Ok(());
+        }
+
+        let expanded = self.expand_rename_pairs(repo, paths)?;
+        let mut args = vec![
+            "restore".to_string(),
+            "--staged".to_string(),
+            "--".to_string(),
+        ];
+        args.extend(expanded.iter().map(|p| p.to_string_lossy().into_owned()));
+        self.run(args, &repo.root_path)?;
+        Ok(())
+    }
+
+    fn create_commit(&self, repo: &Repository, message: &str) -> Result<CommitHash, GitSailError> {
+        require_worktree(repo, "commit")?;
+        if message.trim().is_empty() {
+            return Err(GitSailError::new(
+                ErrorCode::InvalidRepositoryState,
+                "commit message must not be empty",
+            )
+            .with_remediation("provide a non-empty commit message"));
+        }
+        // Checked up front rather than left to `git commit`'s own refusal:
+        // that message ("nothing to commit, working tree clean") goes to
+        // stdout, not stderr, so it would never reach this error's
+        // diagnostic (only stderr is captured there). `status()` is
+        // already exercised and gives an unambiguous answer (US-012
+        // criterion 1: never create an empty commit implicitly).
+        let status = RepositoryReadPort::status(self, repo)?;
+        let has_staged_changes = status
+            .files
+            .iter()
+            .any(|f| f.index_status != FileStatusCode::Unmodified);
+        if !has_staged_changes {
+            return Err(GitSailError::new(
+                ErrorCode::InvalidRepositoryState,
+                "nothing staged to commit",
+            )
+            .with_remediation("stage changes before committing"));
+        }
+
+        let args = vec!["commit".to_string(), "-m".to_string(), message.to_string()];
+        match self.run(args, &repo.root_path) {
+            Ok(_) => {
+                let hash_output =
+                    self.run(vec!["rev-parse".to_string(), "HEAD".to_string()], &repo.root_path)?;
+                let hash = Self::stdout_string(&hash_output)?.trim().to_string();
+                CommitHash::new(hash)
+            }
+            Err(err) => Err(classify_commit_failure(err)),
+        }
+    }
+
+    fn stage_hunks(&self, repo: &Repository, selection: &[FileDiff]) -> Result<(), GitSailError> {
+        require_worktree(repo, "stage hunks")?;
+        self.apply_hunk_selection(repo, selection, ApplyDirection::Forward)
+    }
+
+    fn unstage_hunks(&self, repo: &Repository, selection: &[FileDiff]) -> Result<(), GitSailError> {
+        require_worktree(repo, "unstage hunks")?;
+        self.apply_hunk_selection(repo, selection, ApplyDirection::Reverse)
+    }
+}
+
+/// Direction in which a reconstructed hunk patch is applied to the index:
+/// `Forward` moves unstaged hunks into the index (stage), `Reverse` removes
+/// staged hunks from the index without touching the working tree (unstage).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ApplyDirection {
+    Forward,
+    Reverse,
+}
+
+impl GitCliProvider {
+    /// Runs `args` in `cwd` with `stdin` piped in, pinning the `C` locale
+    /// like every other invocation (SAD §11).
+    fn run_with_stdin(
+        &self,
+        args: Vec<String>,
+        cwd: &Path,
+        stdin: Vec<u8>,
+    ) -> Result<ProcessOutput, GitSailError> {
+        let request = ProcessRequest::new(args, cwd.to_path_buf())
+            .with_env(Self::locale_env())
+            .with_stdin(stdin);
+        self.runner.run(request, &CancellationToken::new())
+    }
+
+    /// Expands `paths` so that unstaging a rename by only its new path (or
+    /// only its old path) still fully unstages both sides: `git restore
+    /// --staged <new-path>` alone leaves the paired removal of the old path
+    /// staged, which is a half-unstage, not a full one.
+    fn expand_rename_pairs(
+        &self,
+        repo: &Repository,
+        paths: &[PathBuf],
+    ) -> Result<Vec<PathBuf>, GitSailError> {
+        let status = RepositoryReadPort::status(self, repo)?;
+        let mut expanded = Vec::with_capacity(paths.len());
+        for path in paths {
+            expanded.push(path.clone());
+            let renamed_pair = status.files.iter().find(|f| &f.path == path).and_then(|f| {
+                matches!(f.change_type, ChangeType::Renamed | ChangeType::Copied)
+                    .then(|| f.previous_path.clone())
+                    .flatten()
+            });
+            if let Some(previous_path) = renamed_pair {
+                expanded.push(previous_path);
+            }
+        }
+        Ok(expanded)
+    }
+
+    /// Renders `selection` as a `git apply`-compatible unified diff and
+    /// applies it to the index only (`--cached`), never the working tree
+    /// (US-013 criterion 2). `git apply` itself refuses a patch whose
+    /// context no longer matches the current index (US-013 criterion 3:
+    /// "diff obsoleto ou hunk inaplicável impede aplicação cega"); that
+    /// failure is remapped to `OperationConflict` here rather than left as
+    /// an opaque process failure.
+    fn apply_hunk_selection(
+        &self,
+        repo: &Repository,
+        selection: &[FileDiff],
+        direction: ApplyDirection,
+    ) -> Result<(), GitSailError> {
+        if selection.iter().all(|f| f.hunks.is_empty()) {
+            return Ok(());
+        }
+        if let Some(binary) = selection.iter().find(|f| f.is_binary) {
+            return Err(GitSailError::new(
+                ErrorCode::InvalidRepositoryState,
+                format!(
+                    "hunk-level staging is not supported for binary file {}",
+                    binary.path.display()
+                ),
+            )
+            .with_remediation("stage the whole file instead"));
+        }
+        if let Some(renamed) = selection
+            .iter()
+            .find(|f| matches!(f.change_type, ChangeType::Renamed | ChangeType::Copied))
+        {
+            return Err(GitSailError::new(
+                ErrorCode::InvalidRepositoryState,
+                format!(
+                    "hunk-level staging is not supported for renamed/copied file {}",
+                    renamed.path.display()
+                ),
+            )
+            .with_remediation("stage the whole file instead"));
+        }
+
+        let patch = render_hunk_patch(selection);
+        let mut args = vec!["apply".to_string(), "--cached".to_string(), "--whitespace=nowarn".to_string()];
+        if direction == ApplyDirection::Reverse {
+            args.push("--reverse".to_string());
+        }
+        args.push("-".to_string());
+
+        self.run_with_stdin(args, &repo.root_path, patch.into_bytes())
+            .map_err(classify_apply_failure)?;
+        Ok(())
+    }
+}
+
+/// Reclassifies a failed `git commit` when it failed for a missing
+/// author/committer identity (US-012's "Falta de identidade ... gera
+/// diagnóstico"), giving a clearer, actionable error than a bare process
+/// failure. An empty index is rejected before `git commit` is even invoked
+/// (see `create_commit`), so it is not handled here. Any other failure —
+/// including a hook's own non-zero exit — passes through unchanged: its
+/// stderr is already carried as this error's diagnostic, and the index is
+/// untouched either way (git never partially applies a failed commit).
+fn classify_commit_failure(err: GitSailError) -> GitSailError {
+    if err.code() != ErrorCode::ProcessFailure {
+        return err;
+    }
+    let diagnostic_text = err.diagnostic().map(|d| d.to_string()).unwrap_or_default();
+    let identity_missing = diagnostic_text.contains("Please tell me who you are")
+        || diagnostic_text.contains("no email was given")
+        || diagnostic_text.contains("no name was given");
+
+    if identity_missing {
+        GitSailError::new(
+            ErrorCode::InvalidRepositoryState,
+            "commit author identity is not configured",
+        )
+        .with_remediation("set git config user.name and user.email, then retry")
+        .with_source(err)
+    } else {
+        err
+    }
+}
+
+/// Reclassifies a failed `git apply --cached` as `OperationConflict` when
+/// it failed because the patch's context no longer matches the index (a
+/// stale diff or an already-modified hunk), so callers can tell "ask the
+/// user to refresh and retry" apart from an unrelated process failure.
+fn classify_apply_failure(err: GitSailError) -> GitSailError {
+    if err.code() != ErrorCode::ProcessFailure {
+        return err;
+    }
+    let diagnostic_text = err.diagnostic().map(|d| d.to_string()).unwrap_or_default();
+    let stale = diagnostic_text.contains("patch does not apply")
+        || diagnostic_text.contains("patch failed")
+        || diagnostic_text.contains("does not match index");
+    if stale {
+        GitSailError::new(
+            ErrorCode::OperationConflict,
+            "the selected hunk no longer applies to the current index",
+        )
+        .with_remediation("refresh the diff and reselect the hunks to stage/unstage")
+        .with_source(err)
+    } else {
+        err
+    }
+}
+
+// ---------------------------------------------------------------------
+// Unified diff patch rendering for hunk-level stage/unstage (US-013).
+// ---------------------------------------------------------------------
+
+/// Renders `selection` into `git apply`-compatible unified diff text: the
+/// minimal `---`/`+++`/`@@` framing `git apply` accepts, without a
+/// `diff --git`/`index` header (none of that is needed to apply content
+/// hunks, and this adapter never needs to *parse* what it renders here).
+///
+/// Known limitation, inherited from how `diff()` parses hunks in the first
+/// place: a line without a trailing newline at end-of-file is rendered with
+/// one anyway, since [`DiffLine`] has no field to record its absence
+/// (US-014 is where line-accurate newline handling is tracked).
+fn render_hunk_patch(selection: &[FileDiff]) -> String {
+    let mut out = String::new();
+    for file in selection {
+        if file.hunks.is_empty() {
+            continue;
+        }
+        let (old_path, new_path) = patch_paths(file);
+        out.push_str(&format!("--- {old_path}\n"));
+        out.push_str(&format!("+++ {new_path}\n"));
+        for hunk in &file.hunks {
+            out.push_str(&format!(
+                "@@ -{},{} +{},{} @@\n",
+                hunk.old_start, hunk.old_lines, hunk.new_start, hunk.new_lines
+            ));
+            for line in &hunk.lines {
+                let sigil = match line.origin {
+                    DiffLineOrigin::Context => ' ',
+                    DiffLineOrigin::Addition => '+',
+                    DiffLineOrigin::Deletion => '-',
+                };
+                out.push(sigil);
+                out.push_str(&line.content);
+                out.push('\n');
+            }
+        }
+    }
+    out
+}
+
+fn patch_paths(file: &FileDiff) -> (String, String) {
+    match file.change_type {
+        ChangeType::Added => (
+            "/dev/null".to_string(),
+            format!("b/{}", file.path.to_string_lossy()),
+        ),
+        ChangeType::Deleted => (
+            format!("a/{}", file.path.to_string_lossy()),
+            "/dev/null".to_string(),
+        ),
+        _ => (
+            format!(
+                "a/{}",
+                file.previous_path.as_ref().unwrap_or(&file.path).to_string_lossy()
+            ),
+            format!("b/{}", file.path.to_string_lossy()),
+        ),
     }
 }
 
@@ -1242,4 +1564,175 @@ fn parse_blame_header(line: &str) -> Result<(String, u32, u32), GitSailError> {
         .parse()
         .map_err(|_| parse_err("blame final line number was not numeric"))?;
     Ok((hash, original_line, final_line))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fmt;
+
+    /// A `StdError` double carrying pre-recorded `git` stderr, standing in
+    /// for the `ProcessDiagnostic` a real `ProcessFailure` carries (that
+    /// type is private to `runner`), so these tests exercise the real
+    /// reclassification logic against real captured Git output without a
+    /// process dependency.
+    #[derive(Debug)]
+    struct RawStderr(&'static str);
+
+    impl fmt::Display for RawStderr {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(f, "exit_code=Some(128) args=[] stderr={}", self.0)
+        }
+    }
+
+    impl std::error::Error for RawStderr {}
+
+    fn process_failure(stderr: &'static str) -> GitSailError {
+        GitSailError::new(ErrorCode::ProcessFailure, "git process exited with a non-zero status")
+            .with_source(RawStderr(stderr))
+    }
+
+    #[test]
+    fn classifies_missing_identity_as_invalid_repository_state() {
+        // Captured verbatim from a real `git commit` with no configured
+        // identity and auto-detection disabled.
+        let err = process_failure(
+            "Author identity unknown\n\n*** Please tell me who you are.\n\nfatal: no email was given and auto-detection is disabled\n",
+        );
+
+        let classified = classify_commit_failure(err);
+
+        assert_eq!(classified.code(), ErrorCode::InvalidRepositoryState);
+        assert!(classified.remediation().unwrap().contains("user.name"));
+        assert!(classified.diagnostic().is_some(), "original diagnostic must be preserved");
+    }
+
+    #[test]
+    fn leaves_a_hook_failure_as_a_generic_process_failure_with_its_own_diagnostic() {
+        let err = process_failure("blocked by hook\n");
+
+        let classified = classify_commit_failure(err);
+
+        // A hook can print anything; this adapter must not pretend to
+        // understand it, only preserve it as a diagnostic (US-012 criterion
+        // 2's "diagnóstico" requirement, without over-fitting to hook text).
+        assert_eq!(classified.code(), ErrorCode::ProcessFailure);
+        assert!(classified.diagnostic().unwrap().to_string().contains("blocked by hook"));
+    }
+
+    #[test]
+    fn classifies_a_stale_hunk_as_operation_conflict() {
+        let err = process_failure("error: patch failed: f.txt:1\nerror: f.txt: patch does not apply\n");
+
+        let classified = classify_apply_failure(err);
+
+        assert_eq!(classified.code(), ErrorCode::OperationConflict);
+        assert!(classified.remediation().unwrap().contains("refresh"));
+    }
+
+    #[test]
+    fn leaves_an_unrelated_apply_failure_unclassified() {
+        let err = process_failure("fatal: unrecognized input\n");
+
+        let classified = classify_apply_failure(err);
+
+        assert_eq!(classified.code(), ErrorCode::ProcessFailure);
+    }
+
+    fn modified_file_diff() -> FileDiff {
+        FileDiff {
+            path: PathBuf::from("a.txt"),
+            previous_path: None,
+            change_type: ChangeType::Modified,
+            is_binary: false,
+            hunks: vec![DiffHunk {
+                old_start: 1,
+                old_lines: 2,
+                new_start: 1,
+                new_lines: 2,
+                lines: vec![
+                    DiffLine {
+                        origin: DiffLineOrigin::Context,
+                        content: "one".to_string(),
+                    },
+                    DiffLine {
+                        origin: DiffLineOrigin::Deletion,
+                        content: "two".to_string(),
+                    },
+                    DiffLine {
+                        origin: DiffLineOrigin::Addition,
+                        content: "TWO".to_string(),
+                    },
+                ],
+            }],
+        }
+    }
+
+    #[test]
+    fn renders_a_modified_file_as_a_minimal_git_apply_patch() {
+        let patch = render_hunk_patch(&[modified_file_diff()]);
+
+        assert_eq!(
+            patch,
+            "--- a/a.txt\n+++ b/a.txt\n@@ -1,2 +1,2 @@\n one\n-two\n+TWO\n"
+        );
+    }
+
+    #[test]
+    fn renders_an_added_file_against_dev_null() {
+        let file = FileDiff {
+            path: PathBuf::from("new.txt"),
+            previous_path: None,
+            change_type: ChangeType::Added,
+            is_binary: false,
+            hunks: vec![DiffHunk {
+                old_start: 0,
+                old_lines: 0,
+                new_start: 1,
+                new_lines: 1,
+                lines: vec![DiffLine {
+                    origin: DiffLineOrigin::Addition,
+                    content: "hello".to_string(),
+                }],
+            }],
+        };
+
+        let patch = render_hunk_patch(&[file]);
+
+        assert!(patch.starts_with("--- /dev/null\n+++ b/new.txt\n"));
+    }
+
+    #[test]
+    fn renders_a_deleted_file_against_dev_null() {
+        let file = FileDiff {
+            path: PathBuf::from("gone.txt"),
+            previous_path: None,
+            change_type: ChangeType::Deleted,
+            is_binary: false,
+            hunks: vec![DiffHunk {
+                old_start: 1,
+                old_lines: 1,
+                new_start: 0,
+                new_lines: 0,
+                lines: vec![DiffLine {
+                    origin: DiffLineOrigin::Deletion,
+                    content: "bye".to_string(),
+                }],
+            }],
+        };
+
+        let patch = render_hunk_patch(&[file]);
+
+        assert!(patch.starts_with("--- a/gone.txt\n+++ /dev/null\n"));
+    }
+
+    #[test]
+    fn skips_files_with_no_selected_hunks() {
+        let mut file = modified_file_diff();
+        file.hunks.clear();
+
+        let patch = render_hunk_patch(&[file]);
+
+        assert_eq!(patch, "");
+    }
 }

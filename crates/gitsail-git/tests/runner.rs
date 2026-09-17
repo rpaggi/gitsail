@@ -91,6 +91,39 @@ fn reports_process_failure_for_non_zero_exit() {
     assert!(!err.message().contains("does-not-exist"));
 }
 
+#[test]
+fn stdin_bytes_reach_the_child_process() {
+    let runner = runner();
+    let repo = TempDir::new("stdin-repo");
+    runner
+        .run(
+            ProcessRequest::new(
+                vec!["init".to_string(), "--quiet".to_string()],
+                repo.path().to_path_buf(),
+            ),
+            &CancellationToken::new(),
+        )
+        .expect("git init should succeed");
+
+    // `git hash-object --stdin` reads its blob content from stdin and
+    // echoes back its object id; asserting against the SHA-1 of the exact
+    // fixture bytes (computed independently with `git hash-object`) proves
+    // those bytes actually reached the child, not merely that the call
+    // succeeded with *some* stdin.
+    let request = ProcessRequest::new(
+        vec!["hash-object".to_string(), "--stdin".to_string()],
+        repo.path().to_path_buf(),
+    )
+    .with_stdin(b"gitsail stdin plumbing\n".to_vec());
+
+    let output = runner
+        .run(request, &CancellationToken::new())
+        .expect("git hash-object --stdin should succeed");
+
+    let hash = String::from_utf8(output.stdout).unwrap();
+    assert_eq!(hash.trim(), "8e3f5c9520f2446ff95e42efd877aab7068c2dbf");
+}
+
 #[cfg(unix)]
 fn sleep_command(seconds: &str) -> (PathBuf, Vec<String>) {
     (PathBuf::from("sleep"), vec![seconds.to_string()])

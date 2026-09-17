@@ -1,14 +1,18 @@
 //! Integration tests for [`GitCliProvider`] (SAD §31): every test creates a
 //! real, temporary Git repository via the `git` CLI (never a mock) and
-//! exercises `GitCliProvider` against it through `RepositoryReadPort`.
+//! exercises `GitCliProvider` against it through `RepositoryReadPort` /
+//! `RepositoryWritePort`.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use gitsail_application::{CommitQuery, DiffRequest, RepositoryReadPort};
-use gitsail_domain::{BranchKind, ChangeType, CommitHash, Decoration, ErrorCode, HeadState};
+use gitsail_application::{CommitQuery, DiffRequest, RepositoryReadPort, RepositoryWritePort};
+use gitsail_domain::{
+    BranchKind, ChangeType, CommitHash, Decoration, DiffHunk, DiffLine, DiffLineOrigin, ErrorCode,
+    FileDiff, FileStatusCode, HeadState,
+};
 use gitsail_git::{GitCliProvider, GitProcessRunner, GitProcessRunnerConfig};
 
 /// A uniquely named temporary directory, removed on drop.
@@ -515,6 +519,35 @@ fn status_reports_staged_unstaged_and_untracked_changes() {
     assert_eq!(status.files.len(), 3);
 }
 
+#[test]
+fn status_combines_staged_and_unstaged_changes_on_the_same_path_with_an_unusual_name() {
+    // US-010 DoD: a single fixture combining a staged-and-unstaged change on
+    // the same file, and an unusual (non-alphanumeric) path.
+    let name = "weird name (v1) - final.txt";
+    let repo_dir = init_repo("same-path-combo");
+    write_file(repo_dir.path(), name, "original\n");
+    commit_all(repo_dir.path(), "first commit");
+
+    // Stage one change...
+    write_file(repo_dir.path(), name, "staged change\n");
+    git(repo_dir.path(), &["add", name]);
+    // ...then modify again without staging.
+    write_file(repo_dir.path(), name, "unstaged change on top\n");
+
+    let provider = provider();
+    let repo = provider.discover(repo_dir.path()).unwrap();
+    let status = provider
+        .status(&repo)
+        .expect("status should succeed with a combined staged/unstaged change");
+
+    assert_eq!(status.files.len(), 1);
+    let entry = &status.files[0];
+    assert_eq!(entry.path, Path::new(name));
+    assert_eq!(entry.index_status, FileStatusCode::Modified);
+    assert_eq!(entry.worktree_status, FileStatusCode::Modified);
+    assert!(!status.is_clean());
+}
+
 // ---------------------------------------------------------------------
 // Rename detection via `diff`.
 // ---------------------------------------------------------------------
@@ -550,6 +583,7 @@ fn diff_detects_a_rename() {
             &DiffRequest {
                 from: Some(head_hash),
                 to: None,
+                staged: false,
                 path_filter: None,
                 context_lines: None,
             },
@@ -599,6 +633,7 @@ fn diff_reports_modified_content_hunks_between_two_commits() {
             &DiffRequest {
                 from: Some(first),
                 to: Some(second),
+                staged: false,
                 path_filter: None,
                 context_lines: None,
             },
@@ -714,4 +749,424 @@ fn blame_attributes_each_line_to_the_commit_that_introduced_it() {
     assert_eq!(blame.lines[0].author.name, "Test User");
     assert_eq!(blame.lines[1].content, "line2");
     assert_ne!(blame.lines[1].commit, second);
+}
+
+// ---------------------------------------------------------------------
+// Stage / unstage by file (US-011).
+// ---------------------------------------------------------------------
+
+fn unstaged_diff_request() -> DiffRequest {
+    DiffRequest {
+        from: None,
+        to: None,
+        staged: false,
+        path_filter: None,
+        context_lines: None,
+    }
+}
+
+fn staged_diff_request() -> DiffRequest {
+    DiffRequest {
+        from: None,
+        to: None,
+        staged: true,
+        path_filter: None,
+        context_lines: None,
+    }
+}
+
+#[test]
+fn stage_files_stages_only_the_selected_paths_including_a_removal() {
+    let repo_dir = init_repo("stage-selected");
+    write_file(repo_dir.path(), "keep.txt", "keep\n");
+    write_file(repo_dir.path(), "remove.txt", "remove me\n");
+    commit_all(repo_dir.path(), "first commit");
+
+    write_file(repo_dir.path(), "keep.txt", "keep changed\n");
+    std::fs::remove_file(repo_dir.path().join("remove.txt")).unwrap();
+    write_file(repo_dir.path(), "untracked.txt", "new\n");
+
+    let provider = provider();
+    let repo = provider.discover(repo_dir.path()).unwrap();
+    provider
+        .stage_files(
+            &repo,
+            &[PathBuf::from("keep.txt"), PathBuf::from("remove.txt")],
+        )
+        .expect("staging selected paths should succeed");
+
+    let status = provider.status(&repo).unwrap();
+    let by_path = |name: &str| status.files.iter().find(|f| f.path == Path::new(name));
+
+    let kept = by_path("keep.txt").expect("keep.txt should be staged");
+    assert_eq!(kept.index_status, FileStatusCode::Modified);
+    let removed = by_path("remove.txt").expect("remove.txt should be staged");
+    assert_eq!(removed.index_status, FileStatusCode::Deleted);
+    let untracked = by_path("untracked.txt").expect("untracked.txt was never selected");
+    assert_eq!(untracked.change_type, ChangeType::Untracked);
+}
+
+#[test]
+fn stage_files_works_before_the_first_commit() {
+    let repo_dir = init_repo("stage-unborn");
+    write_file(repo_dir.path(), "a.txt", "hello\n");
+
+    let provider = provider();
+    let repo = provider.discover(repo_dir.path()).unwrap();
+    provider
+        .stage_files(&repo, &[PathBuf::from("a.txt")])
+        .expect("staging on an unborn branch should succeed");
+
+    let status = provider.status(&repo).unwrap();
+    assert_eq!(status.files.len(), 1);
+    assert_eq!(status.files[0].index_status, FileStatusCode::Added);
+}
+
+#[test]
+fn stage_files_reports_failure_without_a_false_success_for_a_vanished_path() {
+    let repo_dir = init_repo("stage-vanished");
+    write_file(repo_dir.path(), "a.txt", "hello\n");
+    commit_all(repo_dir.path(), "first commit");
+
+    let provider = provider();
+    let repo = provider.discover(repo_dir.path()).unwrap();
+
+    let err = provider
+        .stage_files(&repo, &[PathBuf::from("never-existed.txt")])
+        .expect_err("staging a path that never existed must fail, not silently succeed");
+
+    assert_eq!(err.code(), ErrorCode::ProcessFailure);
+}
+
+#[test]
+fn unstage_files_preserves_working_tree_content() {
+    let repo_dir = init_repo("unstage-preserve");
+    write_file(repo_dir.path(), "a.txt", "original\n");
+    commit_all(repo_dir.path(), "first commit");
+
+    write_file(repo_dir.path(), "a.txt", "staged change\n");
+    git(repo_dir.path(), &["add", "a.txt"]);
+
+    let provider = provider();
+    let repo = provider.discover(repo_dir.path()).unwrap();
+    provider
+        .unstage_files(&repo, &[PathBuf::from("a.txt")])
+        .expect("unstage should succeed");
+
+    let status = provider.status(&repo).unwrap();
+    assert_eq!(status.files.len(), 1);
+    assert_eq!(status.files[0].index_status, FileStatusCode::Unmodified);
+    assert_eq!(status.files[0].worktree_status, FileStatusCode::Modified);
+    let contents = std::fs::read_to_string(repo_dir.path().join("a.txt")).unwrap();
+    assert_eq!(contents, "staged change\n", "unstage must not touch the working tree");
+}
+
+#[test]
+fn unstage_files_works_before_the_first_commit() {
+    let repo_dir = init_repo("unstage-unborn");
+    write_file(repo_dir.path(), "a.txt", "hello\n");
+    git(repo_dir.path(), &["add", "a.txt"]);
+
+    let provider = provider();
+    let repo = provider.discover(repo_dir.path()).unwrap();
+    provider
+        .unstage_files(&repo, &[PathBuf::from("a.txt")])
+        .expect("unstage on an unborn branch should succeed");
+
+    let status = provider.status(&repo).unwrap();
+    assert_eq!(status.files.len(), 1);
+    assert_eq!(status.files[0].change_type, ChangeType::Untracked);
+    assert!(repo_dir.path().join("a.txt").exists());
+}
+
+#[test]
+fn unstage_files_fully_unstages_a_rename_selected_by_only_the_new_path() {
+    let repo_dir = init_repo("unstage-rename");
+    write_file(repo_dir.path(), "old.txt", "content\n");
+    commit_all(repo_dir.path(), "first commit");
+    git(repo_dir.path(), &["mv", "old.txt", "new.txt"]);
+
+    let provider = provider();
+    let repo = provider.discover(repo_dir.path()).unwrap();
+    let before = provider.status(&repo).unwrap();
+    assert_eq!(before.files[0].change_type, ChangeType::Renamed);
+
+    provider
+        .unstage_files(&repo, &[PathBuf::from("new.txt")])
+        .expect("unstage should succeed even selecting only the rename's new path");
+
+    let status = provider.status(&repo).unwrap();
+    let by_path = |name: &str| status.files.iter().find(|f| f.path == Path::new(name));
+
+    let old = by_path("old.txt").expect("old.txt must be reported once fully unstaged");
+    assert_eq!(old.index_status, FileStatusCode::Unmodified, "old.txt's index must fully match HEAD again, not stay staged as removed");
+    assert_eq!(old.worktree_status, FileStatusCode::Deleted);
+    let new = by_path("new.txt").expect("new.txt should be untracked again");
+    assert_eq!(new.change_type, ChangeType::Untracked);
+}
+
+// ---------------------------------------------------------------------
+// Commit from the index (US-012).
+// ---------------------------------------------------------------------
+
+#[test]
+fn create_commit_returns_the_new_hash_and_advances_head() {
+    let repo_dir = init_repo("commit-success");
+    write_file(repo_dir.path(), "a.txt", "hello\n");
+
+    let provider = provider();
+    let repo = provider.discover(repo_dir.path()).unwrap();
+    provider.stage_files(&repo, &[PathBuf::from("a.txt")]).unwrap();
+
+    let hash = provider
+        .create_commit(&repo, "first commit")
+        .expect("commit should succeed");
+
+    let head = head_commit_hash(repo_dir.path());
+    assert_eq!(hash, head);
+    let status = provider.status(&repo).unwrap();
+    assert!(status.is_clean());
+}
+
+#[test]
+fn create_commit_rejects_an_empty_index_without_creating_a_commit() {
+    let repo_dir = init_repo("commit-empty");
+    write_file(repo_dir.path(), "a.txt", "hello\n");
+    commit_all(repo_dir.path(), "first commit");
+    let before = head_commit_hash(repo_dir.path());
+
+    let provider = provider();
+    let repo = provider.discover(repo_dir.path()).unwrap();
+
+    let err = provider
+        .create_commit(&repo, "should not be created")
+        .expect_err("an empty index must never be committed implicitly");
+
+    assert_eq!(err.code(), ErrorCode::InvalidRepositoryState);
+    assert_eq!(head_commit_hash(repo_dir.path()), before);
+}
+
+#[cfg(unix)]
+#[test]
+fn create_commit_on_hook_failure_preserves_the_staged_index() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let repo_dir = init_repo("commit-hook-failure");
+    let hooks_dir = repo_dir.path().join(".git").join("hooks");
+    std::fs::create_dir_all(&hooks_dir).unwrap();
+    let hook_path = hooks_dir.join("pre-commit");
+    std::fs::write(&hook_path, "#!/bin/sh\necho blocked by hook >&2\nexit 1\n").unwrap();
+    let mut perms = std::fs::metadata(&hook_path).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&hook_path, perms).unwrap();
+
+    write_file(repo_dir.path(), "a.txt", "hello\n");
+    let provider = provider();
+    let repo = provider.discover(repo_dir.path()).unwrap();
+    provider.stage_files(&repo, &[PathBuf::from("a.txt")]).unwrap();
+
+    let err = provider
+        .create_commit(&repo, "blocked")
+        .expect_err("a failing pre-commit hook must fail the commit");
+
+    assert_eq!(err.code(), ErrorCode::ProcessFailure);
+    assert!(err.diagnostic().unwrap().to_string().contains("blocked by hook"));
+
+    let status = provider.status(&repo).unwrap();
+    assert_eq!(status.files[0].index_status, FileStatusCode::Added, "the staged work must survive a failed commit");
+}
+
+// ---------------------------------------------------------------------
+// Staged diff (`git diff --cached`), needed to unstage by hunk.
+// ---------------------------------------------------------------------
+
+#[test]
+fn staged_diff_compares_the_index_against_head_independent_of_the_working_tree() {
+    let repo_dir = init_repo("staged-diff");
+    write_file(repo_dir.path(), "a.txt", "one\ntwo\nthree\n");
+    commit_all(repo_dir.path(), "first commit");
+
+    write_file(repo_dir.path(), "a.txt", "one\nTWO\nthree\n");
+    git(repo_dir.path(), &["add", "a.txt"]);
+    // Further unstaged change on top of the staged one.
+    write_file(repo_dir.path(), "a.txt", "one\nTWO\nTHREE\n");
+
+    let provider = provider();
+    let repo = provider.discover(repo_dir.path()).unwrap();
+
+    let staged = provider.diff(&repo, &staged_diff_request()).unwrap();
+    assert_eq!(staged.files.len(), 1);
+    let staged_lines: Vec<_> = staged.files[0]
+        .hunks
+        .iter()
+        .flat_map(|h| h.lines.iter())
+        .filter(|l| l.origin != DiffLineOrigin::Context)
+        .map(|l| l.content.clone())
+        .collect();
+    assert_eq!(staged_lines, vec!["two".to_string(), "TWO".to_string()]);
+
+    let unstaged = provider.diff(&repo, &unstaged_diff_request()).unwrap();
+    let unstaged_lines: Vec<_> = unstaged.files[0]
+        .hunks
+        .iter()
+        .flat_map(|h| h.lines.iter())
+        .filter(|l| l.origin != DiffLineOrigin::Context)
+        .map(|l| l.content.clone())
+        .collect();
+    assert_eq!(unstaged_lines, vec!["three".to_string(), "THREE".to_string()]);
+}
+
+// ---------------------------------------------------------------------
+// Stage / unstage by hunk (US-013).
+// ---------------------------------------------------------------------
+
+/// 20 lines, so two edits far apart from each other produce two disjoint
+/// `-U3` hunks rather than merging into one.
+fn twenty_lines() -> String {
+    (1..=20).map(|n| format!("l{n}\n")).collect()
+}
+
+fn two_far_apart_edits() -> String {
+    let mut lines: Vec<String> = (1..=20).map(|n| format!("l{n}")).collect();
+    lines[2] = "L3-changed".to_string();
+    lines[16] = "L17-changed".to_string();
+    lines.join("\n") + "\n"
+}
+
+#[test]
+fn stage_hunks_stages_only_the_selected_hunk() {
+    let repo_dir = init_repo("stage-hunk-selected");
+    write_file(repo_dir.path(), "a.txt", &twenty_lines());
+    commit_all(repo_dir.path(), "first commit");
+    write_file(repo_dir.path(), "a.txt", &two_far_apart_edits());
+
+    let provider = provider();
+    let repo = provider.discover(repo_dir.path()).unwrap();
+    let diff = provider.diff(&repo, &unstaged_diff_request()).unwrap();
+    assert_eq!(diff.files.len(), 1);
+    assert_eq!(diff.files[0].hunks.len(), 2, "the fixture must produce two disjoint hunks");
+
+    let first_hunk_only = FileDiff {
+        hunks: vec![diff.files[0].hunks[0].clone()],
+        ..diff.files[0].clone()
+    };
+    provider
+        .stage_hunks(&repo, &[first_hunk_only])
+        .expect("staging a single known-good hunk should succeed");
+
+    let staged = provider.diff(&repo, &staged_diff_request()).unwrap();
+    assert_eq!(staged.files[0].hunks.len(), 1);
+    assert!(staged.files[0]
+        .hunks
+        .iter()
+        .flat_map(|h| &h.lines)
+        .any(|l| l.content == "L3-changed"));
+
+    let remaining_unstaged = provider.diff(&repo, &unstaged_diff_request()).unwrap();
+    assert_eq!(remaining_unstaged.files[0].hunks.len(), 1);
+    assert!(remaining_unstaged.files[0]
+        .hunks
+        .iter()
+        .flat_map(|h| &h.lines)
+        .any(|l| l.content == "L17-changed"));
+}
+
+#[test]
+fn unstage_hunks_unstages_only_the_selected_hunk() {
+    let repo_dir = init_repo("unstage-hunk-selected");
+    write_file(repo_dir.path(), "a.txt", &twenty_lines());
+    commit_all(repo_dir.path(), "first commit");
+    write_file(repo_dir.path(), "a.txt", &two_far_apart_edits());
+    git(repo_dir.path(), &["add", "a.txt"]);
+
+    let provider = provider();
+    let repo = provider.discover(repo_dir.path()).unwrap();
+    let staged = provider.diff(&repo, &staged_diff_request()).unwrap();
+    assert_eq!(staged.files[0].hunks.len(), 2);
+
+    let first_hunk_only = FileDiff {
+        hunks: vec![staged.files[0].hunks[0].clone()],
+        ..staged.files[0].clone()
+    };
+    provider
+        .unstage_hunks(&repo, &[first_hunk_only])
+        .expect("unstaging a single known-good hunk should succeed");
+
+    let remaining_staged = provider.diff(&repo, &staged_diff_request()).unwrap();
+    assert_eq!(remaining_staged.files[0].hunks.len(), 1);
+    assert!(remaining_staged.files[0]
+        .hunks
+        .iter()
+        .flat_map(|h| &h.lines)
+        .any(|l| l.content == "L17-changed"));
+
+    let unstaged_again = provider.diff(&repo, &unstaged_diff_request()).unwrap();
+    assert_eq!(unstaged_again.files[0].hunks.len(), 1);
+    assert!(unstaged_again.files[0]
+        .hunks
+        .iter()
+        .flat_map(|h| &h.lines)
+        .any(|l| l.content == "L3-changed"));
+}
+
+#[test]
+fn stage_hunks_rejects_a_stale_selection_as_operation_conflict() {
+    let repo_dir = init_repo("stage-hunk-stale");
+    write_file(repo_dir.path(), "a.txt", &twenty_lines());
+    commit_all(repo_dir.path(), "first commit");
+    write_file(repo_dir.path(), "a.txt", &two_far_apart_edits());
+
+    let provider = provider();
+    let repo = provider.discover(repo_dir.path()).unwrap();
+    let diff = provider.diff(&repo, &unstaged_diff_request()).unwrap();
+    let stale_hunk = FileDiff {
+        hunks: vec![diff.files[0].hunks[0].clone()],
+        ..diff.files[0].clone()
+    };
+
+    // Another terminal/session stages a conflicting change to the exact
+    // same region before this selection is applied.
+    let mut lines: Vec<String> = (1..=20).map(|n| format!("l{n}")).collect();
+    lines[2] = "someone-elses-change".to_string();
+    write_file(repo_dir.path(), "a.txt", &(lines.join("\n") + "\n"));
+    git(repo_dir.path(), &["add", "a.txt"]);
+    // Restore the working tree to what the stale selection still expects,
+    // so only the *index* has diverged from the fetched diff.
+    write_file(repo_dir.path(), "a.txt", &two_far_apart_edits());
+
+    let err = provider
+        .stage_hunks(&repo, &[stale_hunk])
+        .expect_err("a hunk whose context no longer matches the index must not apply blindly");
+
+    assert_eq!(err.code(), ErrorCode::OperationConflict);
+}
+
+#[test]
+fn stage_hunks_rejects_binary_files() {
+    let repo_dir = init_repo("stage-hunk-binary-guard");
+    let provider = provider();
+    let repo = provider.discover(repo_dir.path()).unwrap();
+
+    let binary = FileDiff {
+        path: PathBuf::from("image.png"),
+        previous_path: None,
+        change_type: ChangeType::Modified,
+        is_binary: true,
+        hunks: vec![DiffHunk {
+            old_start: 1,
+            old_lines: 1,
+            new_start: 1,
+            new_lines: 1,
+            lines: vec![DiffLine {
+                origin: DiffLineOrigin::Context,
+                content: String::new(),
+            }],
+        }],
+    };
+
+    let err = provider
+        .stage_hunks(&repo, &[binary])
+        .expect_err("hunk-level staging must reject binary files rather than corrupt them");
+
+    assert_eq!(err.code(), ErrorCode::InvalidRepositoryState);
 }

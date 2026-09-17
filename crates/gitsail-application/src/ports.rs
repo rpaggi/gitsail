@@ -37,10 +37,16 @@ pub struct CommitQuery {
 /// `from`/`to` of `None` mean "working tree"/"index" respectively, matching
 /// how `git diff` treats missing revisions; the exact resolution is an
 /// adapter concern, not something this port dictates.
+///
+/// `staged: true` instead compares the index against a tree (`from`,
+/// defaulting to `HEAD`; `to` is not meaningful in this mode and must be
+/// `None`), i.e. `git diff --cached` — the diff hunk-level staging (US-013)
+/// unstages against, since that is not expressible with `from`/`to` alone.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DiffRequest {
     pub from: Option<CommitHash>,
     pub to: Option<CommitHash>,
+    pub staged: bool,
     pub path_filter: Option<PathBuf>,
     pub context_lines: Option<u32>,
 }
