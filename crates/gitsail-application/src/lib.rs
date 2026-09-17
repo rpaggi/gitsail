@@ -17,4 +17,7 @@ pub use use_cases::{
     OpenRepository,
 };
 pub use write_ports::RepositoryWritePort;
-pub use write_use_cases::{CreateCommit, StageFiles, StageHunks, UnstageFiles, UnstageHunks};
+pub use write_use_cases::{
+    CreateBranch, CreateCommit, DeleteBranch, StageFiles, StageHunks, SwitchBranch, UnstageFiles,
+    UnstageHunks,
+};

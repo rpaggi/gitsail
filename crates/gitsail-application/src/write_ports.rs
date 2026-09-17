@@ -16,7 +16,7 @@
 
 use std::path::PathBuf;
 
-use gitsail_domain::{CommitHash, FileDiff, GitSailError, Repository};
+use gitsail_domain::{BranchName, CommitHash, FileDiff, GitSailError, Repository};
 
 /// Mutation capability against a Git repository's index and history
 /// (SAD §9's v0.2/v0.3 mutation use cases; ADR-009).
@@ -46,4 +46,40 @@ pub trait RepositoryWritePort {
     /// of the staged diff), leaving the working tree untouched and the rest
     /// of the index intact.
     fn unstage_hunks(&self, repo: &Repository, selection: &[FileDiff]) -> Result<(), GitSailError>;
+
+    /// Switches HEAD (and the working tree/index) to `target`. Refuses,
+    /// rather than discarding, when the switch would overwrite local
+    /// changes incompatible with `target` (US-021 criteria 2, 3). Whether
+    /// the destination and any at-risk local changes are surfaced to the
+    /// person *before* this call is a presentation-layer concern (US-021
+    /// criterion 1) outside this port's contract; this call only guarantees
+    /// that an incompatible switch never silently discards work.
+    fn switch_branch(&self, repo: &Repository, target: &BranchName) -> Result<(), GitSailError>;
+
+    /// Creates a local branch named `name`, pointing at `start_point` (or
+    /// the current `HEAD` when `None`). Never switches to it and never
+    /// overwrites an existing branch of the same name (US-022 criteria 2,
+    /// 3).
+    fn create_branch(
+        &self,
+        repo: &Repository,
+        name: &BranchName,
+        start_point: Option<&CommitHash>,
+    ) -> Result<(), GitSailError>;
+
+    /// Deletes the local branch `name`. With `force: false` (the default a
+    /// caller should offer), refuses to delete a branch with unmerged
+    /// commits rather than discarding them implicitly (US-023 criterion 3);
+    /// `force: true` deletes regardless. Always refuses to delete the
+    /// current branch or one checked out in another worktree (US-023
+    /// criterion 2) — Git enforces this itself, so this port only surfaces
+    /// it as a clear, classified error rather than an opaque process
+    /// failure. Confirming the branch and scope with the person before
+    /// calling this (US-023 criterion 1) is a presentation-layer concern.
+    fn delete_branch(
+        &self,
+        repo: &Repository,
+        name: &BranchName,
+        force: bool,
+    ) -> Result<(), GitSailError>;
 }

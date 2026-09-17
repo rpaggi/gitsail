@@ -10,8 +10,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use gitsail_application::{CommitQuery, DiffRequest, RepositoryReadPort, RepositoryWritePort};
 use gitsail_domain::{
-    BranchKind, ChangeType, CommitHash, Decoration, DiffHunk, DiffLine, DiffLineOrigin, ErrorCode,
-    FileDiff, FileStatusCode, HeadState,
+    BranchKind, BranchName, ChangeType, CommitHash, Decoration, DiffHunk, DiffLine, DiffLineOrigin,
+    ErrorCode, FileDiff, FileStatusCode, HeadState,
 };
 use gitsail_git::{GitCliProvider, GitProcessRunner, GitProcessRunnerConfig};
 
@@ -448,6 +448,95 @@ fn lists_multiple_local_branches_with_the_current_one_marked() {
         .map(|b| b.name.as_str())
         .collect();
     assert_eq!(current, vec!["main"]);
+}
+
+#[test]
+fn branches_on_an_unborn_repository_is_empty() {
+    let repo_dir = init_repo("unborn-branches");
+    let provider = provider();
+    let repo = provider.discover(repo_dir.path()).unwrap();
+
+    let branches = provider
+        .branches(&repo)
+        .expect("branches should succeed (as an empty list) on an unborn repository");
+
+    assert!(branches.is_empty(), "an unborn repository must not report a fictitious branch");
+}
+
+#[test]
+fn branches_while_detached_report_no_current_branch() {
+    let repo_dir = init_repo("detached-branches");
+    write_file(repo_dir.path(), "a.txt", "hello\n");
+    commit_all(repo_dir.path(), "first commit");
+    let target = head_commit_hash(repo_dir.path());
+    git(repo_dir.path(), &["checkout", "--quiet", target.as_str()]);
+
+    let provider = provider();
+    let repo = provider.discover(repo_dir.path()).unwrap();
+
+    let branches = provider
+        .branches(&repo)
+        .expect("branches should succeed while detached");
+
+    assert!(branches.iter().any(|b| b.name.as_str() == "main"));
+    assert!(
+        branches.iter().all(|b| !b.is_current),
+        "a detached HEAD must not mark any branch as current"
+    );
+}
+
+#[test]
+fn branches_report_upstream_and_ahead_behind_when_calculable_and_absence_differs_from_zero() {
+    let remote_dir = init_bare_repo("branch-upstream-remote");
+    let repo_dir = init_repo("branch-upstream-local");
+    write_file(repo_dir.path(), "a.txt", "hello\n");
+    commit_all(repo_dir.path(), "commit a");
+    let commit_a = head_commit_hash(repo_dir.path());
+    git(
+        repo_dir.path(),
+        &["remote", "add", "origin", remote_dir.path().to_str().unwrap()],
+    );
+    git(repo_dir.path(), &["push", "--quiet", "-u", "origin", "main"]);
+    // A local-only branch, deliberately left without an upstream.
+    git(repo_dir.path(), &["branch", "feature", commit_a.as_str()]);
+
+    let provider = provider();
+    let repo = provider.discover(repo_dir.path()).unwrap();
+    let branches = provider.branches(&repo).expect("branches should succeed");
+
+    let main = branches.iter().find(|b| b.name.as_str() == "main").unwrap();
+    assert_eq!(
+        main.upstream.as_ref().map(BranchName::as_str),
+        Some("origin/main")
+    );
+    assert_eq!((main.ahead, main.behind), (0, 0));
+
+    let feature = branches.iter().find(|b| b.name.as_str() == "feature").unwrap();
+    assert_eq!(
+        feature.upstream, None,
+        "a branch with no upstream must report None, not merely 0/0 ahead/behind"
+    );
+    assert_eq!((feature.ahead, feature.behind), (0, 0));
+
+    // Push a second commit so the remote-tracking ref moves past commit a.
+    write_file(repo_dir.path(), "a.txt", "hello again\n");
+    commit_all(repo_dir.path(), "commit b (pushed)");
+    git(repo_dir.path(), &["push", "--quiet"]);
+
+    // Reset the local branch back to commit a without touching the
+    // remote-tracking ref: `main` is now purely behind its upstream.
+    git(repo_dir.path(), &["reset", "--quiet", "--hard", commit_a.as_str()]);
+    let branches = provider.branches(&repo).unwrap();
+    let main = branches.iter().find(|b| b.name.as_str() == "main").unwrap();
+    assert_eq!((main.ahead, main.behind), (0, 1));
+
+    // A new, unpushed commit from commit a diverges from the pushed commit
+    // b: `main` is now both ahead and behind.
+    write_file(repo_dir.path(), "a.txt", "a different local history\n");
+    commit_all(repo_dir.path(), "commit c (diverges from pushed commit b)");
+    let branches = provider.branches(&repo).unwrap();
+    let main = branches.iter().find(|b| b.name.as_str() == "main").unwrap();
+    assert_eq!((main.ahead, main.behind), (1, 1));
 }
 
 // ---------------------------------------------------------------------
@@ -1502,4 +1591,197 @@ fn stage_hunks_rejects_binary_files() {
         .expect_err("hunk-level staging must reject binary files rather than corrupt them");
 
     assert_eq!(err.code(), ErrorCode::InvalidRepositoryState);
+}
+
+// ---------------------------------------------------------------------
+// Switch branch (US-021).
+// ---------------------------------------------------------------------
+
+#[test]
+fn switch_branch_updates_head_to_the_target_branch() {
+    let repo_dir = init_repo("switch-branch-success");
+    write_file(repo_dir.path(), "a.txt", "hello\n");
+    commit_all(repo_dir.path(), "first commit");
+    git(repo_dir.path(), &["branch", "feature"]);
+
+    let provider = provider();
+    let repo = provider.discover(repo_dir.path()).unwrap();
+
+    provider
+        .switch_branch(&repo, &BranchName::new("feature").unwrap())
+        .expect("switch should succeed with no conflicting local changes");
+
+    let repo_after = provider.discover(repo_dir.path()).unwrap();
+    assert_eq!(
+        repo_after.current_branch.as_ref().map(BranchName::as_str),
+        Some("feature")
+    );
+}
+
+#[test]
+fn switch_branch_refuses_to_discard_conflicting_local_changes() {
+    let repo_dir = init_repo("switch-branch-conflict");
+    write_file(repo_dir.path(), "a.txt", "content on main\n");
+    commit_all(repo_dir.path(), "first commit on main");
+    git(repo_dir.path(), &["checkout", "--quiet", "-b", "feature"]);
+    write_file(repo_dir.path(), "a.txt", "content on feature\n");
+    commit_all(repo_dir.path(), "diverging commit on feature");
+    git(repo_dir.path(), &["checkout", "--quiet", "main"]);
+    write_file(repo_dir.path(), "a.txt", "uncommitted local edit\n");
+
+    let provider = provider();
+    let repo = provider.discover(repo_dir.path()).unwrap();
+
+    let err = provider
+        .switch_branch(&repo, &BranchName::new("feature").unwrap())
+        .expect_err("switch must refuse rather than discard the uncommitted edit");
+
+    assert_eq!(err.code(), ErrorCode::OperationConflict);
+    let repo_after = provider.discover(repo_dir.path()).unwrap();
+    assert_eq!(
+        repo_after.current_branch.as_ref().map(BranchName::as_str),
+        Some("main"),
+        "a refused switch must leave HEAD on the original branch"
+    );
+    let content = std::fs::read_to_string(repo_dir.path().join("a.txt")).unwrap();
+    assert_eq!(
+        content, "uncommitted local edit\n",
+        "a refused switch must preserve the uncommitted local edit"
+    );
+}
+
+// ---------------------------------------------------------------------
+// Create branch (US-022).
+// ---------------------------------------------------------------------
+
+#[test]
+fn create_branch_points_at_the_given_start_point_without_switching() {
+    let repo_dir = init_repo("create-branch-start-point");
+    write_file(repo_dir.path(), "a.txt", "hello\n");
+    commit_all(repo_dir.path(), "first commit");
+    let commit_a = head_commit_hash(repo_dir.path());
+    write_file(repo_dir.path(), "a.txt", "hello again\n");
+    commit_all(repo_dir.path(), "second commit");
+
+    let provider = provider();
+    let repo = provider.discover(repo_dir.path()).unwrap();
+
+    provider
+        .create_branch(&repo, &BranchName::new("feature").unwrap(), Some(&commit_a))
+        .expect("create should succeed for an explicit, existing start point");
+
+    let repo_after = provider.discover(repo_dir.path()).unwrap();
+    assert_eq!(
+        repo_after.current_branch.as_ref().map(BranchName::as_str),
+        Some("main"),
+        "creating a branch must not switch to it"
+    );
+
+    let branches = provider.branches(&repo_after).unwrap();
+    let feature = branches
+        .iter()
+        .find(|b| b.name.as_str() == "feature")
+        .expect("the new branch should be listed");
+    assert_eq!(feature.target, commit_a);
+}
+
+#[test]
+fn create_branch_rejects_an_existing_name_without_overwriting_it() {
+    let repo_dir = init_repo("create-branch-collision");
+    write_file(repo_dir.path(), "a.txt", "hello\n");
+    commit_all(repo_dir.path(), "first commit");
+    let commit_a = head_commit_hash(repo_dir.path());
+    git(repo_dir.path(), &["branch", "feature"]);
+    write_file(repo_dir.path(), "a.txt", "hello again\n");
+    commit_all(repo_dir.path(), "second commit");
+    let commit_b = head_commit_hash(repo_dir.path());
+
+    let provider = provider();
+    let repo = provider.discover(repo_dir.path()).unwrap();
+
+    let err = provider
+        .create_branch(&repo, &BranchName::new("feature").unwrap(), Some(&commit_b))
+        .expect_err("must refuse to overwrite an existing branch");
+
+    assert_eq!(err.code(), ErrorCode::InvalidRepositoryState);
+    let branches = provider.branches(&repo).unwrap();
+    let feature = branches.iter().find(|b| b.name.as_str() == "feature").unwrap();
+    assert_eq!(
+        feature.target, commit_a,
+        "the existing branch must still point at its original commit"
+    );
+}
+
+// ---------------------------------------------------------------------
+// Delete branch (US-023).
+// ---------------------------------------------------------------------
+
+#[test]
+fn delete_branch_removes_a_merged_local_branch() {
+    let repo_dir = init_repo("delete-branch-merged");
+    write_file(repo_dir.path(), "a.txt", "hello\n");
+    commit_all(repo_dir.path(), "first commit");
+    git(repo_dir.path(), &["branch", "feature"]);
+
+    let provider = provider();
+    let repo = provider.discover(repo_dir.path()).unwrap();
+
+    provider
+        .delete_branch(&repo, &BranchName::new("feature").unwrap(), false)
+        .expect("deleting a fully-merged branch should succeed");
+
+    let branches = provider.branches(&repo).unwrap();
+    assert!(!branches.iter().any(|b| b.name.as_str() == "feature"));
+}
+
+#[test]
+fn delete_branch_refuses_the_current_branch() {
+    let repo_dir = init_repo("delete-branch-current");
+    write_file(repo_dir.path(), "a.txt", "hello\n");
+    commit_all(repo_dir.path(), "first commit");
+
+    let provider = provider();
+    let repo = provider.discover(repo_dir.path()).unwrap();
+
+    let err = provider
+        .delete_branch(&repo, &BranchName::new("main").unwrap(), false)
+        .expect_err("must refuse to delete the currently checked out branch");
+
+    assert_eq!(err.code(), ErrorCode::InvalidRepositoryState);
+    let branches = provider.branches(&repo).unwrap();
+    assert!(
+        branches.iter().any(|b| b.name.as_str() == "main"),
+        "the current branch must not have been removed"
+    );
+}
+
+#[test]
+fn delete_branch_refuses_unmerged_commits_without_force_but_allows_with_force() {
+    let repo_dir = init_repo("delete-branch-unmerged");
+    write_file(repo_dir.path(), "a.txt", "hello\n");
+    commit_all(repo_dir.path(), "first commit");
+    git(repo_dir.path(), &["checkout", "--quiet", "-b", "feature"]);
+    write_file(repo_dir.path(), "a.txt", "unmerged change\n");
+    commit_all(repo_dir.path(), "unmerged commit on feature");
+    git(repo_dir.path(), &["checkout", "--quiet", "main"]);
+
+    let provider = provider();
+    let repo = provider.discover(repo_dir.path()).unwrap();
+
+    let err = provider
+        .delete_branch(&repo, &BranchName::new("feature").unwrap(), false)
+        .expect_err("must refuse to silently discard unmerged commits");
+    assert_eq!(err.code(), ErrorCode::OperationConflict);
+
+    let branches = provider.branches(&repo).unwrap();
+    assert!(
+        branches.iter().any(|b| b.name.as_str() == "feature"),
+        "the unmerged branch must survive a refused delete"
+    );
+
+    provider
+        .delete_branch(&repo, &BranchName::new("feature").unwrap(), true)
+        .expect("force delete should still be possible for an unmerged branch");
+    let branches = provider.branches(&repo).unwrap();
+    assert!(!branches.iter().any(|b| b.name.as_str() == "feature"));
 }

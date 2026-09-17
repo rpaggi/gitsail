@@ -6,7 +6,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use gitsail_domain::{CommitHash, FileDiff, GitSailError, Repository};
+use gitsail_domain::{BranchName, CommitHash, FileDiff, GitSailError, Repository};
 
 use crate::write_ports::RepositoryWritePort;
 
@@ -80,6 +80,53 @@ impl UnstageHunks {
     }
 }
 
+pub struct SwitchBranch {
+    port: Arc<dyn RepositoryWritePort>,
+}
+
+impl SwitchBranch {
+    pub fn new(port: Arc<dyn RepositoryWritePort>) -> Self {
+        Self { port }
+    }
+
+    pub fn execute(&self, repo: &Repository, target: &BranchName) -> Result<(), GitSailError> {
+        self.port.switch_branch(repo, target)
+    }
+}
+
+pub struct CreateBranch {
+    port: Arc<dyn RepositoryWritePort>,
+}
+
+impl CreateBranch {
+    pub fn new(port: Arc<dyn RepositoryWritePort>) -> Self {
+        Self { port }
+    }
+
+    pub fn execute(
+        &self,
+        repo: &Repository,
+        name: &BranchName,
+        start_point: Option<&CommitHash>,
+    ) -> Result<(), GitSailError> {
+        self.port.create_branch(repo, name, start_point)
+    }
+}
+
+pub struct DeleteBranch {
+    port: Arc<dyn RepositoryWritePort>,
+}
+
+impl DeleteBranch {
+    pub fn new(port: Arc<dyn RepositoryWritePort>) -> Self {
+        Self { port }
+    }
+
+    pub fn execute(&self, repo: &Repository, name: &BranchName, force: bool) -> Result<(), GitSailError> {
+        self.port.delete_branch(repo, name, force)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -99,6 +146,9 @@ mod tests {
         received_commit_message: Mutex<Option<String>>,
         received_stage_hunks: Mutex<Option<Vec<FileDiff>>>,
         received_unstage_hunks: Mutex<Option<Vec<FileDiff>>>,
+        received_switch_target: Mutex<Option<BranchName>>,
+        received_create_branch: Mutex<Option<(BranchName, Option<CommitHash>)>>,
+        received_delete_branch: Mutex<Option<(BranchName, bool)>>,
     }
 
     impl FakeWritePort {
@@ -111,6 +161,9 @@ mod tests {
                 received_commit_message: Mutex::new(None),
                 received_stage_hunks: Mutex::new(None),
                 received_unstage_hunks: Mutex::new(None),
+                received_switch_target: Mutex::new(None),
+                received_create_branch: Mutex::new(None),
+                received_delete_branch: Mutex::new(None),
             }
         }
 
@@ -174,6 +227,50 @@ mod tests {
             *self.received_unstage_hunks.lock().unwrap() = Some(selection.to_vec());
             if self.fail {
                 return Err(GitSailError::new(ErrorCode::OperationConflict, "stale diff"));
+            }
+            Ok(())
+        }
+
+        fn switch_branch(&self, _repo: &Repository, target: &BranchName) -> Result<(), GitSailError> {
+            *self.received_switch_target.lock().unwrap() = Some(target.clone());
+            if self.fail {
+                return Err(GitSailError::new(
+                    ErrorCode::OperationConflict,
+                    "would overwrite local changes",
+                ));
+            }
+            Ok(())
+        }
+
+        fn create_branch(
+            &self,
+            _repo: &Repository,
+            name: &BranchName,
+            start_point: Option<&CommitHash>,
+        ) -> Result<(), GitSailError> {
+            *self.received_create_branch.lock().unwrap() =
+                Some((name.clone(), start_point.cloned()));
+            if self.fail {
+                return Err(GitSailError::new(
+                    ErrorCode::InvalidRepositoryState,
+                    "already exists",
+                ));
+            }
+            Ok(())
+        }
+
+        fn delete_branch(
+            &self,
+            _repo: &Repository,
+            name: &BranchName,
+            force: bool,
+        ) -> Result<(), GitSailError> {
+            *self.received_delete_branch.lock().unwrap() = Some((name.clone(), force));
+            if self.fail {
+                return Err(GitSailError::new(
+                    ErrorCode::OperationConflict,
+                    "not fully merged",
+                ));
             }
             Ok(())
         }
@@ -287,5 +384,83 @@ mod tests {
             *port.received_unstage_hunks.lock().unwrap(),
             Some(selection)
         );
+    }
+
+    #[test]
+    fn switch_branch_delegates_to_port() {
+        let port = Arc::new(FakeWritePort::new());
+        let use_case = SwitchBranch::new(port.clone());
+        let target = BranchName::new("feature").unwrap();
+
+        use_case.execute(&sample_repository(), &target).unwrap();
+
+        assert_eq!(*port.received_switch_target.lock().unwrap(), Some(target));
+    }
+
+    #[test]
+    fn switch_branch_propagates_port_error_without_a_false_success() {
+        let port = Arc::new(FakeWritePort::failing());
+        let use_case = SwitchBranch::new(port);
+
+        let err = use_case
+            .execute(&sample_repository(), &BranchName::new("feature").unwrap())
+            .unwrap_err();
+
+        assert_eq!(err.code(), ErrorCode::OperationConflict);
+    }
+
+    #[test]
+    fn create_branch_delegates_to_port_with_start_point() {
+        let port = Arc::new(FakeWritePort::new());
+        let use_case = CreateBranch::new(port.clone());
+        let name = BranchName::new("feature").unwrap();
+        let start_point = CommitHash::new("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef").unwrap();
+
+        use_case
+            .execute(&sample_repository(), &name, Some(&start_point))
+            .unwrap();
+
+        assert_eq!(
+            *port.received_create_branch.lock().unwrap(),
+            Some((name, Some(start_point)))
+        );
+    }
+
+    #[test]
+    fn create_branch_propagates_port_error_on_name_collision() {
+        let port = Arc::new(FakeWritePort::failing());
+        let use_case = CreateBranch::new(port);
+
+        let err = use_case
+            .execute(&sample_repository(), &BranchName::new("main").unwrap(), None)
+            .unwrap_err();
+
+        assert_eq!(err.code(), ErrorCode::InvalidRepositoryState);
+    }
+
+    #[test]
+    fn delete_branch_delegates_to_port_with_force_flag() {
+        let port = Arc::new(FakeWritePort::new());
+        let use_case = DeleteBranch::new(port.clone());
+        let name = BranchName::new("feature").unwrap();
+
+        use_case.execute(&sample_repository(), &name, true).unwrap();
+
+        assert_eq!(
+            *port.received_delete_branch.lock().unwrap(),
+            Some((name, true))
+        );
+    }
+
+    #[test]
+    fn delete_branch_propagates_port_error_without_a_false_success() {
+        let port = Arc::new(FakeWritePort::failing());
+        let use_case = DeleteBranch::new(port);
+
+        let err = use_case
+            .execute(&sample_repository(), &BranchName::new("feature").unwrap(), false)
+            .unwrap_err();
+
+        assert_eq!(err.code(), ErrorCode::OperationConflict);
     }
 }

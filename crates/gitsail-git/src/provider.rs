@@ -516,6 +516,46 @@ impl RepositoryWritePort for GitCliProvider {
         require_worktree(repo, "unstage hunks")?;
         self.apply_hunk_selection(repo, selection, ApplyDirection::Reverse)
     }
+
+    fn switch_branch(&self, repo: &Repository, target: &BranchName) -> Result<(), GitSailError> {
+        require_worktree(repo, "switch branch")?;
+        let args = vec!["switch".to_string(), target.as_str().to_string()];
+        self.run(args, &repo.root_path)
+            .map_err(classify_switch_failure)?;
+        Ok(())
+    }
+
+    fn create_branch(
+        &self,
+        repo: &Repository,
+        name: &BranchName,
+        start_point: Option<&CommitHash>,
+    ) -> Result<(), GitSailError> {
+        let mut args = vec!["branch".to_string(), name.as_str().to_string()];
+        if let Some(start) = start_point {
+            args.push(start.as_str().to_string());
+        }
+        self.run(args, &repo.root_path)
+            .map_err(classify_create_branch_failure)?;
+        Ok(())
+    }
+
+    fn delete_branch(
+        &self,
+        repo: &Repository,
+        name: &BranchName,
+        force: bool,
+    ) -> Result<(), GitSailError> {
+        let flag = if force { "-D" } else { "-d" };
+        let args = vec![
+            "branch".to_string(),
+            flag.to_string(),
+            name.as_str().to_string(),
+        ];
+        self.run(args, &repo.root_path)
+            .map_err(classify_delete_branch_failure)?;
+        Ok(())
+    }
 }
 
 /// Direction in which a reconstructed hunk patch is applied to the index:
@@ -667,6 +707,91 @@ fn classify_apply_failure(err: GitSailError) -> GitSailError {
             "the selected hunk no longer applies to the current index",
         )
         .with_remediation("refresh the diff and reselect the hunks to stage/unstage")
+        .with_source(err)
+    } else {
+        err
+    }
+}
+
+/// Reclassifies a failed `git switch` when it failed because the switch
+/// would overwrite local changes incompatible with the target branch
+/// (US-021 criterion 2: "impede troca sem descarte implícito"), or because
+/// the target does not resolve to a branch, giving a clearer, actionable
+/// error than a bare process failure. Any other failure passes through
+/// unchanged.
+fn classify_switch_failure(err: GitSailError) -> GitSailError {
+    if err.code() != ErrorCode::ProcessFailure {
+        return err;
+    }
+    let diagnostic_text = err.diagnostic().map(|d| d.to_string()).unwrap_or_default();
+    if diagnostic_text.contains("would be overwritten") {
+        GitSailError::new(
+            ErrorCode::OperationConflict,
+            "switching branches would overwrite local changes",
+        )
+        .with_remediation("commit or stash your local changes before switching branches")
+        .with_source(err)
+    } else if diagnostic_text.contains("invalid reference") {
+        GitSailError::new(ErrorCode::RepositoryNotFound, "no such branch")
+            .with_remediation("verify the branch name")
+            .with_source(err)
+    } else {
+        err
+    }
+}
+
+/// Reclassifies a failed `git branch <name> [<start-point>]` when it failed
+/// because `name` already exists (US-022 criterion 2: "nome existente não é
+/// sobrescrito") or `start-point` does not resolve to a commit. Any other
+/// failure passes through unchanged.
+fn classify_create_branch_failure(err: GitSailError) -> GitSailError {
+    if err.code() != ErrorCode::ProcessFailure {
+        return err;
+    }
+    let diagnostic_text = err.diagnostic().map(|d| d.to_string()).unwrap_or_default();
+    if diagnostic_text.contains("already exists") {
+        GitSailError::new(
+            ErrorCode::InvalidRepositoryState,
+            "a branch with that name already exists",
+        )
+        .with_remediation("choose a different branch name")
+        .with_source(err)
+    } else if diagnostic_text.contains("not a valid object name") {
+        GitSailError::new(ErrorCode::RepositoryNotFound, "start point does not exist")
+            .with_remediation("choose an existing commit, branch or tag as the start point")
+            .with_source(err)
+    } else {
+        err
+    }
+}
+
+/// Reclassifies a failed `git branch -d/-D <name>` when it failed because
+/// `name` is checked out (current branch or another worktree — US-023
+/// criterion 2: "branch atual e branch em uso por worktree são protegidas")
+/// or has unmerged commits and `-d` (not `-D`) was used (US-023 criterion 3:
+/// "não é excluída à força implicitamente"). Any other failure passes
+/// through unchanged.
+fn classify_delete_branch_failure(err: GitSailError) -> GitSailError {
+    if err.code() != ErrorCode::ProcessFailure {
+        return err;
+    }
+    let diagnostic_text = err.diagnostic().map(|d| d.to_string()).unwrap_or_default();
+    if diagnostic_text.contains("checked out at")
+        || diagnostic_text.contains("which you are currently on")
+        || diagnostic_text.contains("used by worktree")
+    {
+        GitSailError::new(
+            ErrorCode::InvalidRepositoryState,
+            "the branch is currently checked out",
+        )
+        .with_remediation("switch to a different branch, or a different worktree, before deleting it")
+        .with_source(err)
+    } else if diagnostic_text.contains("not fully merged") {
+        GitSailError::new(
+            ErrorCode::OperationConflict,
+            "the branch has unmerged commits",
+        )
+        .with_remediation("merge the branch first, or delete it with force if you are sure")
         .with_source(err)
     } else {
         err
