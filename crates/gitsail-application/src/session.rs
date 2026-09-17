@@ -193,7 +193,7 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::sync::Mutex;
 
-    use crate::ports::{CommitQuery, DiffRequest, Page};
+    use crate::ports::{BlameRequest, CommitQuery, DiffRequest, Page};
 
     /// A double whose reported status can be swapped mid-test, so tests can
     /// simulate an external Git change between two refreshes.
@@ -258,8 +258,8 @@ mod tests {
         fn blame(
             &self,
             _repo: &Repository,
-            _file: &Path,
-            _revision: Option<&CommitHash>,
+            _request: &BlameRequest,
+            _cancel: &gitsail_domain::CancellationToken,
         ) -> Result<Blame, GitSailError> {
             unimplemented!("not exercised by session tests")
         }
@@ -461,8 +461,8 @@ mod tests {
             fn blame(
                 &self,
                 _repo: &Repository,
-                _file: &Path,
-                _revision: Option<&CommitHash>,
+                _request: &BlameRequest,
+                _cancel: &gitsail_domain::CancellationToken,
             ) -> Result<Blame, GitSailError> {
                 unimplemented!()
             }

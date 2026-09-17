@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use gitsail_domain::{
     Blame, Branch, BranchName, CancellationToken, Commit, CommitHash, Diff, GitSailError,
-    Repository, RepositoryStatus,
+    LineRange, Repository, RepositoryStatus,
 };
 
 /// A single page of results plus continuation metadata (SAD §25).
@@ -84,6 +84,24 @@ pub struct DiffRequest {
     pub context_lines: Option<u32>,
 }
 
+/// Selects the file, revision, optional line range, and optional explicit
+/// buffer content for a blame query (US-031, US-032, US-033).
+///
+/// `revision: None` blames the working tree, including any uncommitted
+/// changes (US-033) — mirroring how [`DiffRequest`]'s `from`/`to` treat a
+/// missing revision as "working tree". `line_range: None` blames the whole
+/// file. `buffer_contents`, when set, blames that exact content instead of
+/// reading the file from disk (US-033 criterion 3: an unsaved editor buffer
+/// must never be silently treated as identical to the on-disk file); it is
+/// only meaningful when `revision` is `None`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlameRequest {
+    pub file: PathBuf,
+    pub revision: Option<CommitHash>,
+    pub line_range: Option<LineRange>,
+    pub buffer_contents: Option<Vec<u8>>,
+}
+
 /// Read-only inspection of a Git repository (SAD §9's initial read use
 /// cases, SAD §10). Adapters (e.g. `gitsail-git`) implement this trait
 /// against a real Git provider; application use cases and tests depend on
@@ -111,10 +129,12 @@ pub trait RepositoryReadPort {
     /// returning a stale or partial result for a revision that does not
     /// resolve (US-028 criterion 3).
     fn resolve_revision(&self, repo: &Repository, revision: &str) -> Result<CommitHash, GitSailError>;
+    /// `cancel` lets a caller stop a long-running blame query from another
+    /// thread (US-034 criterion 3), matching [`Self::diff`].
     fn blame(
         &self,
         repo: &Repository,
-        file: &Path,
-        revision: Option<&CommitHash>,
+        request: &BlameRequest,
+        cancel: &CancellationToken,
     ) -> Result<Blame, GitSailError>;
 }

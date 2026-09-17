@@ -19,7 +19,7 @@ pub mod repository;
 pub mod stash;
 pub mod status;
 
-pub use blame::{Blame, BlameLine};
+pub use blame::{Blame, BlameLine, BlameOrigin, LineRange};
 pub use branch::{Branch, BranchKind};
 pub use cancellation::CancellationToken;
 pub use commit::{Commit, Decoration, GitTimestamp, Signature};

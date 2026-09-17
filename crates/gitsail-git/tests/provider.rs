@@ -10,12 +10,12 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use gitsail_application::{
-    CommitQuery, CompareRevisions, DiffRequest, GetCommitDiff, RepositoryReadPort,
+    BlameRequest, CommitQuery, CompareRevisions, DiffRequest, GetCommitDiff, RepositoryReadPort,
     RepositoryWritePort,
 };
 use gitsail_domain::{
-    BranchKind, BranchName, CancellationToken, ChangeType, CommitHash, Decoration, DiffHunk,
-    DiffLine, DiffLineOrigin, ErrorCode, FileDiff, FileStatusCode, HeadState,
+    BlameOrigin, BranchKind, BranchName, CancellationToken, ChangeType, CommitHash, Decoration,
+    DiffHunk, DiffLine, DiffLineOrigin, ErrorCode, FileDiff, FileStatusCode, HeadState, LineRange,
 };
 use gitsail_git::{GitCliProvider, GitProcessRunner, GitProcessRunnerConfig};
 
@@ -1543,8 +1543,17 @@ fn file_history_for_a_path_with_no_history_is_an_empty_page_not_an_error() {
 }
 
 // ---------------------------------------------------------------------
-// Blame.
+// Blame (US-031..US-034).
 // ---------------------------------------------------------------------
+
+fn blame_request(file: &str) -> BlameRequest {
+    BlameRequest {
+        file: PathBuf::from(file),
+        revision: None,
+        line_range: None,
+        buffer_contents: None,
+    }
+}
 
 #[test]
 fn blame_attributes_each_line_to_the_commit_that_introduced_it() {
@@ -1560,15 +1569,466 @@ fn blame_attributes_each_line_to_the_commit_that_introduced_it() {
     let repo = provider.discover(repo_dir.path()).unwrap();
 
     let blame = provider
-        .blame(&repo, Path::new("a.txt"), None)
+        .blame(&repo, &blame_request("a.txt"), &CancellationToken::new())
         .expect("blame should succeed");
 
     assert_eq!(blame.lines.len(), 2);
     assert_eq!(blame.lines[0].content, "line1changed");
     assert_eq!(blame.lines[0].commit, second);
     assert_eq!(blame.lines[0].author.name, "Test User");
+    assert_eq!(blame.lines[0].origin, BlameOrigin::Committed);
     assert_eq!(blame.lines[1].content, "line2");
     assert_ne!(blame.lines[1].commit, second);
+}
+
+#[test]
+fn blame_reports_distinct_original_and_final_line_numbers_when_lines_shift() {
+    let repo_dir = init_repo("blame-line-numbers");
+    write_file(repo_dir.path(), "a.txt", "line1\nline2\n");
+    commit_all(repo_dir.path(), "first commit");
+
+    // Prepending a line shifts line1/line2 down in the final version, but
+    // their *original* line numbers (where they were introduced) stay 1/2
+    // (US-031 criterion 1: "final/original" must be distinct fields).
+    write_file(repo_dir.path(), "a.txt", "prepended\nline1\nline2\n");
+    commit_all(repo_dir.path(), "prepend a line");
+
+    let provider = provider();
+    let repo = provider.discover(repo_dir.path()).unwrap();
+
+    let blame = provider
+        .blame(&repo, &blame_request("a.txt"), &CancellationToken::new())
+        .expect("blame should succeed");
+
+    assert_eq!(blame.lines.len(), 3);
+    let line1 = blame.lines.iter().find(|l| l.content == "line1").unwrap();
+    assert_eq!(line1.final_line, 2);
+    assert_eq!(line1.original_line, 1);
+}
+
+#[test]
+fn blame_with_multiple_authors_attributes_each_line_to_its_own_author() {
+    let repo_dir = init_repo("blame-multi-author");
+    write_file(repo_dir.path(), "a.txt", "line1\n");
+    git(
+        repo_dir.path(),
+        &["add", "a.txt"],
+    );
+    git(
+        repo_dir.path(),
+        &[
+            "commit",
+            "--quiet",
+            "-m",
+            "first author's line",
+            "--author",
+            "Alice <alice@example.com>",
+        ],
+    );
+
+    write_file(repo_dir.path(), "a.txt", "line1\nline2\n");
+    git(repo_dir.path(), &["add", "a.txt"]);
+    git(
+        repo_dir.path(),
+        &[
+            "commit",
+            "--quiet",
+            "-m",
+            "second author's line",
+            "--author",
+            "Bob <bob@example.com>",
+        ],
+    );
+
+    let provider = provider();
+    let repo = provider.discover(repo_dir.path()).unwrap();
+
+    let blame = provider
+        .blame(&repo, &blame_request("a.txt"), &CancellationToken::new())
+        .expect("blame should succeed");
+
+    assert_eq!(blame.lines.len(), 2);
+    assert_eq!(blame.lines[0].author.name, "Alice");
+    assert_eq!(blame.lines[1].author.name, "Bob");
+}
+
+#[test]
+fn blame_result_echoes_the_queried_file_and_revision() {
+    let repo_dir = init_repo("blame-echo");
+    write_file(repo_dir.path(), "a.txt", "line1\n");
+    commit_all(repo_dir.path(), "first commit");
+    let first = head_commit_hash(repo_dir.path());
+
+    let provider = provider();
+    let repo = provider.discover(repo_dir.path()).unwrap();
+
+    let request = BlameRequest {
+        file: PathBuf::from("a.txt"),
+        revision: Some(first.clone()),
+        line_range: None,
+        buffer_contents: None,
+    };
+    let blame = provider
+        .blame(&repo, &request, &CancellationToken::new())
+        .expect("blame should succeed");
+
+    assert_eq!(blame.file, PathBuf::from("a.txt"));
+    assert_eq!(blame.revision, Some(first));
+}
+
+#[test]
+fn blame_on_a_nonexistent_file_returns_a_defined_error() {
+    let repo_dir = init_repo("blame-missing-file");
+    write_file(repo_dir.path(), "a.txt", "line1\n");
+    commit_all(repo_dir.path(), "first commit");
+
+    let provider = provider();
+    let repo = provider.discover(repo_dir.path()).unwrap();
+
+    let err = provider
+        .blame(
+            &repo,
+            &blame_request("does-not-exist.txt"),
+            &CancellationToken::new(),
+        )
+        .expect_err("blaming a nonexistent file must fail with a defined error");
+
+    assert_eq!(err.code(), ErrorCode::RepositoryNotFound);
+}
+
+#[test]
+fn blame_on_an_untracked_file_returns_a_defined_error() {
+    let repo_dir = init_repo("blame-untracked-file");
+    write_file(repo_dir.path(), "a.txt", "line1\n");
+    commit_all(repo_dir.path(), "first commit");
+    write_file(repo_dir.path(), "untracked.txt", "not versioned\n");
+
+    let provider = provider();
+    let repo = provider.discover(repo_dir.path()).unwrap();
+
+    let err = provider
+        .blame(
+            &repo,
+            &blame_request("untracked.txt"),
+            &CancellationToken::new(),
+        )
+        .expect_err("blaming an untracked file must fail with a defined error");
+
+    assert_eq!(err.code(), ErrorCode::RepositoryNotFound);
+}
+
+#[test]
+fn blame_on_an_empty_file_returns_no_lines_without_an_error() {
+    let repo_dir = init_repo("blame-empty-file");
+    write_file(repo_dir.path(), "empty.txt", "");
+    commit_all(repo_dir.path(), "add empty file");
+
+    let provider = provider();
+    let repo = provider.discover(repo_dir.path()).unwrap();
+
+    let blame = provider
+        .blame(&repo, &blame_request("empty.txt"), &CancellationToken::new())
+        .expect("blaming an empty file must succeed with no lines");
+
+    assert!(blame.lines.is_empty());
+}
+
+#[test]
+fn blame_on_binary_content_returns_a_defined_parse_error() {
+    let repo_dir = init_repo("blame-binary-file");
+    write_bytes(repo_dir.path(), "bin.dat", &[0x00, 0x01, 0xff, 0xfe, b'\n']);
+    commit_all(repo_dir.path(), "add binary file");
+
+    let provider = provider();
+    let repo = provider.discover(repo_dir.path()).unwrap();
+
+    let err = provider
+        .blame(&repo, &blame_request("bin.dat"), &CancellationToken::new())
+        .expect_err("blaming a file with invalid UTF-8 content must fail with a defined error");
+
+    assert_eq!(err.code(), ErrorCode::ParseFailure);
+}
+
+#[test]
+fn blame_respects_the_explicit_path_and_does_not_leak_another_files_lines() {
+    let repo_dir = init_repo("blame-explicit-path");
+    write_file(repo_dir.path(), "a.txt", "a-line1\na-line2\n");
+    write_file(repo_dir.path(), "b.txt", "b-line1\n");
+    commit_all(repo_dir.path(), "add both files");
+
+    let provider = provider();
+    let repo = provider.discover(repo_dir.path()).unwrap();
+
+    let blame = provider
+        .blame(&repo, &blame_request("a.txt"), &CancellationToken::new())
+        .expect("blame should succeed");
+
+    assert_eq!(blame.lines.len(), 2);
+    assert!(blame.lines.iter().all(|l| l.content.starts_with("a-line")));
+}
+
+#[test]
+fn blame_at_a_specific_revision_reflects_that_revisions_content_not_head() {
+    let repo_dir = init_repo("blame-revision");
+    write_file(repo_dir.path(), "a.txt", "original\n");
+    commit_all(repo_dir.path(), "first commit");
+    let first = head_commit_hash(repo_dir.path());
+
+    write_file(repo_dir.path(), "a.txt", "changed later\n");
+    commit_all(repo_dir.path(), "second commit");
+
+    let provider = provider();
+    let repo = provider.discover(repo_dir.path()).unwrap();
+
+    let request = BlameRequest {
+        file: PathBuf::from("a.txt"),
+        revision: Some(first),
+        line_range: None,
+        buffer_contents: None,
+    };
+    let blame = provider
+        .blame(&repo, &request, &CancellationToken::new())
+        .expect("blame at an older revision should succeed");
+
+    assert_eq!(blame.lines.len(), 1);
+    assert_eq!(blame.lines[0].content, "original");
+}
+
+#[test]
+fn blame_line_numbers_still_refer_to_the_queried_revisions_version() {
+    let repo_dir = init_repo("blame-revision-line-numbers");
+    write_file(repo_dir.path(), "a.txt", "only-line\n");
+    commit_all(repo_dir.path(), "first commit");
+    let first = head_commit_hash(repo_dir.path());
+
+    // A later commit prepends a line, so "only-line" moves to final_line 2
+    // at HEAD but must still be final_line 1 when blaming the first
+    // revision (US-032 criterion 2).
+    write_file(repo_dir.path(), "a.txt", "prepended\nonly-line\n");
+    commit_all(repo_dir.path(), "prepend a line");
+
+    let provider = provider();
+    let repo = provider.discover(repo_dir.path()).unwrap();
+
+    let request = BlameRequest {
+        file: PathBuf::from("a.txt"),
+        revision: Some(first),
+        line_range: None,
+        buffer_contents: None,
+    };
+    let blame = provider
+        .blame(&repo, &request, &CancellationToken::new())
+        .expect("blame at an older revision should succeed");
+
+    assert_eq!(blame.lines.len(), 1);
+    assert_eq!(blame.lines[0].final_line, 1);
+}
+
+#[test]
+fn blame_with_a_line_range_limits_results_to_that_range() {
+    let repo_dir = init_repo("blame-line-range");
+    write_file(repo_dir.path(), "a.txt", "one\ntwo\nthree\nfour\n");
+    commit_all(repo_dir.path(), "add four lines");
+
+    let provider = provider();
+    let repo = provider.discover(repo_dir.path()).unwrap();
+
+    let request = BlameRequest {
+        file: PathBuf::from("a.txt"),
+        revision: None,
+        line_range: Some(LineRange::new(2, 3)),
+        buffer_contents: None,
+    };
+    let blame = provider
+        .blame(&repo, &request, &CancellationToken::new())
+        .expect("a valid line range should succeed");
+
+    assert_eq!(blame.lines.len(), 2);
+    assert_eq!(blame.lines[0].content, "two");
+    assert_eq!(blame.lines[1].content, "three");
+}
+
+#[test]
+fn blame_with_a_structurally_invalid_line_range_is_rejected_before_running_git() {
+    let repo_dir = init_repo("blame-invalid-range");
+    write_file(repo_dir.path(), "a.txt", "one\ntwo\n");
+    commit_all(repo_dir.path(), "add lines");
+
+    let provider = provider();
+    let repo = provider.discover(repo_dir.path()).unwrap();
+
+    let request = BlameRequest {
+        file: PathBuf::from("a.txt"),
+        revision: None,
+        line_range: Some(LineRange::new(2, 1)),
+        buffer_contents: None,
+    };
+    let err = provider
+        .blame(&repo, &request, &CancellationToken::new())
+        .expect_err("start > end must be rejected");
+
+    assert_eq!(err.code(), ErrorCode::ParseFailure);
+}
+
+#[test]
+fn blame_with_a_line_range_beyond_the_files_length_returns_a_defined_error() {
+    let repo_dir = init_repo("blame-range-out-of-bounds");
+    write_file(repo_dir.path(), "a.txt", "one\ntwo\n");
+    commit_all(repo_dir.path(), "add lines");
+
+    let provider = provider();
+    let repo = provider.discover(repo_dir.path()).unwrap();
+
+    let request = BlameRequest {
+        file: PathBuf::from("a.txt"),
+        revision: None,
+        line_range: Some(LineRange::new(10, 20)),
+        buffer_contents: None,
+    };
+    let err = provider
+        .blame(&repo, &request, &CancellationToken::new())
+        .expect_err("a range beyond the file's length must fail with a defined error");
+
+    assert_eq!(err.code(), ErrorCode::ParseFailure);
+}
+
+#[test]
+fn blame_with_a_nonexistent_revision_returns_a_defined_error_not_another_versions_data() {
+    let repo_dir = init_repo("blame-missing-revision");
+    write_file(repo_dir.path(), "a.txt", "line1\n");
+    commit_all(repo_dir.path(), "first commit");
+
+    let provider = provider();
+    let repo = provider.discover(repo_dir.path()).unwrap();
+
+    let request = BlameRequest {
+        file: PathBuf::from("a.txt"),
+        revision: Some(CommitHash::new("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef").unwrap()),
+        line_range: None,
+        buffer_contents: None,
+    };
+    let err = provider
+        .blame(&repo, &request, &CancellationToken::new())
+        .expect_err("a nonexistent revision must fail rather than fall back to another version");
+
+    assert_eq!(err.code(), ErrorCode::RepositoryNotFound);
+}
+
+#[test]
+fn blame_of_the_working_tree_marks_uncommitted_lines_as_local() {
+    let repo_dir = init_repo("blame-local-lines");
+    write_file(repo_dir.path(), "a.txt", "line1\n");
+    commit_all(repo_dir.path(), "first commit");
+
+    write_file(repo_dir.path(), "a.txt", "line1\nline2-local\n");
+
+    let provider = provider();
+    let repo = provider.discover(repo_dir.path()).unwrap();
+
+    let blame = provider
+        .blame(&repo, &blame_request("a.txt"), &CancellationToken::new())
+        .expect("blame of a working tree with local edits should succeed");
+
+    assert_eq!(blame.lines.len(), 2);
+    assert_eq!(blame.lines[0].origin, BlameOrigin::Committed);
+    assert_eq!(blame.lines[1].content, "line2-local");
+    assert_eq!(blame.lines[1].origin, BlameOrigin::Local);
+    assert!(blame.lines[1].commit.is_zero());
+}
+
+#[test]
+fn blame_with_explicit_buffer_contents_blames_that_content_instead_of_disk() {
+    let repo_dir = init_repo("blame-buffer-contents");
+    write_file(repo_dir.path(), "a.txt", "line1\n");
+    commit_all(repo_dir.path(), "first commit");
+
+    // The file on disk still only has "line1", but the caller supplies an
+    // unsaved buffer with an extra line — the result must reflect the
+    // buffer, not the disk copy (US-033 criterion 3).
+    let request = BlameRequest {
+        file: PathBuf::from("a.txt"),
+        revision: None,
+        line_range: None,
+        buffer_contents: Some(b"line1\nbuffer-only-line\n".to_vec()),
+    };
+
+    let provider = provider();
+    let repo = provider.discover(repo_dir.path()).unwrap();
+
+    let blame = provider
+        .blame(&repo, &request, &CancellationToken::new())
+        .expect("blame with explicit buffer contents should succeed");
+
+    assert_eq!(blame.lines.len(), 2);
+    assert_eq!(blame.lines[1].content, "buffer-only-line");
+    assert_eq!(blame.lines[1].origin, BlameOrigin::Local);
+}
+
+#[test]
+fn blame_rejects_buffer_contents_combined_with_an_explicit_revision() {
+    let repo_dir = init_repo("blame-buffer-with-revision");
+    write_file(repo_dir.path(), "a.txt", "line1\n");
+    commit_all(repo_dir.path(), "first commit");
+    let first = head_commit_hash(repo_dir.path());
+
+    let request = BlameRequest {
+        file: PathBuf::from("a.txt"),
+        revision: Some(first),
+        line_range: None,
+        buffer_contents: Some(b"line1\n".to_vec()),
+    };
+
+    let provider = provider();
+    let repo = provider.discover(repo_dir.path()).unwrap();
+
+    let err = provider
+        .blame(&repo, &request, &CancellationToken::new())
+        .expect_err("buffer_contents combined with a revision must be rejected");
+
+    assert_eq!(err.code(), ErrorCode::ParseFailure);
+}
+
+#[test]
+fn blame_fails_with_cancelled_when_the_token_is_already_cancelled() {
+    let repo_dir = init_repo("blame-cancelled");
+    write_file(repo_dir.path(), "a.txt", "line1\n");
+    commit_all(repo_dir.path(), "first commit");
+
+    let provider = provider();
+    let repo = provider.discover(repo_dir.path()).unwrap();
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+
+    let err = provider
+        .blame(&repo, &blame_request("a.txt"), &cancel)
+        .expect_err("a pre-cancelled token must stop the blame before it succeeds");
+
+    assert_eq!(err.code(), ErrorCode::Cancelled);
+}
+
+#[test]
+fn blame_with_buffer_contents_fails_with_cancelled_when_the_token_is_already_cancelled() {
+    let repo_dir = init_repo("blame-cancelled-buffer");
+    write_file(repo_dir.path(), "a.txt", "line1\n");
+    commit_all(repo_dir.path(), "first commit");
+
+    let request = BlameRequest {
+        file: PathBuf::from("a.txt"),
+        revision: None,
+        line_range: None,
+        buffer_contents: Some(b"line1\n".to_vec()),
+    };
+
+    let provider = provider();
+    let repo = provider.discover(repo_dir.path()).unwrap();
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+
+    let err = provider
+        .blame(&repo, &request, &cancel)
+        .expect_err("a pre-cancelled token must stop the stdin-driven blame before it succeeds");
+
+    assert_eq!(err.code(), ErrorCode::Cancelled);
 }
 
 // ---------------------------------------------------------------------

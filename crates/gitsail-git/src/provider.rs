@@ -19,12 +19,14 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use gitsail_application::{CommitQuery, DiffRequest, Page, RepositoryReadPort, RepositoryWritePort};
+use gitsail_application::{
+    BlameRequest, CommitQuery, DiffRequest, Page, RepositoryReadPort, RepositoryWritePort,
+};
 use gitsail_domain::{
-    Blame, BlameLine, Branch, BranchKind, BranchName, ChangeType, Commit, CommitHash, Decoration,
-    Diff, DiffHunk, DiffLine, DiffLineOrigin, ErrorCode, FileChange, FileDiff, FileStatusCode,
-    GitSailError, GitTimestamp, HeadState, Repository, RepositoryId, RepositoryStatus, ShortHash,
-    Signature,
+    Blame, BlameLine, BlameOrigin, Branch, BranchKind, BranchName, ChangeType, Commit, CommitHash,
+    Decoration, Diff, DiffHunk, DiffLine, DiffLineOrigin, ErrorCode, FileChange, FileDiff,
+    FileStatusCode, GitSailError, GitTimestamp, HeadState, Repository, RepositoryId,
+    RepositoryStatus, ShortHash, Signature,
 };
 
 use crate::runner::{CancellationToken, GitProcessRunner, ProcessOutput, ProcessRequest};
@@ -453,19 +455,56 @@ impl RepositoryReadPort for GitCliProvider {
     fn blame(
         &self,
         repo: &Repository,
-        file: &Path,
-        revision: Option<&CommitHash>,
+        request: &BlameRequest,
+        cancel: &CancellationToken,
     ) -> Result<Blame, GitSailError> {
+        if request.buffer_contents.is_some() && request.revision.is_some() {
+            return Err(parse_err(
+                "BlameRequest::buffer_contents is only meaningful when revision is None (git blame --contents blames the working tree)",
+            ));
+        }
+        if let Some(range) = &request.line_range {
+            if !range.is_valid() {
+                return Err(parse_err(format!(
+                    "invalid line range {}..={}: start must be at least 1 and not greater than end",
+                    range.start, range.end
+                )));
+            }
+        }
+        if request.revision.is_none() {
+            require_worktree(repo, "blame")?;
+        }
+
         let mut args = vec!["blame".to_string(), "--porcelain".to_string()];
-        if let Some(rev) = revision {
+        if let Some(range) = &request.line_range {
+            args.push("-L".to_string());
+            args.push(format!("{},{}", range.start, range.end));
+        }
+        if request.buffer_contents.is_some() {
+            args.push("--contents".to_string());
+            args.push("-".to_string());
+        }
+        if let Some(rev) = &request.revision {
             args.push(rev.as_str().to_string());
         }
         args.push("--".to_string());
-        args.push(file.to_string_lossy().into_owned());
+        args.push(request.file.to_string_lossy().into_owned());
 
-        let output = self.run(args, &repo.root_path)?;
+        let output = match &request.buffer_contents {
+            Some(contents) => self
+                .run_with_stdin_cancellable(args, &repo.root_path, contents.clone(), cancel)
+                .map_err(classify_blame_failure)?,
+            None => self
+                .run_cancellable(args, &repo.root_path, cancel)
+                .map_err(classify_blame_failure)?,
+        };
         let stdout = Self::stdout_string(&output)?;
-        parse_blame(&stdout)
+        let lines = parse_blame(&stdout)?;
+        Ok(Blame {
+            file: request.file.clone(),
+            revision: request.revision.clone(),
+            lines,
+        })
     }
 }
 
@@ -623,10 +662,24 @@ impl GitCliProvider {
         cwd: &Path,
         stdin: Vec<u8>,
     ) -> Result<ProcessOutput, GitSailError> {
+        self.run_with_stdin_cancellable(args, cwd, stdin, &CancellationToken::new())
+    }
+
+    /// Like [`Self::run_with_stdin`], but forwards a caller-supplied
+    /// cancellation token instead of a fresh, never-cancelled one (used by
+    /// `blame` when [`BlameRequest::buffer_contents`] is set, US-034
+    /// criterion 3).
+    fn run_with_stdin_cancellable(
+        &self,
+        args: Vec<String>,
+        cwd: &Path,
+        stdin: Vec<u8>,
+        cancel: &CancellationToken,
+    ) -> Result<ProcessOutput, GitSailError> {
         let request = ProcessRequest::new(args, cwd.to_path_buf())
             .with_env(Self::locale_env())
             .with_stdin(stdin);
-        self.runner.run(request, &CancellationToken::new())
+        self.runner.run(request, cancel)
     }
 
     /// Expands `paths` so that unstaging a rename by only its new path (or
@@ -807,6 +860,45 @@ fn classify_create_branch_failure(err: GitSailError) -> GitSailError {
         GitSailError::new(ErrorCode::RepositoryNotFound, "start point does not exist")
             .with_remediation("choose an existing commit, branch or tag as the start point")
             .with_source(err)
+    } else {
+        err
+    }
+}
+
+/// Reclassifies a failed `git blame` as `RepositoryNotFound` when the
+/// queried path does not exist or is not tracked at the queried revision
+/// (US-031 criterion 3: "arquivo inexistente ... ou não versionado tem
+/// resultado/erro definido"), or when the revision itself does not resolve
+/// (US-032 criterion 3: "revisão inexistente ... não retorna dados de outra
+/// versão"); Git reports these with "no such path", "bad revision" (an
+/// unparsable expression) or "bad object" (a well-formed but nonexistent
+/// hash) wording. Reclassifies as `ParseFailure` when the requested line range
+/// falls outside the file (also US-032 criterion 3) — the same "reject
+/// rather than silently fall back" guarantee `blame` already applies to a
+/// structurally invalid range before the process even runs. Any other
+/// failure passes through unchanged.
+fn classify_blame_failure(err: GitSailError) -> GitSailError {
+    if err.code() != ErrorCode::ProcessFailure {
+        return err;
+    }
+    let diagnostic_text = err.diagnostic().map(|d| d.to_string()).unwrap_or_default();
+    if diagnostic_text.contains("no such path")
+        || diagnostic_text.contains("bad revision")
+        || diagnostic_text.contains("bad object")
+    {
+        GitSailError::new(
+            ErrorCode::RepositoryNotFound,
+            "the file or revision could not be resolved",
+        )
+        .with_remediation("verify the file path and revision")
+        .with_source(err)
+    } else if diagnostic_text.contains("has only") {
+        GitSailError::new(
+            ErrorCode::ParseFailure,
+            "the requested line range is out of bounds for the file",
+        )
+        .with_remediation("choose a line range within the file's length at the queried revision")
+        .with_source(err)
     } else {
         err
     }
@@ -1666,7 +1758,7 @@ fn parse_diff_hunk_range(range: &str, sigil: char) -> Result<(u32, u32), GitSail
 // `git blame --porcelain` parsing.
 // ---------------------------------------------------------------------
 
-fn parse_blame(raw: &str) -> Result<Blame, GitSailError> {
+fn parse_blame(raw: &str) -> Result<Vec<BlameLine>, GitSailError> {
     let mut metadata: HashMap<String, (Signature, GitTimestamp)> = HashMap::new();
     let mut lines_out = Vec::new();
 
@@ -1690,13 +1782,20 @@ fn parse_blame(raw: &str) -> Result<Blame, GitSailError> {
             let (author, timestamp) = metadata.get(&hash).cloned().ok_or_else(|| {
                 parse_err("blame content line references unknown commit metadata")
             })?;
+            let commit = CommitHash::new(hash)?;
+            let origin = if commit.is_zero() {
+                BlameOrigin::Local
+            } else {
+                BlameOrigin::Committed
+            };
             lines_out.push(BlameLine {
                 final_line: current_final_line,
                 original_line: current_original_line,
-                commit: CommitHash::new(hash)?,
+                commit,
                 author,
                 timestamp,
                 content: content.to_string(),
+                origin,
             });
             continue;
         }
@@ -1742,7 +1841,7 @@ fn parse_blame(raw: &str) -> Result<Blame, GitSailError> {
         }
     }
 
-    Ok(Blame { lines: lines_out })
+    Ok(lines_out)
 }
 
 fn strip_angle_brackets(raw: &str) -> String {

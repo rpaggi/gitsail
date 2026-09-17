@@ -10,7 +10,8 @@ use gitsail_domain::{
     RepositoryStatus,
 };
 
-use crate::ports::{CommitQuery, DiffRequest, Page, RepositoryReadPort};
+use crate::blame_cache::{BlameCache, BlameCacheKey};
+use crate::ports::{BlameRequest, CommitQuery, DiffRequest, Page, RepositoryReadPort};
 
 /// The SHA-1 hash of the empty tree object: a value fixed by Git's object
 /// format (identical in every repository, not repository state) used as
@@ -215,22 +216,52 @@ impl CompareRevisions {
     }
 }
 
+/// Queries line-level blame for a file, caching results so repeated queries
+/// for the same file/revision/content version are not re-executed against
+/// the port (US-034).
 pub struct GetFileBlame {
     port: Arc<dyn RepositoryReadPort>,
+    cache: BlameCache,
 }
 
 impl GetFileBlame {
     pub fn new(port: Arc<dyn RepositoryReadPort>) -> Self {
-        Self { port }
+        Self {
+            port,
+            cache: BlameCache::new(),
+        }
     }
 
+    /// `content_version` is an opaque token the caller owns (e.g. a content
+    /// hash or an editor buffer revision counter) that changes whenever the
+    /// queried content could have changed, so a stale cache entry is never
+    /// served across an edit (US-034 criterion 1).
     pub fn execute(
         &self,
         repo: &Repository,
-        file: &Path,
-        revision: Option<&CommitHash>,
+        request: &BlameRequest,
+        content_version: u64,
+        cancel: &CancellationToken,
     ) -> Result<Blame, GitSailError> {
-        self.port.blame(repo, file, revision)
+        let key = BlameCacheKey {
+            file: request.file.clone(),
+            revision: request.revision.clone(),
+            content_version,
+        };
+        if let Some(cached) = self.cache.get(&key) {
+            return Ok(cached);
+        }
+        let ticket = self.cache.begin_query();
+        let blame = self.port.blame(repo, request, cancel)?;
+        self.cache.complete_query(ticket, key, blame.clone());
+        Ok(blame)
+    }
+
+    /// Drops every cached result (US-034 criterion 2: a relevant change —
+    /// e.g. a commit or stage that alters history the cache might reflect —
+    /// invalidates it rather than serving stale data).
+    pub fn invalidate_cache(&self) {
+        self.cache.invalidate_all();
     }
 }
 
@@ -327,7 +358,11 @@ mod tests {
                     is_current: true,
                 }],
                 diff: Diff { files: vec![] },
-                blame: Blame { lines: vec![] },
+                blame: Blame {
+                    file: PathBuf::new(),
+                    revision: None,
+                    lines: vec![],
+                },
                 revisions: std::collections::HashMap::new(),
                 received_commit_query: Mutex::new(None),
                 received_diff_request: Mutex::new(None),
@@ -397,8 +432,8 @@ mod tests {
         fn blame(
             &self,
             _repo: &Repository,
-            _file: &Path,
-            _revision: Option<&CommitHash>,
+            _request: &BlameRequest,
+            _cancel: &CancellationToken,
         ) -> Result<Blame, GitSailError> {
             Ok(self.blame.clone())
         }
@@ -611,11 +646,68 @@ mod tests {
     fn get_file_blame_delegates_to_port() {
         let port = Arc::new(FakeReadPort::new());
         let use_case = GetFileBlame::new(port.clone());
+        let request = BlameRequest {
+            file: PathBuf::from("src/lib.rs"),
+            revision: None,
+            line_range: None,
+            buffer_contents: None,
+        };
 
         let blame = use_case
-            .execute(&port.repository, Path::new("src/lib.rs"), None)
+            .execute(&port.repository, &request, 0, &CancellationToken::new())
             .unwrap();
 
         assert_eq!(blame, port.blame);
+    }
+
+    #[test]
+    fn get_file_blame_serves_a_repeated_query_from_cache_without_hitting_the_port() {
+        let port = Arc::new(FakeReadPort::new());
+        let use_case = GetFileBlame::new(port.clone());
+        let request = BlameRequest {
+            file: PathBuf::from("src/lib.rs"),
+            revision: None,
+            line_range: None,
+            buffer_contents: None,
+        };
+
+        let first = use_case
+            .execute(&port.repository, &request, 1, &CancellationToken::new())
+            .unwrap();
+        let second = use_case
+            .execute(&port.repository, &request, 1, &CancellationToken::new())
+            .unwrap();
+
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn get_file_blame_cache_miss_on_a_new_content_version_and_invalidation() {
+        let port = Arc::new(FakeReadPort::new());
+        let use_case = GetFileBlame::new(port.clone());
+        let request = BlameRequest {
+            file: PathBuf::from("src/lib.rs"),
+            revision: None,
+            line_range: None,
+            buffer_contents: None,
+        };
+
+        use_case
+            .execute(&port.repository, &request, 1, &CancellationToken::new())
+            .unwrap();
+        // A different content version must not be served from the cache
+        // entry keyed to version 1 (US-034 criterion 1).
+        use_case
+            .execute(&port.repository, &request, 2, &CancellationToken::new())
+            .unwrap();
+
+        use_case.invalidate_cache();
+        // After invalidation, the same (file, revision, version) key must
+        // still resolve correctly by going back to the port rather than
+        // returning stale/missing data.
+        let after_invalidate = use_case
+            .execute(&port.repository, &request, 1, &CancellationToken::new())
+            .unwrap();
+        assert_eq!(after_invalidate, port.blame);
     }
 }

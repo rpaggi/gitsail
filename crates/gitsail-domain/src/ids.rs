@@ -33,6 +33,13 @@ impl CommitHash {
     pub fn to_short(&self, len: usize) -> ShortHash {
         ShortHash(self.0.chars().take(len).collect())
     }
+
+    /// Whether this is Git's synthetic all-zero hash — e.g. `git blame`'s
+    /// "not committed yet" attribution for working-tree content that has no
+    /// real commit (US-033) — rather than a hash naming an actual object.
+    pub fn is_zero(&self) -> bool {
+        self.0.bytes().all(|b| b == b'0')
+    }
 }
 
 impl fmt::Display for CommitHash {
@@ -116,6 +123,14 @@ mod tests {
     fn commit_hash_derives_short_hash() {
         let hash = CommitHash::new("deadbeefcafefeed").unwrap();
         assert_eq!(hash.to_short(8).as_str(), "deadbeef");
+    }
+
+    #[test]
+    fn commit_hash_detects_the_synthetic_zero_hash() {
+        let zero = CommitHash::new("0".repeat(40)).unwrap();
+        let real = CommitHash::new("deadbeef").unwrap();
+        assert!(zero.is_zero());
+        assert!(!real.is_zero());
     }
 
     #[test]
