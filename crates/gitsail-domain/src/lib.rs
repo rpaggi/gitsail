@@ -9,6 +9,7 @@
 
 pub mod blame;
 pub mod branch;
+pub mod cancellation;
 pub mod commit;
 pub mod diff;
 pub mod error;
@@ -20,6 +21,7 @@ pub mod status;
 
 pub use blame::{Blame, BlameLine};
 pub use branch::{Branch, BranchKind};
+pub use cancellation::CancellationToken;
 pub use commit::{Commit, Decoration, GitTimestamp, Signature};
 pub use diff::{Diff, DiffHunk, DiffLine, DiffLineOrigin, FileDiff};
 pub use error::{ErrorCode, GitSailError, OperationId};

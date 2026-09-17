@@ -6,12 +6,16 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use gitsail_application::{CommitQuery, DiffRequest, RepositoryReadPort, RepositoryWritePort};
+use gitsail_application::{
+    CommitQuery, CompareRevisions, DiffRequest, GetCommitDiff, RepositoryReadPort,
+    RepositoryWritePort,
+};
 use gitsail_domain::{
-    BranchKind, BranchName, ChangeType, CommitHash, Decoration, DiffHunk, DiffLine, DiffLineOrigin,
-    ErrorCode, FileDiff, FileStatusCode, HeadState,
+    BranchKind, BranchName, CancellationToken, ChangeType, CommitHash, Decoration, DiffHunk,
+    DiffLine, DiffLineOrigin, ErrorCode, FileDiff, FileStatusCode, HeadState,
 };
 use gitsail_git::{GitCliProvider, GitProcessRunner, GitProcessRunnerConfig};
 
@@ -64,6 +68,10 @@ fn init_repo(label: &str) -> TempDir {
 }
 
 fn write_file(dir: &Path, name: &str, contents: &str) {
+    std::fs::write(dir.join(name), contents).unwrap();
+}
+
+fn write_bytes(dir: &Path, name: &str, contents: &[u8]) {
     std::fs::write(dir.join(name), contents).unwrap();
 }
 
@@ -412,7 +420,7 @@ fn preserves_unicode_and_space_containing_file_paths_in_status_and_diff() {
     assert_eq!(status.files[0].path, Path::new(filename));
 
     let diff = provider
-        .diff(&repo, &DiffRequest::default())
+        .diff(&repo, &DiffRequest::default(), &CancellationToken::new())
         .expect("diff should succeed");
     assert_eq!(diff.files.len(), 1);
     assert_eq!(diff.files[0].path, Path::new(filename));
@@ -645,7 +653,7 @@ fn working_tree_diff_on_a_bare_repository_reports_an_explicit_limitation() {
     let repo = provider.discover(repo_dir.path()).unwrap();
 
     let err = provider
-        .diff(&repo, &DiffRequest::default())
+        .diff(&repo, &DiffRequest::default(), &CancellationToken::new())
         .expect_err("a working-tree diff must reject a bare repository explicitly");
 
     assert_eq!(err.code(), ErrorCode::InvalidRepositoryState);
@@ -763,6 +771,7 @@ fn diff_detects_a_rename() {
                 path_filter: None,
                 context_lines: None,
             },
+            &CancellationToken::new(),
         )
         .expect("diff against HEAD should succeed");
 
@@ -813,6 +822,7 @@ fn diff_reports_modified_content_hunks_between_two_commits() {
                 path_filter: None,
                 context_lines: None,
             },
+            &CancellationToken::new(),
         )
         .unwrap();
 
@@ -830,6 +840,394 @@ fn diff_reports_modified_content_hunks_between_two_commits() {
         .lines
         .iter()
         .any(|l| l.content == "two" && l.origin == gitsail_domain::DiffLineOrigin::Deletion));
+}
+
+#[test]
+fn diff_reports_a_binary_file_change_without_fabricating_hunks() {
+    let repo_dir = init_repo("binary-diff");
+    write_bytes(repo_dir.path(), "image.png", &[0x89, b'P', b'N', b'G', 0x00, 0x01]);
+    commit_all(repo_dir.path(), "add binary");
+
+    write_bytes(repo_dir.path(), "image.png", &[0x89, b'P', b'N', b'G', 0x02, 0x03, 0x04]);
+    commit_all(repo_dir.path(), "change binary");
+
+    let provider = provider();
+    let repo = provider.discover(repo_dir.path()).unwrap();
+
+    let diff = provider
+        .diff(&repo, &unstaged_diff_request(), &CancellationToken::new())
+        .unwrap();
+
+    // Nothing is unstaged (both changes were committed); diff HEAD~1..HEAD instead.
+    assert!(diff.files.is_empty());
+
+    let first = {
+        let output = Command::new("git")
+            .args(["rev-parse", "HEAD~1"])
+            .current_dir(repo_dir.path())
+            .output()
+            .unwrap();
+        CommitHash::new(String::from_utf8(output.stdout).unwrap().trim().to_string()).unwrap()
+    };
+    let second = head_commit_hash(repo_dir.path());
+
+    let diff = provider
+        .diff(
+            &repo,
+            &DiffRequest {
+                from: Some(first),
+                to: Some(second),
+                staged: false,
+                path_filter: None,
+                context_lines: None,
+            },
+            &CancellationToken::new(),
+        )
+        .unwrap();
+
+    assert_eq!(diff.files.len(), 1);
+    let file = &diff.files[0];
+    assert!(file.is_binary);
+    assert!(
+        file.hunks.is_empty(),
+        "a binary diff must never contain fabricated textual hunks"
+    );
+    assert_eq!(file.path, Path::new("image.png"));
+}
+
+#[test]
+fn diff_preserves_crlf_line_endings_in_line_content() {
+    let repo_dir = init_repo("crlf-diff");
+    write_bytes(repo_dir.path(), "a.txt", b"one\r\ntwo\r\nthree\r\n");
+    git(repo_dir.path(), &["add", "-A"]);
+    git(repo_dir.path(), &["commit", "--quiet", "-m", "first commit"]);
+
+    write_bytes(repo_dir.path(), "a.txt", b"one\r\nTWO\r\nthree\r\n");
+    git(repo_dir.path(), &["add", "-A"]);
+
+    let provider = provider();
+    let repo = provider.discover(repo_dir.path()).unwrap();
+
+    let diff = provider
+        .diff(&repo, &staged_diff_request(), &CancellationToken::new())
+        .unwrap();
+
+    assert_eq!(diff.files.len(), 1);
+    let hunk = &diff.files[0].hunks[0];
+    assert!(hunk
+        .lines
+        .iter()
+        .any(|l| l.content == "TWO\r" && l.origin == DiffLineOrigin::Addition));
+    assert!(hunk
+        .lines
+        .iter()
+        .any(|l| l.content == "two\r" && l.origin == DiffLineOrigin::Deletion));
+}
+
+#[test]
+fn diff_marks_a_line_with_no_trailing_newline_instead_of_inventing_one() {
+    let repo_dir = init_repo("no-trailing-newline-diff");
+    write_file(repo_dir.path(), "a.txt", "one\ntwo\n");
+    commit_all(repo_dir.path(), "first commit");
+
+    // No trailing `\n` after "three".
+    std::fs::write(repo_dir.path().join("a.txt"), "one\ntwo\nthree").unwrap();
+    git(repo_dir.path(), &["add", "-A"]);
+
+    let provider = provider();
+    let repo = provider.discover(repo_dir.path()).unwrap();
+
+    let diff = provider
+        .diff(&repo, &staged_diff_request(), &CancellationToken::new())
+        .unwrap();
+
+    assert_eq!(diff.files.len(), 1);
+    let hunk = &diff.files[0].hunks[0];
+    let added = hunk
+        .lines
+        .iter()
+        .find(|l| l.content == "three" && l.origin == DiffLineOrigin::Addition)
+        .expect("the added line without a trailing newline must still be reported");
+    assert!(!added.has_trailing_newline);
+}
+
+#[test]
+fn diff_truncates_a_file_whose_content_exceeds_the_size_limit() {
+    let repo_dir = init_repo("large-file-diff");
+    let small_content: String = (0..10).map(|i| format!("line {i}\n")).collect();
+    write_file(repo_dir.path(), "a.txt", &small_content);
+    commit_all(repo_dir.path(), "first commit");
+
+    // Well beyond the adapter's 512 KiB per-file hunk cap.
+    let large_content: String = (0..40_000).map(|i| format!("line {i} of a very large file\n")).collect();
+    write_file(repo_dir.path(), "a.txt", &large_content);
+    commit_all(repo_dir.path(), "grow the file");
+
+    let provider = provider();
+    let repo = provider.discover(repo_dir.path()).unwrap();
+    let first = {
+        let output = Command::new("git")
+            .args(["rev-parse", "HEAD~1"])
+            .current_dir(repo_dir.path())
+            .output()
+            .unwrap();
+        CommitHash::new(String::from_utf8(output.stdout).unwrap().trim().to_string()).unwrap()
+    };
+    let second = head_commit_hash(repo_dir.path());
+
+    let diff = provider
+        .diff(
+            &repo,
+            &DiffRequest {
+                from: Some(first),
+                to: Some(second),
+                staged: false,
+                path_filter: None,
+                context_lines: None,
+            },
+            &CancellationToken::new(),
+        )
+        .unwrap();
+
+    assert_eq!(diff.files.len(), 1);
+    let file = &diff.files[0];
+    assert!(
+        file.truncated,
+        "a file diff far beyond the size cap must be reported as truncated"
+    );
+    assert!(
+        file.hunks.is_empty(),
+        "hunks are withheld, not partially/incorrectly parsed, once truncated"
+    );
+}
+
+#[test]
+fn diff_fails_with_cancelled_when_the_token_is_already_cancelled() {
+    let repo_dir = init_repo("cancelled-diff");
+    write_file(repo_dir.path(), "a.txt", "one\ntwo\n");
+    commit_all(repo_dir.path(), "first commit");
+    write_file(repo_dir.path(), "a.txt", "one\nTWO\n");
+
+    let provider = provider();
+    let repo = provider.discover(repo_dir.path()).unwrap();
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+
+    let err = provider
+        .diff(&repo, &unstaged_diff_request(), &cancel)
+        .expect_err("a pre-cancelled token must stop the diff before it succeeds");
+
+    assert_eq!(err.code(), ErrorCode::Cancelled);
+}
+
+#[test]
+fn unstaged_and_staged_diffs_are_distinct_for_the_same_file() {
+    let repo_dir = init_repo("staged-and-unstaged-diff");
+    write_file(repo_dir.path(), "a.txt", "one\ntwo\nthree\n");
+    commit_all(repo_dir.path(), "first commit");
+
+    // Stage one change, then make a further, different change on top of it.
+    write_file(repo_dir.path(), "a.txt", "one\nTWO\nthree\n");
+    git(repo_dir.path(), &["add", "-A"]);
+    write_file(repo_dir.path(), "a.txt", "one\nTWO\nthree\nfour\n");
+
+    let provider = provider();
+    let repo = provider.discover(repo_dir.path()).unwrap();
+
+    let staged = provider
+        .diff(&repo, &staged_diff_request(), &CancellationToken::new())
+        .unwrap();
+    let unstaged = provider
+        .diff(&repo, &unstaged_diff_request(), &CancellationToken::new())
+        .unwrap();
+
+    assert_eq!(staged.files.len(), 1);
+    assert!(staged.files[0]
+        .hunks
+        .iter()
+        .flat_map(|h| &h.lines)
+        .any(|l| l.content == "TWO" && l.origin == DiffLineOrigin::Addition));
+
+    assert_eq!(unstaged.files.len(), 1);
+    assert!(unstaged.files[0]
+        .hunks
+        .iter()
+        .flat_map(|h| &h.lines)
+        .any(|l| l.content == "four" && l.origin == DiffLineOrigin::Addition));
+    assert!(
+        !unstaged.files[0]
+            .hunks
+            .iter()
+            .flat_map(|h| &h.lines)
+            .any(|l| l.content == "TWO"
+                && (l.origin == DiffLineOrigin::Addition || l.origin == DiffLineOrigin::Deletion)),
+        "the already-staged change must not appear as an addition/deletion in the unstaged \
+         comparison (it may still appear as unchanged context)"
+    );
+}
+
+// ---------------------------------------------------------------------
+// Revision resolution (US-028).
+// ---------------------------------------------------------------------
+
+#[test]
+fn resolve_revision_resolves_branches_and_relative_refs() {
+    let repo_dir = init_repo("resolve-revision");
+    write_file(repo_dir.path(), "a.txt", "one\n");
+    commit_all(repo_dir.path(), "first commit");
+    let first = head_commit_hash(repo_dir.path());
+    write_file(repo_dir.path(), "a.txt", "two\n");
+    commit_all(repo_dir.path(), "second commit");
+    let second = head_commit_hash(repo_dir.path());
+
+    let provider = provider();
+    let repo = provider.discover(repo_dir.path()).unwrap();
+
+    assert_eq!(provider.resolve_revision(&repo, "main").unwrap(), second);
+    assert_eq!(provider.resolve_revision(&repo, "HEAD~1").unwrap(), first);
+    assert_eq!(
+        provider
+            .resolve_revision(&repo, second.as_str())
+            .unwrap(),
+        second
+    );
+}
+
+#[test]
+fn resolve_revision_fails_clearly_for_an_invalid_reference() {
+    let repo_dir = init_repo("resolve-revision-invalid");
+    write_file(repo_dir.path(), "a.txt", "one\n");
+    commit_all(repo_dir.path(), "first commit");
+
+    let provider = provider();
+    let repo = provider.discover(repo_dir.path()).unwrap();
+
+    let err = provider
+        .resolve_revision(&repo, "does-not-exist")
+        .expect_err("an unresolvable revision must fail rather than default to something");
+
+    assert_eq!(err.code(), ErrorCode::RepositoryNotFound);
+}
+
+// ---------------------------------------------------------------------
+// Commit diff and revision comparison use cases (US-026, US-028).
+// ---------------------------------------------------------------------
+
+#[test]
+fn commit_diff_of_a_root_commit_uses_the_empty_tree_as_its_base() {
+    let repo_dir = init_repo("commit-diff-root");
+    write_file(repo_dir.path(), "a.txt", "hello\n");
+    commit_all(repo_dir.path(), "root commit");
+    let root = head_commit_hash(repo_dir.path());
+
+    let provider = Arc::new(provider());
+    let repo = provider.discover(repo_dir.path()).unwrap();
+    let use_case = GetCommitDiff::new(provider.clone());
+
+    let result = use_case
+        .execute(&repo, &root, &CancellationToken::new())
+        .unwrap();
+
+    assert!(result.base.is_none(), "a root commit has no parent to name as base");
+    assert_eq!(result.diff.files.len(), 1);
+    assert_eq!(result.diff.files[0].change_type, ChangeType::Added);
+    assert_eq!(result.diff.files[0].path, Path::new("a.txt"));
+}
+
+#[test]
+fn commit_diff_of_a_merge_commit_uses_the_first_parent() {
+    let repo_dir = init_repo("commit-diff-merge");
+    write_file(repo_dir.path(), "base.txt", "base\n");
+    commit_all(repo_dir.path(), "base commit");
+
+    git(repo_dir.path(), &["checkout", "-b", "feature"]);
+    write_file(repo_dir.path(), "feature.txt", "feature\n");
+    commit_all(repo_dir.path(), "feature commit");
+
+    git(repo_dir.path(), &["checkout", "main"]);
+    write_file(repo_dir.path(), "main.txt", "main\n");
+    commit_all(repo_dir.path(), "main commit");
+    // The merge commit's first parent is `main`'s tip at merge time, i.e.
+    // this commit, not the earlier "base commit".
+    let main_tip = head_commit_hash(repo_dir.path());
+
+    git(repo_dir.path(), &["merge", "--no-ff", "--quiet", "-m", "merge feature", "feature"]);
+    let merge = head_commit_hash(repo_dir.path());
+
+    let provider = Arc::new(provider());
+    let repo = provider.discover(repo_dir.path()).unwrap();
+    let use_case = GetCommitDiff::new(provider.clone());
+
+    let result = use_case
+        .execute(&repo, &merge, &CancellationToken::new())
+        .unwrap();
+
+    assert_eq!(
+        result.base,
+        Some(main_tip),
+        "the merge diff base must be the first parent (main's tip), not the merged-in branch"
+    );
+    // First-parent diff (base = main's tip, target = the merge commit) shows
+    // exactly what the merge introduced beyond `main`: `feature.txt`.
+    // `main.txt` was already present at `main`'s tip, so it is unchanged
+    // and does not appear.
+    let paths: Vec<_> = result.diff.files.iter().map(|f| f.path.clone()).collect();
+    assert!(paths.contains(&PathBuf::from("feature.txt")));
+    assert!(!paths.contains(&PathBuf::from("main.txt")));
+}
+
+#[test]
+fn compare_revisions_reverses_signs_and_paths_when_sides_are_swapped() {
+    let repo_dir = init_repo("compare-revisions-swap");
+    write_file(repo_dir.path(), "a.txt", "one\ntwo\n");
+    commit_all(repo_dir.path(), "first commit");
+    write_file(repo_dir.path(), "a.txt", "one\nTWO\n");
+    commit_all(repo_dir.path(), "second commit");
+
+    let provider = Arc::new(provider());
+    let repo = provider.discover(repo_dir.path()).unwrap();
+    let use_case = CompareRevisions::new(provider.clone());
+
+    let forward = use_case
+        .execute(&repo, "HEAD~1", "HEAD", &CancellationToken::new())
+        .unwrap();
+    let forward_hunk = &forward.diff.files[0].hunks[0];
+    assert!(forward_hunk
+        .lines
+        .iter()
+        .any(|l| l.content == "TWO" && l.origin == DiffLineOrigin::Addition));
+
+    let reversed = use_case
+        .execute(&repo, "HEAD", "HEAD~1", &CancellationToken::new())
+        .unwrap();
+    let reversed_hunk = &reversed.diff.files[0].hunks[0];
+    assert!(reversed_hunk
+        .lines
+        .iter()
+        .any(|l| l.content == "TWO" && l.origin == DiffLineOrigin::Deletion));
+    assert!(reversed_hunk
+        .lines
+        .iter()
+        .any(|l| l.content == "two" && l.origin == DiffLineOrigin::Addition));
+    assert_eq!(forward.base, reversed.target);
+    assert_eq!(forward.target, reversed.base);
+}
+
+#[test]
+fn compare_revisions_fails_clearly_for_an_invalid_reference() {
+    let repo_dir = init_repo("compare-revisions-invalid");
+    write_file(repo_dir.path(), "a.txt", "one\n");
+    commit_all(repo_dir.path(), "first commit");
+
+    let provider = Arc::new(provider());
+    let repo = provider.discover(repo_dir.path()).unwrap();
+    let use_case = CompareRevisions::new(provider.clone());
+
+    let err = use_case
+        .execute(&repo, "does-not-exist", "HEAD", &CancellationToken::new())
+        .unwrap_err();
+
+    assert_eq!(err.code(), ErrorCode::RepositoryNotFound);
 }
 
 // ---------------------------------------------------------------------
@@ -1416,7 +1814,7 @@ fn staged_diff_compares_the_index_against_head_independent_of_the_working_tree()
     let provider = provider();
     let repo = provider.discover(repo_dir.path()).unwrap();
 
-    let staged = provider.diff(&repo, &staged_diff_request()).unwrap();
+    let staged = provider.diff(&repo, &staged_diff_request(), &CancellationToken::new()).unwrap();
     assert_eq!(staged.files.len(), 1);
     let staged_lines: Vec<_> = staged.files[0]
         .hunks
@@ -1427,7 +1825,7 @@ fn staged_diff_compares_the_index_against_head_independent_of_the_working_tree()
         .collect();
     assert_eq!(staged_lines, vec!["two".to_string(), "TWO".to_string()]);
 
-    let unstaged = provider.diff(&repo, &unstaged_diff_request()).unwrap();
+    let unstaged = provider.diff(&repo, &unstaged_diff_request(), &CancellationToken::new()).unwrap();
     let unstaged_lines: Vec<_> = unstaged.files[0]
         .hunks
         .iter()
@@ -1464,7 +1862,7 @@ fn stage_hunks_stages_only_the_selected_hunk() {
 
     let provider = provider();
     let repo = provider.discover(repo_dir.path()).unwrap();
-    let diff = provider.diff(&repo, &unstaged_diff_request()).unwrap();
+    let diff = provider.diff(&repo, &unstaged_diff_request(), &CancellationToken::new()).unwrap();
     assert_eq!(diff.files.len(), 1);
     assert_eq!(diff.files[0].hunks.len(), 2, "the fixture must produce two disjoint hunks");
 
@@ -1476,7 +1874,7 @@ fn stage_hunks_stages_only_the_selected_hunk() {
         .stage_hunks(&repo, &[first_hunk_only])
         .expect("staging a single known-good hunk should succeed");
 
-    let staged = provider.diff(&repo, &staged_diff_request()).unwrap();
+    let staged = provider.diff(&repo, &staged_diff_request(), &CancellationToken::new()).unwrap();
     assert_eq!(staged.files[0].hunks.len(), 1);
     assert!(staged.files[0]
         .hunks
@@ -1484,7 +1882,7 @@ fn stage_hunks_stages_only_the_selected_hunk() {
         .flat_map(|h| &h.lines)
         .any(|l| l.content == "L3-changed"));
 
-    let remaining_unstaged = provider.diff(&repo, &unstaged_diff_request()).unwrap();
+    let remaining_unstaged = provider.diff(&repo, &unstaged_diff_request(), &CancellationToken::new()).unwrap();
     assert_eq!(remaining_unstaged.files[0].hunks.len(), 1);
     assert!(remaining_unstaged.files[0]
         .hunks
@@ -1503,7 +1901,7 @@ fn unstage_hunks_unstages_only_the_selected_hunk() {
 
     let provider = provider();
     let repo = provider.discover(repo_dir.path()).unwrap();
-    let staged = provider.diff(&repo, &staged_diff_request()).unwrap();
+    let staged = provider.diff(&repo, &staged_diff_request(), &CancellationToken::new()).unwrap();
     assert_eq!(staged.files[0].hunks.len(), 2);
 
     let first_hunk_only = FileDiff {
@@ -1514,7 +1912,7 @@ fn unstage_hunks_unstages_only_the_selected_hunk() {
         .unstage_hunks(&repo, &[first_hunk_only])
         .expect("unstaging a single known-good hunk should succeed");
 
-    let remaining_staged = provider.diff(&repo, &staged_diff_request()).unwrap();
+    let remaining_staged = provider.diff(&repo, &staged_diff_request(), &CancellationToken::new()).unwrap();
     assert_eq!(remaining_staged.files[0].hunks.len(), 1);
     assert!(remaining_staged.files[0]
         .hunks
@@ -1522,7 +1920,7 @@ fn unstage_hunks_unstages_only_the_selected_hunk() {
         .flat_map(|h| &h.lines)
         .any(|l| l.content == "L17-changed"));
 
-    let unstaged_again = provider.diff(&repo, &unstaged_diff_request()).unwrap();
+    let unstaged_again = provider.diff(&repo, &unstaged_diff_request(), &CancellationToken::new()).unwrap();
     assert_eq!(unstaged_again.files[0].hunks.len(), 1);
     assert!(unstaged_again.files[0]
         .hunks
@@ -1540,7 +1938,7 @@ fn stage_hunks_rejects_a_stale_selection_as_operation_conflict() {
 
     let provider = provider();
     let repo = provider.discover(repo_dir.path()).unwrap();
-    let diff = provider.diff(&repo, &unstaged_diff_request()).unwrap();
+    let diff = provider.diff(&repo, &unstaged_diff_request(), &CancellationToken::new()).unwrap();
     let stale_hunk = FileDiff {
         hunks: vec![diff.files[0].hunks[0].clone()],
         ..diff.files[0].clone()
@@ -1574,6 +1972,7 @@ fn stage_hunks_rejects_binary_files() {
         previous_path: None,
         change_type: ChangeType::Modified,
         is_binary: true,
+        truncated: false,
         hunks: vec![DiffHunk {
             old_start: 1,
             old_lines: 1,
@@ -1582,6 +1981,7 @@ fn stage_hunks_rejects_binary_files() {
             lines: vec![DiffLine {
                 origin: DiffLineOrigin::Context,
                 content: String::new(),
+                has_trailing_newline: true,
             }],
         }],
     };

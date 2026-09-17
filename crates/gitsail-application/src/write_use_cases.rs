@@ -295,6 +295,7 @@ mod tests {
             previous_path: None,
             change_type: gitsail_domain::ChangeType::Modified,
             is_binary: false,
+            truncated: false,
             hunks: vec![],
         }
     }

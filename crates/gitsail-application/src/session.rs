@@ -238,7 +238,20 @@ mod tests {
             unimplemented!("not exercised by session tests")
         }
 
-        fn diff(&self, _repo: &Repository, _request: &DiffRequest) -> Result<Diff, GitSailError> {
+        fn diff(
+            &self,
+            _repo: &Repository,
+            _request: &DiffRequest,
+            _cancel: &gitsail_domain::CancellationToken,
+        ) -> Result<Diff, GitSailError> {
+            unimplemented!("not exercised by session tests")
+        }
+
+        fn resolve_revision(
+            &self,
+            _repo: &Repository,
+            _revision: &str,
+        ) -> Result<CommitHash, GitSailError> {
             unimplemented!("not exercised by session tests")
         }
 
@@ -430,7 +443,19 @@ mod tests {
             fn branches(&self, _repo: &Repository) -> Result<Vec<Branch>, GitSailError> {
                 unimplemented!()
             }
-            fn diff(&self, _repo: &Repository, _request: &DiffRequest) -> Result<Diff, GitSailError> {
+            fn diff(
+                &self,
+                _repo: &Repository,
+                _request: &DiffRequest,
+                _cancel: &gitsail_domain::CancellationToken,
+            ) -> Result<Diff, GitSailError> {
+                unimplemented!()
+            }
+            fn resolve_revision(
+                &self,
+                _repo: &Repository,
+                _revision: &str,
+            ) -> Result<CommitHash, GitSailError> {
                 unimplemented!()
             }
             fn blame(

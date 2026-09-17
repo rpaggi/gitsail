@@ -81,13 +81,25 @@ impl GitCliProvider {
         ]
     }
 
-    /// Runs `args` in `cwd`, always pinning the `C` locale. The trait this
-    /// adapter implements does not (yet) expose cancellation, so a fresh,
-    /// never-cancelled token is used for every call (SAD §39 notes this as
-    /// a future evolution point).
+    /// Runs `args` in `cwd`, always pinning the `C` locale. Most of the
+    /// trait this adapter implements does not (yet) expose cancellation, so
+    /// a fresh, never-cancelled token is used here (SAD §39 notes this as a
+    /// future evolution point); `diff` is the first read that does expose
+    /// it (US-027 criterion 3) and uses [`Self::run_cancellable`] instead.
     fn run(&self, args: Vec<String>, cwd: &Path) -> Result<ProcessOutput, GitSailError> {
+        self.run_cancellable(args, cwd, &CancellationToken::new())
+    }
+
+    /// Like [`Self::run`], but forwards a caller-supplied cancellation
+    /// token instead of a fresh, never-cancelled one.
+    fn run_cancellable(
+        &self,
+        args: Vec<String>,
+        cwd: &Path,
+        cancel: &CancellationToken,
+    ) -> Result<ProcessOutput, GitSailError> {
         let request = ProcessRequest::new(args, cwd.to_path_buf()).with_env(Self::locale_env());
-        self.runner.run(request, &CancellationToken::new())
+        self.runner.run(request, cancel)
     }
 
     /// Runs `args`, treating a non-zero exit as an expected "false"
@@ -358,7 +370,12 @@ impl RepositoryReadPort for GitCliProvider {
         Ok(branches)
     }
 
-    fn diff(&self, repo: &Repository, request: &DiffRequest) -> Result<Diff, GitSailError> {
+    fn diff(
+        &self,
+        repo: &Repository,
+        request: &DiffRequest,
+        cancel: &CancellationToken,
+    ) -> Result<Diff, GitSailError> {
         // `from`/`to` of `None` resolve to the working tree/index (see
         // `DiffRequest`'s docs), and `staged` compares the index itself;
         // none of those exist in a bare repository.
@@ -398,9 +415,39 @@ impl RepositoryReadPort for GitCliProvider {
             args.push(path_filter.to_string_lossy().into_owned());
         }
 
-        let output = self.run(args, &repo.root_path)?;
+        let output = self.run_cancellable(args, &repo.root_path, cancel)?;
         let stdout = Self::stdout_string(&output)?;
         parse_diff(&stdout)
+    }
+
+    fn resolve_revision(
+        &self,
+        repo: &Repository,
+        revision: &str,
+    ) -> Result<CommitHash, GitSailError> {
+        require_worktree(repo, "resolve revision")?;
+        // `^{commit}` peels tags/other objects down to a commit and makes
+        // `rev-parse` fail for anything that does not resolve to one, so a
+        // caller always gets an unambiguous commit or a clear error rather
+        // than a tree/blob id it cannot diff against (US-028 criterion 1).
+        let output = self.try_run(
+            vec![
+                "rev-parse".to_string(),
+                "--verify".to_string(),
+                "-q".to_string(),
+                format!("{revision}^{{commit}}"),
+            ],
+            &repo.root_path,
+        )?;
+        let output = output.ok_or_else(|| {
+            GitSailError::new(
+                ErrorCode::RepositoryNotFound,
+                format!("revision '{revision}' could not be resolved to a commit"),
+            )
+            .with_remediation("use a valid branch, tag, or commit reference")
+        })?;
+        let hash = Self::stdout_string(&output)?.trim().to_string();
+        CommitHash::new(hash)
     }
 
     fn blame(
@@ -807,10 +854,9 @@ fn classify_delete_branch_failure(err: GitSailError) -> GitSailError {
 /// `diff --git`/`index` header (none of that is needed to apply content
 /// hunks, and this adapter never needs to *parse* what it renders here).
 ///
-/// Known limitation, inherited from how `diff()` parses hunks in the first
-/// place: a line without a trailing newline at end-of-file is rendered with
-/// one anyway, since [`DiffLine`] has no field to record its absence
-/// (US-014 is where line-accurate newline handling is tracked).
+/// A line with `has_trailing_newline: false` is rendered with the `\ No
+/// newline at end of file` marker `git apply` expects instead of a
+/// synthesized trailing newline (US-027 criterion 2).
 fn render_hunk_patch(selection: &[FileDiff]) -> String {
     let mut out = String::new();
     for file in selection {
@@ -834,6 +880,9 @@ fn render_hunk_patch(selection: &[FileDiff]) -> String {
                 out.push(sigil);
                 out.push_str(&line.content);
                 out.push('\n');
+                if !line.has_trailing_newline {
+                    out.push_str("\\ No newline at end of file\n");
+                }
             }
         }
     }
@@ -1330,6 +1379,14 @@ fn parse_ahead_behind(track: &str) -> Result<(u32, u32), GitSailError> {
 // `git diff` unified patch parsing.
 // ---------------------------------------------------------------------
 
+/// Per-file cap on parsed hunk content, independent of the process-wide
+/// stream cap (`MAX_CAPTURED_STREAM_BYTES` in `runner.rs`): a single huge
+/// file should not be fully materialized into memory just because the
+/// overall diff output was small enough to be captured (US-027 criterion
+/// 3). Hunks beyond this cap are withheld and `FileDiff::truncated` is set
+/// instead, rather than parsing partial/misleading hunk data.
+const MAX_FILE_DIFF_BYTES: usize = 512 * 1024;
+
 fn parse_diff(raw: &str) -> Result<Diff, GitSailError> {
     let files = split_diff_blocks(raw)
         .into_iter()
@@ -1338,12 +1395,25 @@ fn parse_diff(raw: &str) -> Result<Diff, GitSailError> {
     Ok(Diff { files })
 }
 
+/// Splits `raw` on `\n` without stripping a preceding `\r`, unlike
+/// [`str::lines`] — a CRLF file's content lines keep their `\r` so it
+/// round-trips through [`DiffLine::content`] (US-027 criterion 2). A single
+/// trailing empty element from a final `\n` is dropped to match
+/// `str::lines`'s behavior for the last line.
+fn raw_lines(raw: &str) -> Vec<&str> {
+    let mut lines: Vec<&str> = raw.split('\n').collect();
+    if lines.last() == Some(&"") {
+        lines.pop();
+    }
+    lines
+}
+
 /// Splits a unified patch into per-file blocks, each starting with its
 /// `diff --git a/... b/...` header line. Any bytes before the first such
 /// header (not expected in practice) are discarded rather than misread.
 fn split_diff_blocks(raw: &str) -> Vec<Vec<&str>> {
     let mut blocks: Vec<Vec<&str>> = Vec::new();
-    for line in raw.lines() {
+    for line in raw_lines(raw) {
         if line.starts_with("diff --git ") {
             blocks.push(vec![line]);
         } else if let Some(block) = blocks.last_mut() {
@@ -1371,6 +1441,8 @@ fn parse_diff_block(lines: Vec<&str>) -> Result<FileDiff, GitSailError> {
     let mut binary_old_path: Option<PathBuf> = None;
     let mut binary_new_path: Option<PathBuf> = None;
     let mut hunks = Vec::new();
+    let mut hunk_bytes_total = 0usize;
+    let mut truncated = false;
 
     let mut i = 1;
     while i < lines.len() {
@@ -1412,7 +1484,15 @@ fn parse_diff_block(lines: Vec<&str>) -> Result<FileDiff, GitSailError> {
             i += 1;
         } else if line.starts_with("@@ ") {
             let (hunk, consumed) = parse_diff_hunk(&lines, i)?;
-            hunks.push(hunk);
+            if !truncated {
+                let hunk_bytes: usize = hunk.lines.iter().map(|l| l.content.len() + 1).sum();
+                if hunk_bytes_total + hunk_bytes > MAX_FILE_DIFF_BYTES {
+                    truncated = true;
+                } else {
+                    hunk_bytes_total += hunk_bytes;
+                    hunks.push(hunk);
+                }
+            }
             i += consumed;
         } else {
             i += 1;
@@ -1453,6 +1533,7 @@ fn parse_diff_block(lines: Vec<&str>) -> Result<FileDiff, GitSailError> {
         previous_path,
         change_type,
         is_binary,
+        truncated,
         hunks,
     })
 }
@@ -1497,7 +1578,7 @@ fn parse_diff_git_header(line: &str) -> Result<(PathBuf, PathBuf), GitSailError>
 fn parse_diff_hunk(lines: &[&str], start: usize) -> Result<(DiffHunk, usize), GitSailError> {
     let (old_start, old_lines, new_start, new_lines) = parse_diff_hunk_header(lines[start])?;
 
-    let mut content_lines = Vec::new();
+    let mut content_lines: Vec<DiffLine> = Vec::new();
     let mut i = start + 1;
     while i < lines.len() {
         let line = lines[i];
@@ -1508,9 +1589,15 @@ fn parse_diff_hunk(lines: &[&str], start: usize) -> Result<(DiffHunk, usize), Gi
             Some(b' ') => DiffLineOrigin::Context,
             Some(b'+') => DiffLineOrigin::Addition,
             Some(b'-') => DiffLineOrigin::Deletion,
-            // "\ No newline at end of file" and any other stray marker
-            // line: not a content line, skip without ending the hunk.
+            // "\ No newline at end of file" refers to the content line
+            // immediately preceding it (US-027 criterion 2); any other
+            // stray marker line is skipped without ending the hunk.
             _ => {
+                if line == "\\ No newline at end of file" {
+                    if let Some(last) = content_lines.last_mut() {
+                        last.has_trailing_newline = false;
+                    }
+                }
                 i += 1;
                 continue;
             }
@@ -1518,6 +1605,7 @@ fn parse_diff_hunk(lines: &[&str], start: usize) -> Result<(DiffHunk, usize), Gi
         content_lines.push(DiffLine {
             origin,
             content: line[1..].to_string(),
+            has_trailing_newline: true,
         });
         i += 1;
     }
@@ -1780,6 +1868,7 @@ mod tests {
             previous_path: None,
             change_type: ChangeType::Modified,
             is_binary: false,
+            truncated: false,
             hunks: vec![DiffHunk {
                 old_start: 1,
                 old_lines: 2,
@@ -1789,14 +1878,17 @@ mod tests {
                     DiffLine {
                         origin: DiffLineOrigin::Context,
                         content: "one".to_string(),
+                        has_trailing_newline: true,
                     },
                     DiffLine {
                         origin: DiffLineOrigin::Deletion,
                         content: "two".to_string(),
+                        has_trailing_newline: true,
                     },
                     DiffLine {
                         origin: DiffLineOrigin::Addition,
                         content: "TWO".to_string(),
+                        has_trailing_newline: true,
                     },
                 ],
             }],
@@ -1820,6 +1912,7 @@ mod tests {
             previous_path: None,
             change_type: ChangeType::Added,
             is_binary: false,
+            truncated: false,
             hunks: vec![DiffHunk {
                 old_start: 0,
                 old_lines: 0,
@@ -1828,6 +1921,7 @@ mod tests {
                 lines: vec![DiffLine {
                     origin: DiffLineOrigin::Addition,
                     content: "hello".to_string(),
+                    has_trailing_newline: true,
                 }],
             }],
         };
@@ -1844,6 +1938,7 @@ mod tests {
             previous_path: None,
             change_type: ChangeType::Deleted,
             is_binary: false,
+            truncated: false,
             hunks: vec![DiffHunk {
                 old_start: 1,
                 old_lines: 1,
@@ -1852,6 +1947,7 @@ mod tests {
                 lines: vec![DiffLine {
                     origin: DiffLineOrigin::Deletion,
                     content: "bye".to_string(),
+                    has_trailing_newline: true,
                 }],
             }],
         };
@@ -1869,5 +1965,18 @@ mod tests {
         let patch = render_hunk_patch(&[file]);
 
         assert_eq!(patch, "");
+    }
+
+    #[test]
+    fn renders_a_no_trailing_newline_marker_for_the_affected_line() {
+        let mut file = modified_file_diff();
+        file.hunks[0].lines.last_mut().unwrap().has_trailing_newline = false;
+
+        let patch = render_hunk_patch(&[file]);
+
+        assert_eq!(
+            patch,
+            "--- a/a.txt\n+++ b/a.txt\n@@ -1,2 +1,2 @@\n one\n-two\n+TWO\n\\ No newline at end of file\n"
+        );
     }
 }

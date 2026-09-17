@@ -7,7 +7,8 @@
 use std::path::{Path, PathBuf};
 
 use gitsail_domain::{
-    Blame, Branch, BranchName, Commit, CommitHash, Diff, GitSailError, Repository, RepositoryStatus,
+    Blame, Branch, BranchName, CancellationToken, Commit, CommitHash, Diff, GitSailError,
+    Repository, RepositoryStatus,
 };
 
 /// A single page of results plus continuation metadata (SAD §25).
@@ -94,7 +95,22 @@ pub trait RepositoryReadPort {
         -> Result<Page<Commit>, GitSailError>;
     fn commit(&self, repo: &Repository, hash: &CommitHash) -> Result<Commit, GitSailError>;
     fn branches(&self, repo: &Repository) -> Result<Vec<Branch>, GitSailError>;
-    fn diff(&self, repo: &Repository, request: &DiffRequest) -> Result<Diff, GitSailError>;
+    /// `cancel` lets a caller stop a long-running diff from another thread
+    /// (SAD §32; US-027 criterion 3) — check `cancel.is_cancelled()`
+    /// pre-call, or pass a fresh [`CancellationToken`] when cancellation is
+    /// not needed.
+    fn diff(
+        &self,
+        repo: &Repository,
+        request: &DiffRequest,
+        cancel: &CancellationToken,
+    ) -> Result<Diff, GitSailError>;
+    /// Resolves `revision` (a branch, tag, or other Git revision
+    /// expression, e.g. `main`, `v1.0`, `HEAD~2`) to the single commit it
+    /// unambiguously names (US-028 criterion 1). Fails rather than
+    /// returning a stale or partial result for a revision that does not
+    /// resolve (US-028 criterion 3).
+    fn resolve_revision(&self, repo: &Repository, revision: &str) -> Result<CommitHash, GitSailError>;
     fn blame(
         &self,
         repo: &Repository,

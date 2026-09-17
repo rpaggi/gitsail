@@ -10,12 +10,16 @@ use std::fmt;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
 use gitsail_domain::{ErrorCode, GitSailError};
+
+/// Re-exported from `gitsail-domain` so ports (`RepositoryReadPort`) can
+/// accept one without `gitsail-application` depending on this adapter (SAD
+/// §5). Kept accessible here too since this is where it is actually
+/// consumed (`run_process`/`wait_with_timeout`).
+pub use gitsail_domain::CancellationToken;
 
 /// Per-stream cap on captured stdout/stderr, so a chatty or malicious
 /// process cannot exhaust memory. Output beyond this is discarded (but
@@ -111,26 +115,6 @@ fn parse_git_version(output: &str) -> Option<String> {
         return None;
     }
     Some(version.to_string())
-}
-
-/// Cooperative cancellation signal. Cloning shares the same underlying
-/// flag, so a token can be handed to a background thread while [`run`] is
-/// blocking on another.
-#[derive(Debug, Clone, Default)]
-pub struct CancellationToken(Arc<AtomicBool>);
-
-impl CancellationToken {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn cancel(&self) {
-        self.0.store(true, Ordering::SeqCst);
-    }
-
-    pub fn is_cancelled(&self) -> bool {
-        self.0.load(Ordering::SeqCst)
-    }
 }
 
 /// A single process invocation. Executable, arguments, environment and

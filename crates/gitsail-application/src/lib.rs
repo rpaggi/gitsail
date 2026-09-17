@@ -13,8 +13,8 @@ pub mod write_use_cases;
 pub use ports::{CommitQuery, DiffRequest, Page, RepositoryReadPort};
 pub use session::{RefreshReason, RefreshTicket, RepositorySession, Selection};
 pub use use_cases::{
-    GetCommit, GetCommitHistory, GetDiff, GetFileBlame, GetRepositoryStatus, ListBranches,
-    OpenRepository,
+    CommitDiff, CompareRevisions, GetCommit, GetCommitDiff, GetCommitHistory, GetDiff,
+    GetFileBlame, GetRepositoryStatus, ListBranches, OpenRepository, RevisionComparison,
 };
 pub use write_ports::RepositoryWritePort;
 pub use write_use_cases::{
