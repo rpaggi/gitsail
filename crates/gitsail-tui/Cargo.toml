@@ -1,0 +1,12 @@
+[package]
+name = "gitsail-tui"
+version = "0.0.0"
+edition.workspace = true
+
+[dependencies]
+gitsail-application = { path = "../gitsail-application" }
+gitsail-domain = { path = "../gitsail-domain" }
+gitsail-git = { path = "../gitsail-git" }
+
+[lints]
+workspace = true

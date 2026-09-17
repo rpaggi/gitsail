@@ -1,8 +1,19 @@
-# GitSail — Planning Materials
+# GitSail
 
 **Navigate your Git history.**
 
-This folder preserves the original product and architecture documents and visual references, plus the derived product backlog. It contains no product implementation.
+GitSail is an open-source Git client ecosystem with a shared Rust core, CLI, TUI, Desktop application, and Visual Studio Code extension. The repository currently contains the initial workspace and the product and architecture baseline that guides its implementation.
+
+## Repository layout
+
+- `crates/`: Rust domain, application, Git infrastructure, protocol, CLI, and TUI packages.
+- `apps/`: Desktop and Visual Studio Code application boundaries.
+- `fixtures/`: Repositories and scenarios used by tests.
+- `docs/`: Product and architecture source material.
+
+Run `cargo check --workspace` to verify the Rust workspace.
+
+All new project artifacts are written in English. Historical Portuguese planning documents remain unchanged as source material.
 
 ## Documents and assets
 
@@ -15,11 +26,11 @@ This folder preserves the original product and architecture documents and visual
 
 ## Backlog baseline
 
-The backlog contains 26 epics and 133 planned stories spanning v0.1 through v1.0, with stable IDs, MoSCoW priorities, component ownership, dependencies, acceptance criteria and definitions of done. It includes source-section traceability, coverage of all 12 accepted ADRs, release gates and unresolved decisions.
+The backlog defines the planned epics and stories spanning v0.1 through v1.0, with stable IDs, MoSCoW priorities, component ownership, dependencies, acceptance criteria, and definitions of done. It includes source-section traceability, accepted ADR coverage, release gates, and unresolved decisions.
 
-Planning is written in Portuguese for the product owner. The requirement to keep primary technical documentation and code in English is preserved for implementation.
+Planning is written in Portuguese for the product owner. New primary technical documentation and code are written in English.
 
-Original source files and PNG assets were copied byte-for-byte from the files supplied by the user. No DOCX files were supplied or reconstructed. The backlog is a planning proposal, not evidence that product features have been implemented.
+Original source files and PNG assets were copied byte-for-byte from the files supplied by the user. No DOCX files were supplied or reconstructed. The backlog is a planning proposal, not evidence that its features have been implemented.
 
 ## Document validation
 

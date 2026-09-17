@@ -1,0 +1,10 @@
+[package]
+name = "gitsail-application"
+version = "0.0.0"
+edition.workspace = true
+
+[dependencies]
+gitsail-domain = { path = "../gitsail-domain" }
+
+[lints]
+workspace = true

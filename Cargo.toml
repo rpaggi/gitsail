@@ -1,0 +1,16 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/gitsail-domain",
+    "crates/gitsail-application",
+    "crates/gitsail-git",
+    "crates/gitsail-protocol",
+    "crates/gitsail-cli",
+    "crates/gitsail-tui",
+]
+
+[workspace.package]
+edition = "2021"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
