@@ -22,14 +22,46 @@ pub struct Page<T> {
 }
 
 /// Filters and pagination for [`RepositoryReadPort::commits`] (SAD §25).
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+///
+/// `path_filter`, when set, scopes history to commits that touch that path
+/// (US-018) rather than the whole repository. `follow_renames` makes that
+/// scoping policy explicit rather than an implicit adapter default: `true`
+/// (the default here) also surfaces the file's history under its former
+/// name(s) across renames, matching what "follow this file's evolution"
+/// means to a caller; `false` stops at the rename boundary, showing only
+/// commits under the current name.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommitQuery {
     pub limit: Option<u32>,
     pub cursor: Option<String>,
+    /// A revision or revision range in Git's own syntax (e.g. `main`,
+    /// `abc123..def456`). Ignored when `branch` is set. Defaults to `HEAD`.
     pub revision_range: Option<String>,
     pub branch: Option<BranchName>,
+    /// Matched against author name/email as a substring (Git's `--author`),
+    /// not an exact match; matching is case-sensitive with the `C` locale
+    /// this adapter always pins.
     pub author: Option<String>,
+    /// Matched against the commit message as a substring (Git's `--grep`).
+    /// Only the message is searched, never diff content.
     pub text_query: Option<String>,
+    pub path_filter: Option<PathBuf>,
+    pub follow_renames: bool,
+}
+
+impl Default for CommitQuery {
+    fn default() -> Self {
+        Self {
+            limit: None,
+            cursor: None,
+            revision_range: None,
+            branch: None,
+            author: None,
+            text_query: None,
+            path_filter: None,
+            follow_renames: true,
+        }
+    }
 }
 
 /// Selects the two sides and scope of a diff request.

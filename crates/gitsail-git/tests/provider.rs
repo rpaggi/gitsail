@@ -202,6 +202,69 @@ fn fetching_an_unknown_commit_hash_reports_repository_not_found() {
     assert_eq!(err.code(), ErrorCode::RepositoryNotFound);
 }
 
+#[test]
+fn commit_lookup_resolves_an_unambiguous_short_hash() {
+    let repo_dir = init_repo("short-hash-lookup");
+    write_file(repo_dir.path(), "a.txt", "hello\n");
+    commit_all(repo_dir.path(), "first commit");
+
+    let provider = provider();
+    let repo = provider.discover(repo_dir.path()).unwrap();
+    let full_hash = head_commit_hash(repo_dir.path());
+    let short = full_hash.to_short(12);
+
+    let commit = provider
+        .commit(&repo, &CommitHash::new(short.as_str().to_string()).unwrap())
+        .expect("an unambiguous short hash should resolve to the full commit");
+
+    assert_eq!(commit.hash, full_hash);
+}
+
+#[test]
+fn commit_history_and_lookup_preserve_all_parents_of_a_merge_commit() {
+    let repo_dir = init_repo("merge-history");
+    write_file(repo_dir.path(), "a.txt", "base\n");
+    commit_all(repo_dir.path(), "base commit");
+    let base = head_commit_hash(repo_dir.path());
+
+    git(repo_dir.path(), &["checkout", "--quiet", "-b", "feature"]);
+    write_file(repo_dir.path(), "feature.txt", "feature\n");
+    commit_all(repo_dir.path(), "feature commit");
+    let feature_tip = head_commit_hash(repo_dir.path());
+
+    git(repo_dir.path(), &["checkout", "--quiet", "main"]);
+    write_file(repo_dir.path(), "main.txt", "main\n");
+    commit_all(repo_dir.path(), "main commit");
+
+    git(
+        repo_dir.path(),
+        &["merge", "--quiet", "--no-ff", "-m", "merge feature into main", "feature"],
+    );
+    let merge_hash = head_commit_hash(repo_dir.path());
+
+    let provider = provider();
+    let repo = provider.discover(repo_dir.path()).unwrap();
+
+    let page = provider
+        .commits(&repo, &CommitQuery::default())
+        .expect("commits should succeed");
+    let merge_commit = page
+        .items
+        .iter()
+        .find(|c| c.hash == merge_hash)
+        .expect("merge commit should be present in the history");
+    assert!(merge_commit.is_merge());
+    assert!(!merge_commit.is_root());
+    assert_eq!(merge_commit.parents.len(), 2);
+    assert!(merge_commit.parents.contains(&feature_tip));
+    assert!(!merge_commit.parents.contains(&base));
+
+    let fetched = provider
+        .commit(&repo, &merge_hash)
+        .expect("fetching the merge commit by hash should succeed");
+    assert_eq!(fetched.parents, merge_commit.parents);
+}
+
 // ---------------------------------------------------------------------
 // US-006: current dir, root and subdirectory resolve the same repository;
 // nonexistent/non-repository paths fail without mutating anything.
@@ -422,6 +485,30 @@ fn discovers_a_detached_head() {
         other => panic!("expected Detached in status, got {other:?}"),
     }
     assert!(status.branch.is_none());
+}
+
+#[test]
+fn commit_history_is_available_while_head_is_detached() {
+    let repo_dir = init_repo("detached-history");
+    write_file(repo_dir.path(), "a.txt", "hello\n");
+    commit_all(repo_dir.path(), "first commit");
+    write_file(repo_dir.path(), "a.txt", "hello again\n");
+    commit_all(repo_dir.path(), "second commit");
+    let target = head_commit_hash(repo_dir.path());
+    git(repo_dir.path(), &["checkout", "--quiet", target.as_str()]);
+
+    let provider = provider();
+    let repo = provider.discover(repo_dir.path()).unwrap();
+    assert!(matches!(repo.head_state, HeadState::Detached { .. }));
+
+    let page = provider
+        .commits(&repo, &CommitQuery::default())
+        .expect("commit history should succeed while HEAD is detached");
+
+    assert_eq!(page.items.len(), 2);
+    assert_eq!(page.items[0].hash, target);
+    assert_eq!(page.items[0].subject, "second commit");
+    assert_eq!(page.items[1].subject, "first commit");
 }
 
 // ---------------------------------------------------------------------
@@ -720,6 +807,252 @@ fn commit_history_is_paginated_with_a_cursor() {
     assert!(!third_page.has_more);
     assert_eq!(third_page.next_cursor, None);
     assert_eq!(third_page.items[0].subject, "commit 0");
+}
+
+// ---------------------------------------------------------------------
+// US-017: filtering and searching history.
+// ---------------------------------------------------------------------
+
+#[test]
+fn commit_history_filters_by_author() {
+    let repo_dir = init_repo("filter-by-author");
+    write_file(repo_dir.path(), "a.txt", "one\n");
+    commit_all(repo_dir.path(), "commit by test user");
+    git(repo_dir.path(), &["config", "user.name", "Someone Else"]);
+    git(repo_dir.path(), &["config", "user.email", "else@example.com"]);
+    write_file(repo_dir.path(), "a.txt", "two\n");
+    commit_all(repo_dir.path(), "commit by someone else");
+
+    let provider = provider();
+    let repo = provider.discover(repo_dir.path()).unwrap();
+
+    let page = provider
+        .commits(
+            &repo,
+            &CommitQuery {
+                author: Some("Someone Else".to_string()),
+                ..CommitQuery::default()
+            },
+        )
+        .expect("author-filtered history should succeed");
+
+    assert_eq!(page.items.len(), 1);
+    assert_eq!(page.items[0].subject, "commit by someone else");
+}
+
+#[test]
+fn commit_history_filters_by_text_query() {
+    let repo_dir = init_repo("filter-by-text");
+    write_file(repo_dir.path(), "a.txt", "one\n");
+    commit_all(repo_dir.path(), "fix the login bug");
+    write_file(repo_dir.path(), "a.txt", "two\n");
+    commit_all(repo_dir.path(), "add new feature");
+
+    let provider = provider();
+    let repo = provider.discover(repo_dir.path()).unwrap();
+
+    let page = provider
+        .commits(
+            &repo,
+            &CommitQuery {
+                text_query: Some("login".to_string()),
+                ..CommitQuery::default()
+            },
+        )
+        .expect("text-filtered history should succeed");
+
+    assert_eq!(page.items.len(), 1);
+    assert_eq!(page.items[0].subject, "fix the login bug");
+}
+
+#[test]
+fn commit_history_filter_with_zero_matches_is_an_empty_page_not_an_error() {
+    let repo_dir = init_repo("filter-zero-results");
+    write_file(repo_dir.path(), "a.txt", "one\n");
+    commit_all(repo_dir.path(), "an ordinary commit");
+
+    let provider = provider();
+    let repo = provider.discover(repo_dir.path()).unwrap();
+
+    let page = provider
+        .commits(
+            &repo,
+            &CommitQuery {
+                text_query: Some("no-commit-matches-this".to_string()),
+                ..CommitQuery::default()
+            },
+        )
+        .expect("zero matches must not be reported as an error");
+
+    assert!(page.items.is_empty());
+    assert!(!page.has_more);
+    assert_eq!(page.next_cursor, None);
+}
+
+#[test]
+fn commit_history_combines_a_filter_with_pagination() {
+    let repo_dir = init_repo("filter-with-pagination");
+    for i in 0..4 {
+        write_file(repo_dir.path(), "a.txt", &format!("content {i}\n"));
+        commit_all(repo_dir.path(), &format!("relevant commit {i}"));
+        write_file(repo_dir.path(), "b.txt", &format!("content {i}\n"));
+        commit_all(repo_dir.path(), &format!("unrelated commit {i}"));
+    }
+
+    let provider = provider();
+    let repo = provider.discover(repo_dir.path()).unwrap();
+    let query = CommitQuery {
+        text_query: Some("relevant".to_string()),
+        limit: Some(2),
+        ..CommitQuery::default()
+    };
+
+    let first_page = provider.commits(&repo, &query).expect("first filtered page should succeed");
+    assert_eq!(first_page.items.len(), 2);
+    assert!(first_page.has_more);
+    assert!(first_page.items.iter().all(|c| c.subject.starts_with("relevant")));
+
+    let second_page = provider
+        .commits(
+            &repo,
+            &CommitQuery {
+                cursor: first_page.next_cursor.clone(),
+                ..query
+            },
+        )
+        .expect("second filtered page should succeed");
+    assert_eq!(second_page.items.len(), 2);
+    assert!(!second_page.has_more);
+    assert!(second_page.items.iter().all(|c| c.subject.starts_with("relevant")));
+}
+
+// ---------------------------------------------------------------------
+// US-018: file history.
+// ---------------------------------------------------------------------
+
+#[test]
+fn file_history_includes_only_commits_touching_the_path() {
+    let repo_dir = init_repo("file-history-basic");
+    write_file(repo_dir.path(), "a.txt", "one\n");
+    commit_all(repo_dir.path(), "touch a");
+    write_file(repo_dir.path(), "b.txt", "one\n");
+    commit_all(repo_dir.path(), "touch b");
+    write_file(repo_dir.path(), "a.txt", "two\n");
+    commit_all(repo_dir.path(), "touch a again");
+
+    let provider = provider();
+    let repo = provider.discover(repo_dir.path()).unwrap();
+
+    let page = provider
+        .commits(
+            &repo,
+            &CommitQuery {
+                path_filter: Some(PathBuf::from("a.txt")),
+                ..CommitQuery::default()
+            },
+        )
+        .expect("file history should succeed");
+
+    let subjects: Vec<&str> = page.items.iter().map(|c| c.subject.as_str()).collect();
+    assert_eq!(subjects, vec!["touch a again", "touch a"]);
+}
+
+#[test]
+fn file_history_follows_renames_when_requested_and_stops_at_the_boundary_otherwise() {
+    let repo_dir = init_repo("file-history-rename");
+    write_file(repo_dir.path(), "old.txt", "content\n");
+    commit_all(repo_dir.path(), "create old.txt");
+    git(repo_dir.path(), &["mv", "old.txt", "new.txt"]);
+    commit_all(repo_dir.path(), "rename to new.txt");
+    write_file(repo_dir.path(), "new.txt", "content changed\n");
+    commit_all(repo_dir.path(), "edit new.txt");
+
+    let provider = provider();
+    let repo = provider.discover(repo_dir.path()).unwrap();
+
+    let followed = provider
+        .commits(
+            &repo,
+            &CommitQuery {
+                path_filter: Some(PathBuf::from("new.txt")),
+                follow_renames: true,
+                ..CommitQuery::default()
+            },
+        )
+        .expect("followed file history should succeed");
+    let followed_subjects: Vec<&str> = followed.items.iter().map(|c| c.subject.as_str()).collect();
+    assert_eq!(
+        followed_subjects,
+        vec!["edit new.txt", "rename to new.txt", "create old.txt"],
+        "following renames must surface history under the file's former name"
+    );
+
+    let not_followed = provider
+        .commits(
+            &repo,
+            &CommitQuery {
+                path_filter: Some(PathBuf::from("new.txt")),
+                follow_renames: false,
+                ..CommitQuery::default()
+            },
+        )
+        .expect("non-followed file history should succeed");
+    let not_followed_subjects: Vec<&str> =
+        not_followed.items.iter().map(|c| c.subject.as_str()).collect();
+    assert_eq!(
+        not_followed_subjects,
+        vec!["edit new.txt", "rename to new.txt"],
+        "without following renames, history must stop at the rename boundary"
+    );
+}
+
+#[test]
+fn file_history_for_a_removed_file_stops_at_its_deletion_without_inventing_later_commits() {
+    let repo_dir = init_repo("file-history-removed");
+    write_file(repo_dir.path(), "gone.txt", "content\n");
+    commit_all(repo_dir.path(), "create gone.txt");
+    git(repo_dir.path(), &["rm", "--quiet", "gone.txt"]);
+    commit_all(repo_dir.path(), "delete gone.txt");
+    write_file(repo_dir.path(), "other.txt", "unrelated\n");
+    commit_all(repo_dir.path(), "unrelated later commit");
+
+    let provider = provider();
+    let repo = provider.discover(repo_dir.path()).unwrap();
+
+    let page = provider
+        .commits(
+            &repo,
+            &CommitQuery {
+                path_filter: Some(PathBuf::from("gone.txt")),
+                ..CommitQuery::default()
+            },
+        )
+        .expect("file history for a removed file should succeed");
+
+    let subjects: Vec<&str> = page.items.iter().map(|c| c.subject.as_str()).collect();
+    assert_eq!(subjects, vec!["delete gone.txt", "create gone.txt"]);
+}
+
+#[test]
+fn file_history_for_a_path_with_no_history_is_an_empty_page_not_an_error() {
+    let repo_dir = init_repo("file-history-none");
+    write_file(repo_dir.path(), "a.txt", "one\n");
+    commit_all(repo_dir.path(), "unrelated commit");
+
+    let provider = provider();
+    let repo = provider.discover(repo_dir.path()).unwrap();
+
+    let page = provider
+        .commits(
+            &repo,
+            &CommitQuery {
+                path_filter: Some(PathBuf::from("never-existed.txt")),
+                ..CommitQuery::default()
+            },
+        )
+        .expect("a path with no history must not be reported as an error");
+
+    assert!(page.items.is_empty());
 }
 
 // ---------------------------------------------------------------------

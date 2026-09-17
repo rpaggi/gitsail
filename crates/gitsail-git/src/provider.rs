@@ -273,6 +273,16 @@ impl RepositoryReadPort for GitCliProvider {
             .or(query.revision_range.as_deref())
             .unwrap_or("HEAD");
         args.push(revision.to_string());
+        if let Some(path) = &query.path_filter {
+            // `--follow` only makes sense (and is only accepted by Git)
+            // together with a single pathspec, which `path_filter` already
+            // guarantees.
+            if query.follow_renames {
+                args.push("--follow".to_string());
+            }
+            args.push("--".to_string());
+            args.push(path.to_string_lossy().into_owned());
+        }
 
         // A `git log` that cannot resolve `revision` (e.g. `HEAD` on an
         // unborn branch) is treated as an empty page rather than an error:
