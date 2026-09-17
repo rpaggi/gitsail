@@ -18,6 +18,10 @@ pub enum InputContext {
     Help,
     /// Branch-filter search input is active.
     Search,
+    /// The new-branch name prompt is active (US-048).
+    BranchName,
+    /// The commit-message composer is active (US-047).
+    CommitMessage,
     /// No overlay is active; the five panels and shortcuts bar are live.
     Normal,
 }
@@ -43,6 +47,20 @@ pub fn action_for(key: KeyEvent, ctx: InputContext) -> Option<Action> {
             KeyCode::Char(c) => Some(Action::SearchInput(c)),
             _ => None,
         },
+        InputContext::BranchName => match key.code {
+            KeyCode::Esc => Some(Action::Dismiss),
+            KeyCode::Enter => Some(Action::Activate),
+            KeyCode::Backspace => Some(Action::BranchNameBackspace),
+            KeyCode::Char(c) => Some(Action::BranchNameInput(c)),
+            _ => None,
+        },
+        InputContext::CommitMessage => match key.code {
+            KeyCode::Esc => Some(Action::Dismiss),
+            KeyCode::Enter => Some(Action::Activate),
+            KeyCode::Backspace => Some(Action::CommitMessageBackspace),
+            KeyCode::Char(c) => Some(Action::CommitMessageInput(c)),
+            _ => None,
+        },
         InputContext::Normal => match key.code {
             KeyCode::Tab => Some(Action::FocusNext),
             KeyCode::BackTab => Some(Action::FocusPrev),
@@ -56,6 +74,12 @@ pub fn action_for(key: KeyEvent, ctx: InputContext) -> Option<Action> {
                 Some(Action::Quit)
             }
             KeyCode::Char('q') => Some(Action::Quit),
+            KeyCode::Char('b') => Some(Action::ToggleBlameView),
+            KeyCode::Char('n') => Some(Action::StartCreateBranch),
+            KeyCode::Char('c') => Some(Action::RequestCheckout),
+            KeyCode::Char('d') => Some(Action::RequestDeleteBranch),
+            KeyCode::Char('s') => Some(Action::ToggleStage),
+            KeyCode::Char('C') => Some(Action::StartCommit),
             _ => None,
         },
     }

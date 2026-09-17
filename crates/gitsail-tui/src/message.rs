@@ -3,7 +3,7 @@
 //! (SAD §18: "... return typed messages/events").
 
 use gitsail_application::RefreshTicket;
-use gitsail_domain::{Branch, GitSailError, Repository, RepositoryStatus};
+use gitsail_domain::{Blame, Branch, CommitHash, Diff, GitSailError, Repository, RepositoryStatus};
 
 #[derive(Debug)]
 pub enum Message {
@@ -24,4 +24,16 @@ pub enum Message {
     /// session generation active when it was requested, for the same
     /// staleness check.
     BranchesLoaded(u64, Result<Vec<Branch>, GitSailError>),
+    /// [`crate::worker::Command::LoadDiff`] completed (US-046). Tagged with
+    /// the request id issued when it was dispatched, so a diff computed for
+    /// a since-abandoned selection is discarded.
+    DiffLoaded(u64, Result<Diff, GitSailError>),
+    /// [`crate::worker::Command::LoadBlame`] completed (US-046), tagged like
+    /// [`Self::DiffLoaded`].
+    BlameLoaded(u64, Result<Blame, GitSailError>),
+    /// A `SwitchBranch`/`CreateBranch`/`DeleteBranch`/`StageFiles`/
+    /// `UnstageFiles` [`crate::worker::Command`] completed (US-047, US-048).
+    OperationFinished(Result<(), GitSailError>),
+    /// [`crate::worker::Command::CreateCommit`] completed (US-047).
+    CommitCreated(Result<CommitHash, GitSailError>),
 }

@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use clap::Parser;
 
-use gitsail_application::RepositoryReadPort;
+use gitsail_application::{RepositoryReadPort, RepositoryWritePort};
 use gitsail_git::{GitCliProvider, GitProcessRunner, GitProcessRunnerConfig};
 use gitsail_tui::{event, keymap, terminal, ui, worker, App, Message};
 
@@ -58,7 +58,9 @@ fn main() {
             std::process::exit(1);
         }
     };
-    let port: Arc<dyn RepositoryReadPort> = Arc::new(GitCliProvider::new(runner));
+    let provider = Arc::new(GitCliProvider::new(runner));
+    let read_port: Arc<dyn RepositoryReadPort> = provider.clone();
+    let write_port: Arc<dyn RepositoryWritePort> = provider;
 
     let mut tui = match terminal::init() {
         Ok(tui) => tui,
@@ -68,7 +70,7 @@ fn main() {
         }
     };
 
-    let result = run(&mut tui, cli.repo, port, low_color);
+    let result = run(&mut tui, cli.repo, read_port, write_port, low_color);
 
     // Always restore the terminal on the way out, whether `run` returned
     // `Ok` or `Err` (US-043 criterion 1). A panic is covered separately by
@@ -88,14 +90,15 @@ fn main() {
 fn run(
     tui: &mut terminal::Tui,
     repo_path: PathBuf,
-    port: Arc<dyn RepositoryReadPort>,
+    read_port: Arc<dyn RepositoryReadPort>,
+    write_port: Arc<dyn RepositoryWritePort>,
     low_color: bool,
 ) -> std::io::Result<()> {
     let (tx, rx) = mpsc::channel::<Message>();
     event::spawn(tx.clone(), TICK_RATE);
 
-    let (mut app, initial_commands) = App::new(repo_path, Arc::clone(&port), low_color);
-    worker::dispatch(initial_commands, &port, &tx);
+    let (mut app, initial_commands) = App::new(repo_path, Arc::clone(&read_port), low_color);
+    worker::dispatch(initial_commands, &read_port, &write_port, &tx);
 
     loop {
         tui.draw(|frame| ui::render(frame, &app))?;
@@ -130,8 +133,18 @@ fn run(
                 app.on_branches_loaded(generation, result);
                 Vec::new()
             }
+            Message::DiffLoaded(request_id, result) => {
+                app.on_diff_loaded(request_id, result);
+                Vec::new()
+            }
+            Message::BlameLoaded(request_id, result) => {
+                app.on_blame_loaded(request_id, result);
+                Vec::new()
+            }
+            Message::OperationFinished(result) => app.on_operation_finished(result),
+            Message::CommitCreated(result) => app.on_commit_created(result),
         };
-        worker::dispatch(commands, &port, &tx);
+        worker::dispatch(commands, &read_port, &write_port, &tx);
 
         if app.should_quit() {
             break;

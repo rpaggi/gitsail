@@ -1,25 +1,31 @@
 //! Application state and the "Update" stage of SAD §18's event/update/
-//! render model (US-040, US-041).
+//! render model (US-040, US-041, US-046, US-047, US-048).
 //!
 //! [`App`] holds a [`RepositorySession`] (SAD §21) — the first real caller
 //! of that type outside its own unit tests; the CLI (EPIC-08) uses the
 //! read use cases directly and stays stateless between invocations, so a
 //! session had no consumer until now. [`App::update`] is a pure function
 //! from `(&mut App, Action)` to the [`Command`]s it wants run in the
-//! background: it never touches a [`RepositoryReadPort`] or spawns a
-//! thread itself, which is what makes "operação lenta não trava
-//! navegação" (US-041) and "descarte de resultado antigo" testable without
-//! a terminal or real timing.
+//! background: it never touches a [`RepositoryReadPort`]/
+//! [`RepositoryWritePort`] or spawns a thread itself, which is what makes
+//! "operação lenta não trava navegação" (US-041) and "descarte de resultado
+//! antigo" testable without a terminal or real timing.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use gitsail_application::{RefreshReason, RepositoryReadPort, RepositorySession};
-use gitsail_domain::{Branch, GitSailError, HeadState, Repository, RepositoryStatus};
+use gitsail_application::{
+    BlameRequest, DiffRequest, RefreshReason, RepositoryReadPort, RepositorySession,
+};
+use gitsail_domain::{
+    Blame, Branch, BranchName, CommitHash, Diff, GitSailError, HeadState, Repository,
+    RepositoryStatus,
+};
 
 use crate::action::Action;
 use crate::keymap::InputContext;
-use crate::operation::OperationState;
+use crate::operation::{OperationKind, OperationState};
+use crate::status_view::{build_status_entries, DiffScope, StatusEntry};
 use crate::worker::Command;
 
 /// One of the five regions US-040 criterion 1 requires ("sidebar, graph,
@@ -73,6 +79,16 @@ pub enum ViewPhase {
     Error,
 }
 
+/// Which content the Diff panel is currently showing for the selected file
+/// (US-046 criterion 3). Kept as a sub-mode of [`Panel::Diff`] rather than a
+/// fifth [`Panel`] variant — both views apply to the same selected file and
+/// share the same grid slot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiffViewMode {
+    Diff,
+    Blame,
+}
+
 /// Application state (the "App State" box in SAD §18's diagram).
 pub struct App {
     repo_path: PathBuf,
@@ -83,6 +99,27 @@ pub struct App {
     branches: Vec<Branch>,
     focus: Panel,
     sidebar_cursor: usize,
+
+    // -- US-046: status/diff/blame inspection --------------------------
+    status_cursor: usize,
+    selected_file: Option<StatusEntry>,
+    diff: Option<Diff>,
+    diff_error: Option<GitSailError>,
+    diff_hunk_cursor: usize,
+    diff_view_mode: DiffViewMode,
+    diff_request_id: u64,
+    blame: Option<Blame>,
+    blame_error: Option<GitSailError>,
+    blame_scroll: u16,
+    blame_request_id: u64,
+
+    // -- US-048: branch administration ----------------------------------
+    branch_input: Option<String>,
+
+    // -- US-047: stage/unstage/commit -----------------------------------
+    commit_message: Option<String>,
+    pending_paths: Vec<PathBuf>,
+
     help_visible: bool,
     search: Option<String>,
     operation: OperationState,
@@ -97,6 +134,14 @@ impl App {
     /// rather than run inline, so the very first frame already renders the
     /// `Loading` phase (US-040 criterion 2) instead of blocking before the
     /// terminal shows anything.
+    ///
+    /// Takes only a [`RepositoryReadPort`]: mutations (US-047, US-048) are
+    /// dispatched as [`Command`]s that carry a cloned [`Repository`], never
+    /// the write port itself — that port lives only in
+    /// [`crate::worker::dispatch`], the single place any Git process (read
+    /// or write) actually runs (SAD §18, §26). `port` is stored here only
+    /// because [`RepositorySession::new`] needs it for its own synchronous
+    /// `refresh` method.
     pub fn new(
         repo_path: PathBuf,
         port: Arc<dyn RepositoryReadPort>,
@@ -111,6 +156,20 @@ impl App {
             branches: Vec::new(),
             focus: Panel::Sidebar,
             sidebar_cursor: 0,
+            status_cursor: 0,
+            selected_file: None,
+            diff: None,
+            diff_error: None,
+            diff_hunk_cursor: 0,
+            diff_view_mode: DiffViewMode::Diff,
+            diff_request_id: 0,
+            blame: None,
+            blame_error: None,
+            blame_scroll: 0,
+            blame_request_id: 0,
+            branch_input: None,
+            commit_message: None,
+            pending_paths: Vec::new(),
             help_visible: false,
             search: None,
             operation: OperationState::default(),
@@ -171,6 +230,13 @@ impl App {
         self.frame_size
     }
 
+    /// The branches loaded for the sidebar, independent of any mutation
+    /// capability — reused by [`Self::request_checkout`]/
+    /// [`Self::request_delete_branch`] to look up the highlighted branch.
+    pub fn branches(&self) -> &[Branch] {
+        &self.branches
+    }
+
     /// Branches matching the active search filter (case-insensitive
     /// substring on the branch name), or every branch when no filter is
     /// active.
@@ -185,6 +251,62 @@ impl App {
             }
             _ => self.branches.iter().collect(),
         }
+    }
+
+    /// The status entries the Details panel lists (US-046 criterion 1),
+    /// recomputed from the session's last snapshot on every call — cheap
+    /// enough for a per-frame render, and it keeps a single source of truth
+    /// instead of a second copy that could drift from `session.status()`.
+    pub fn status_entries(&self) -> Vec<StatusEntry> {
+        self.session
+            .as_ref()
+            .and_then(|s| s.status())
+            .map(build_status_entries)
+            .unwrap_or_default()
+    }
+
+    pub fn status_cursor(&self) -> usize {
+        self.status_cursor
+    }
+
+    pub fn selected_file(&self) -> Option<&StatusEntry> {
+        self.selected_file.as_ref()
+    }
+
+    pub fn diff_view_mode(&self) -> DiffViewMode {
+        self.diff_view_mode
+    }
+
+    pub fn diff(&self) -> Option<&Diff> {
+        self.diff.as_ref()
+    }
+
+    pub fn diff_error(&self) -> Option<&GitSailError> {
+        self.diff_error.as_ref()
+    }
+
+    pub fn diff_hunk_cursor(&self) -> usize {
+        self.diff_hunk_cursor
+    }
+
+    pub fn blame(&self) -> Option<&Blame> {
+        self.blame.as_ref()
+    }
+
+    pub fn blame_error(&self) -> Option<&GitSailError> {
+        self.blame_error.as_ref()
+    }
+
+    pub fn blame_scroll(&self) -> u16 {
+        self.blame_scroll
+    }
+
+    pub fn branch_input(&self) -> Option<&str> {
+        self.branch_input.as_deref()
+    }
+
+    pub fn commit_message(&self) -> Option<&str> {
+        self.commit_message.as_deref()
     }
 
     /// The combined view phase US-040 criterion 2 requires stay visible.
@@ -208,10 +330,20 @@ impl App {
     }
 
     /// Which keys are currently meaningful (US-042 criterion 3: help/
-    /// search never let a hidden action through).
+    /// search/prompts never let a hidden action through). Priority: the
+    /// help overlay always wins; then the commit composer, but only while
+    /// no operation is confirming/running — the moment `Enter` moves it to
+    /// `Confirming`, this falls through to `Normal` so the *second* `Enter`
+    /// is handled by the confirmation intercept in [`Self::handle_activate`]
+    /// instead of re-editing the message; then the branch-name prompt; then
+    /// search.
     pub fn input_context(&self) -> InputContext {
         if self.help_visible {
             InputContext::Help
+        } else if self.commit_message.is_some() && self.operation.is_idle() {
+            InputContext::CommitMessage
+        } else if self.branch_input.is_some() {
+            InputContext::BranchName
         } else if self.search.is_some() {
             InputContext::Search
         } else {
@@ -226,8 +358,9 @@ impl App {
     // -- Update -------------------------------------------------------------
 
     /// Applies `action`, returning any [`Command`]s it triggers. Never
-    /// blocks and never touches `self.port` beyond cloning the `Arc` into a
-    /// `Command` for the caller to dispatch (US-041 criterion 2).
+    /// blocks and never touches `self.port`/`self.write_port` beyond
+    /// cloning the `Arc`/repository into a `Command` for the caller to
+    /// dispatch (US-041 criterion 2).
     pub fn update(&mut self, action: Action) -> Vec<Command> {
         match action {
             Action::FocusNext => {
@@ -246,10 +379,7 @@ impl App {
                 self.move_cursor(1);
                 Vec::new()
             }
-            Action::Activate => {
-                self.activate();
-                Vec::new()
-            }
+            Action::Activate => self.handle_activate(),
             Action::Dismiss => {
                 self.dismiss();
                 Vec::new()
@@ -276,44 +406,225 @@ impl App {
                 }
                 Vec::new()
             }
-            Action::Refresh => self.refresh_commands(),
+            Action::Refresh => self.refresh_commands_for(RefreshReason::Manual),
             Action::Quit => {
                 self.should_quit = true;
+                Vec::new()
+            }
+            Action::ToggleBlameView => self.toggle_blame_view(),
+            Action::StartCreateBranch => {
+                if self.focus == Panel::Sidebar {
+                    self.branch_input = Some(String::new());
+                }
+                Vec::new()
+            }
+            Action::BranchNameInput(c) => {
+                if let Some(text) = self.branch_input.as_mut() {
+                    text.push(c);
+                }
+                Vec::new()
+            }
+            Action::BranchNameBackspace => {
+                if let Some(text) = self.branch_input.as_mut() {
+                    text.pop();
+                }
+                Vec::new()
+            }
+            Action::RequestCheckout => {
+                self.request_checkout();
+                Vec::new()
+            }
+            Action::RequestDeleteBranch => {
+                self.request_delete_branch();
+                Vec::new()
+            }
+            Action::ToggleStage => self.request_toggle_stage(),
+            Action::StartCommit => {
+                if self.commit_message.is_none() {
+                    self.commit_message = Some(String::new());
+                }
+                Vec::new()
+            }
+            Action::CommitMessageInput(c) => {
+                if let Some(text) = self.commit_message.as_mut() {
+                    text.push(c);
+                }
+                Vec::new()
+            }
+            Action::CommitMessageBackspace => {
+                if let Some(text) = self.commit_message.as_mut() {
+                    text.pop();
+                }
                 Vec::new()
             }
         }
     }
 
-    fn move_cursor(&mut self, delta: i32) {
-        let len = self.filtered_branches().len();
+    fn cyclic_cursor(current: usize, delta: i32, len: usize) -> usize {
         if len == 0 {
-            self.sidebar_cursor = 0;
-            return;
+            return 0;
         }
-        let current = self.sidebar_cursor as i32;
-        let next = (current + delta).rem_euclid(len as i32);
-        self.sidebar_cursor = next as usize;
+        let next = (current as i32 + delta).rem_euclid(len as i32);
+        next as usize
     }
 
-    fn activate(&mut self) {
-        if self.focus != Panel::Sidebar {
-            return;
+    fn move_cursor(&mut self, delta: i32) {
+        match self.focus {
+            Panel::Sidebar => {
+                self.sidebar_cursor =
+                    Self::cyclic_cursor(self.sidebar_cursor, delta, self.filtered_branches().len());
+            }
+            Panel::Details => {
+                self.status_cursor =
+                    Self::cyclic_cursor(self.status_cursor, delta, self.status_entries().len());
+            }
+            Panel::Diff => match self.diff_view_mode {
+                DiffViewMode::Diff => {
+                    let hunks = self
+                        .diff
+                        .as_ref()
+                        .and_then(|d| d.files.first())
+                        .map(|f| f.hunks.len())
+                        .unwrap_or(0);
+                    self.diff_hunk_cursor =
+                        Self::cyclic_cursor(self.diff_hunk_cursor, delta, hunks);
+                }
+                DiffViewMode::Blame => {
+                    let max_scroll = self
+                        .blame
+                        .as_ref()
+                        .map(|b| b.lines.len())
+                        .unwrap_or(0)
+                        .saturating_sub(1) as i32;
+                    let next = (self.blame_scroll as i32 + delta).clamp(0, max_scroll.max(0));
+                    self.blame_scroll = next as u16;
+                }
+            },
+            Panel::Graph => {}
         }
-        let Some(branch) = self
-            .filtered_branches()
-            .get(self.sidebar_cursor)
-            .map(|b| b.name.clone())
-        else {
-            return;
+    }
+
+    /// Intercepts `Enter` for the modes that give it a meaning beyond
+    /// per-panel activation, then falls through to [`Self::activate`]:
+    /// starting a branch name means confirming it, confirming a pending
+    /// operation means dispatching it, otherwise the active panel decides.
+    fn handle_activate(&mut self) -> Vec<Command> {
+        if self.input_context() == InputContext::BranchName {
+            let name = self.branch_input.take().unwrap_or_default();
+            self.operation.begin(OperationKind::CreateBranch { name });
+            return Vec::new();
+        }
+        if self.input_context() == InputContext::CommitMessage {
+            self.operation.begin(OperationKind::CreateCommit);
+            return Vec::new();
+        }
+        if let OperationState::Confirming(kind) = &self.operation {
+            let kind = kind.clone();
+            self.operation.confirm();
+            return self.dispatch_operation(kind);
+        }
+        self.activate()
+    }
+
+    fn activate(&mut self) -> Vec<Command> {
+        match self.focus {
+            Panel::Sidebar => {
+                let Some(branch) = self
+                    .filtered_branches()
+                    .get(self.sidebar_cursor)
+                    .map(|b| b.name.clone())
+                else {
+                    return Vec::new();
+                };
+                if let Some(session) = self.session.as_mut() {
+                    session.select_branch(branch);
+                }
+                Vec::new()
+            }
+            Panel::Details => self.load_selected_diff(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Loads the diff for the status entry under the cursor (US-046
+    /// criterion 1: "abre o diff correto"), resetting any previously loaded
+    /// diff/blame so a stale view is never shown for the new selection.
+    fn load_selected_diff(&mut self) -> Vec<Command> {
+        let entries = self.status_entries();
+        let Some(entry) = entries.get(self.status_cursor).cloned() else {
+            return Vec::new();
         };
-        if let Some(session) = self.session.as_mut() {
-            session.select_branch(branch);
+        self.selected_file = Some(entry.clone());
+        self.diff = None;
+        self.diff_error = None;
+        self.diff_hunk_cursor = 0;
+        self.diff_view_mode = DiffViewMode::Diff;
+        self.blame = None;
+        self.blame_error = None;
+        self.blame_scroll = 0;
+        self.diff_request_id += 1;
+
+        let Some(session) = self.session.as_ref() else {
+            return Vec::new();
+        };
+        let repo = session.repository().clone();
+        let request = DiffRequest {
+            staged: matches!(entry.scope, DiffScope::Staged),
+            path_filter: Some(entry.path.clone()),
+            ..DiffRequest::default()
+        };
+        vec![Command::LoadDiff(self.diff_request_id, repo, request)]
+    }
+
+    /// Toggles the Diff panel between diff and blame content for the
+    /// currently selected file (US-046 criterion 3). Always reloads blame
+    /// on switching to it rather than tracking whether a cached result
+    /// still matches the selection — one `git blame` call is cheap, and
+    /// this avoids a second staleness policy alongside the request-id one
+    /// already used for both diff and blame results.
+    fn toggle_blame_view(&mut self) -> Vec<Command> {
+        self.diff_view_mode = match self.diff_view_mode {
+            DiffViewMode::Diff => DiffViewMode::Blame,
+            DiffViewMode::Blame => DiffViewMode::Diff,
+        };
+        if self.diff_view_mode != DiffViewMode::Blame {
+            return Vec::new();
         }
+        let Some(entry) = self.selected_file.clone() else {
+            return Vec::new();
+        };
+        let Some(session) = self.session.as_ref() else {
+            return Vec::new();
+        };
+        self.blame_request_id += 1;
+        let repo = session.repository().clone();
+        let content_version = session.generation();
+        let request = BlameRequest {
+            file: entry.path.clone(),
+            revision: None,
+            line_range: None,
+            buffer_contents: None,
+        };
+        vec![Command::LoadBlame(
+            self.blame_request_id,
+            repo,
+            request,
+            content_version,
+        )]
     }
 
     fn dismiss(&mut self) {
         if self.help_visible {
             self.help_visible = false;
+        } else if self.commit_message.is_some() && self.operation.is_idle() {
+            // A confirmation in flight (`Confirming(CreateCommit)`) is left
+            // alone here — cancelling *that* is `operation.cancel()` below,
+            // which never touches `commit_message`, so a cancelled
+            // confirmation returns to an editable composer with the typed
+            // message intact.
+            self.commit_message = None;
+        } else if self.branch_input.is_some() {
+            self.branch_input = None;
         } else if self.search.is_some() {
             self.search = None;
             self.sidebar_cursor = 0;
@@ -322,11 +633,130 @@ impl App {
         }
     }
 
-    fn refresh_commands(&mut self) -> Vec<Command> {
+    /// Stages or unstages the status entry under the cursor (US-047
+    /// criterion 1: "seleção de arquivos invoca casos de uso
+    /// compartilhados"). Both are `OperationRisk::Safe` (SAD §20), so this
+    /// skips the explicit `Confirming` step other mutations go through —
+    /// only `Moderate`/`Destructive` operations ask for a second `Enter`.
+    fn request_toggle_stage(&mut self) -> Vec<Command> {
+        if self.focus != Panel::Details {
+            return Vec::new();
+        }
+        let entries = self.status_entries();
+        let Some(entry) = entries.get(self.status_cursor) else {
+            return Vec::new();
+        };
+        let kind = match entry.scope {
+            DiffScope::Worktree => OperationKind::StageFiles,
+            DiffScope::Staged => OperationKind::UnstageFiles,
+        };
+        self.pending_paths = vec![entry.path.clone()];
+        self.operation.begin(kind.clone());
+        self.operation.confirm();
+        self.dispatch_operation(kind)
+    }
+
+    /// Starts confirmation for checking out the highlighted branch
+    /// (US-048). A no-op on the current branch — there is nothing to
+    /// switch to.
+    fn request_checkout(&mut self) {
+        if self.focus != Panel::Sidebar {
+            return;
+        }
+        let Some(branch) = self
+            .filtered_branches()
+            .get(self.sidebar_cursor)
+            .map(|b| (*b).clone())
+        else {
+            return;
+        };
+        if branch.is_current {
+            return;
+        }
+        self.operation.begin(OperationKind::SwitchBranch {
+            target: branch.name.as_str().to_string(),
+        });
+    }
+
+    /// Starts confirmation for deleting the highlighted branch (US-048).
+    /// Never forces the delete — Git's own refusal of an unmerged branch
+    /// (US-023) is what makes forcing a separate, `Destructive` decision a
+    /// future story can surface explicitly; this always requests the safe
+    /// path first.
+    fn request_delete_branch(&mut self) {
+        if self.focus != Panel::Sidebar {
+            return;
+        }
+        let Some(branch) = self
+            .filtered_branches()
+            .get(self.sidebar_cursor)
+            .map(|b| (*b).clone())
+        else {
+            return;
+        };
+        if branch.is_current {
+            return;
+        }
+        self.operation.begin(OperationKind::DeleteBranch {
+            name: branch.name.as_str().to_string(),
+            force: false,
+        });
+    }
+
+    /// Turns a confirmed [`OperationKind`] into the [`Command`] that
+    /// actually runs it. A malformed name (only possible from a
+    /// hand-typed branch name — `Branch`/`StatusEntry`-derived kinds are
+    /// always well-formed) fails the operation immediately rather than ever
+    /// reaching the write port (criterion 3: nothing is discarded, and
+    /// nothing is attempted with data known to be invalid).
+    fn dispatch_operation(&mut self, kind: OperationKind) -> Vec<Command> {
+        let Some(session) = self.session.as_ref() else {
+            self.operation.cancel();
+            return Vec::new();
+        };
+        let repo = session.repository().clone();
+        match kind {
+            OperationKind::StageFiles => {
+                let paths = std::mem::take(&mut self.pending_paths);
+                vec![Command::StageFiles(repo, paths)]
+            }
+            OperationKind::UnstageFiles => {
+                let paths = std::mem::take(&mut self.pending_paths);
+                vec![Command::UnstageFiles(repo, paths)]
+            }
+            OperationKind::CreateCommit => {
+                let message = self.commit_message.clone().unwrap_or_default();
+                vec![Command::CreateCommit(repo, message)]
+            }
+            OperationKind::SwitchBranch { target } => match BranchName::new(target) {
+                Ok(name) => vec![Command::SwitchBranch(repo, name)],
+                Err(err) => {
+                    self.operation.fail(err);
+                    Vec::new()
+                }
+            },
+            OperationKind::CreateBranch { name } => match BranchName::new(name) {
+                Ok(name) => vec![Command::CreateBranch(repo, name, None)],
+                Err(err) => {
+                    self.operation.fail(err);
+                    Vec::new()
+                }
+            },
+            OperationKind::DeleteBranch { name, force } => match BranchName::new(name) {
+                Ok(name) => vec![Command::DeleteBranch(repo, name, force)],
+                Err(err) => {
+                    self.operation.fail(err);
+                    Vec::new()
+                }
+            },
+        }
+    }
+
+    fn refresh_commands_for(&mut self, reason: RefreshReason) -> Vec<Command> {
         let Some(session) = self.session.as_mut() else {
             return Vec::new();
         };
-        let ticket = session.begin_refresh(RefreshReason::Manual);
+        let ticket = session.begin_refresh(reason);
         let repo = session.repository().clone();
         vec![
             Command::RefreshStatus(ticket, repo.clone()),
@@ -370,6 +800,12 @@ impl App {
     /// silently, exactly for a failure as
     /// [`gitsail_application::RepositorySession::apply_refresh`] already
     /// does for a success (US-041 criterion 3).
+    ///
+    /// A successful refresh also clears any selected file/diff/blame: the
+    /// status it was computed against may no longer be current (a file may
+    /// have been staged, reverted, or changed by another process), and
+    /// re-selecting from the fresh list is cheaper and safer than trying to
+    /// carry an old selection forward.
     pub fn on_status_refreshed(
         &mut self,
         ticket: gitsail_application::RefreshTicket,
@@ -385,6 +821,15 @@ impl App {
             Ok(status) => {
                 session.apply_refresh(ticket, status);
                 self.status_error = None;
+                self.status_cursor = 0;
+                self.selected_file = None;
+                self.diff = None;
+                self.diff_error = None;
+                self.diff_hunk_cursor = 0;
+                self.diff_view_mode = DiffViewMode::Diff;
+                self.blame = None;
+                self.blame_error = None;
+                self.blame_scroll = 0;
             }
             Err(error) => {
                 self.status_error = Some(error);
@@ -416,14 +861,95 @@ impl App {
         // the whole view's error phase — the repository/status themselves
         // are what US-040 criterion 2 requires an error state for.
     }
+
+    /// Handles [`crate::message::Message::DiffLoaded`] (US-046), discarding
+    /// a result computed for a since-abandoned selection.
+    pub fn on_diff_loaded(&mut self, request_id: u64, result: Result<Diff, GitSailError>) {
+        if request_id != self.diff_request_id {
+            return;
+        }
+        match result {
+            Ok(diff) => {
+                self.diff = Some(diff);
+                self.diff_error = None;
+            }
+            Err(error) => {
+                self.diff_error = Some(error);
+            }
+        }
+    }
+
+    /// Handles [`crate::message::Message::BlameLoaded`] (US-046), matching
+    /// [`Self::on_diff_loaded`]'s staleness handling.
+    pub fn on_blame_loaded(&mut self, request_id: u64, result: Result<Blame, GitSailError>) {
+        if request_id != self.blame_request_id {
+            return;
+        }
+        match result {
+            Ok(blame) => {
+                self.blame = Some(blame);
+                self.blame_error = None;
+            }
+            Err(error) => {
+                self.blame_error = Some(error);
+            }
+        }
+    }
+
+    /// Handles the completion of a `StageFiles`/`UnstageFiles`/
+    /// `SwitchBranch`/`CreateBranch`/`DeleteBranch` [`Command`] (US-047,
+    /// US-048). Success moves the operation to `Succeeded` and refreshes
+    /// status/branches (criterion 3: "sucesso provoca refresh"/"sucesso
+    /// atualiza status/histórico"); failure moves it to `Failed` and
+    /// changes nothing else — no refresh, no state discarded (US-048
+    /// criterion 3: "mudanças incompatíveis mostram erro sem descarte").
+    ///
+    /// A `Safe`-risk success (stage/unstage) never showed a confirmation in
+    /// the first place ([`Self::request_toggle_stage`]), so it returns
+    /// straight to `Idle` instead of lingering as a `Succeeded` state that
+    /// would need dismissing — otherwise it would still be sitting there,
+    /// blocking [`Self::input_context`] from recognizing the commit
+    /// composer, the next time the person opens one.
+    pub fn on_operation_finished(&mut self, result: Result<(), GitSailError>) -> Vec<Command> {
+        match result {
+            Ok(()) => {
+                self.operation.succeed();
+                if matches!(&self.operation, OperationState::Succeeded(kind) if kind.risk() == crate::operation::OperationRisk::Safe)
+                {
+                    self.operation.cancel();
+                }
+                self.refresh_commands_for(RefreshReason::AfterMutation)
+            }
+            Err(error) => {
+                self.operation.fail(error);
+                Vec::new()
+            }
+        }
+    }
+
+    /// Handles [`crate::message::Message::CommitCreated`] (US-047). Success
+    /// clears the composer and refreshes; failure preserves the typed
+    /// message and the staged index exactly as they were (criterion 3).
+    pub fn on_commit_created(&mut self, result: Result<CommitHash, GitSailError>) -> Vec<Command> {
+        match result {
+            Ok(_hash) => {
+                self.operation.succeed();
+                self.commit_message = None;
+                self.refresh_commands_for(RefreshReason::AfterMutation)
+            }
+            Err(error) => {
+                self.operation.fail(error);
+                Vec::new()
+            }
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use gitsail_domain::{
-        BranchKind, BranchName, ChangeType, CommitHash, ErrorCode, FileChange, FileStatusCode,
-        RepositoryId,
+        BranchKind, ChangeType, ErrorCode, FileChange, FileDiff, FileStatusCode, RepositoryId,
     };
     use std::path::PathBuf;
     use std::sync::mpsc;
@@ -836,5 +1362,258 @@ mod tests {
             app.filtered_branches().is_empty(),
             "a branches result computed for an old generation must not populate the sidebar"
         );
+    }
+
+    fn open_and_load_dirty_status(app: &mut App) {
+        let open_commands = app.on_repository_opened(Ok(sample_repository()));
+        let ticket = match open_commands.first() {
+            Some(Command::RefreshStatus(t, _)) => *t,
+            other => panic!("unexpected first command: {other:?}"),
+        };
+        app.on_status_refreshed(ticket, Ok(dirty_status()));
+    }
+
+    #[test]
+    fn selecting_a_status_entry_requests_its_diff_and_a_stale_result_is_discarded() {
+        let (mut app, _port) = new_app();
+        open_and_load_dirty_status(&mut app);
+        app.update(Action::FocusNext); // Sidebar -> Graph
+        app.update(Action::FocusNext); // Graph -> Details
+
+        let commands = app.update(Action::Activate);
+        let request_id = match commands.as_slice() {
+            [Command::LoadDiff(id, _, _)] => *id,
+            other => panic!("expected exactly one LoadDiff command, got {other:?}"),
+        };
+        assert_eq!(app.selected_file().unwrap().path, PathBuf::from("a.txt"));
+
+        // A second selection bumps the request id before the first result
+        // arrives — the stale one must not populate the diff.
+        let newer_commands = app.update(Action::Activate);
+        let newer_id = match newer_commands.as_slice() {
+            [Command::LoadDiff(id, _, _)] => *id,
+            other => panic!("expected exactly one LoadDiff command, got {other:?}"),
+        };
+        assert_ne!(request_id, newer_id);
+
+        app.on_diff_loaded(
+            request_id,
+            Ok(Diff {
+                files: vec![FileDiff {
+                    path: PathBuf::from("a.txt"),
+                    previous_path: None,
+                    change_type: ChangeType::Modified,
+                    is_binary: false,
+                    truncated: false,
+                    hunks: vec![],
+                }],
+            }),
+        );
+        assert!(
+            app.diff().is_none(),
+            "a stale diff result must be discarded"
+        );
+
+        app.on_diff_loaded(
+            newer_id,
+            Ok(Diff {
+                files: vec![FileDiff {
+                    path: PathBuf::from("a.txt"),
+                    previous_path: None,
+                    change_type: ChangeType::Modified,
+                    is_binary: false,
+                    truncated: false,
+                    hunks: vec![],
+                }],
+            }),
+        );
+        assert!(app.diff().is_some());
+    }
+
+    #[test]
+    fn toggling_stage_on_a_worktree_entry_dispatches_stage_files_without_confirmation() {
+        let (mut app, _port) = new_app();
+        open_and_load_dirty_status(&mut app);
+        app.update(Action::FocusNext);
+        app.update(Action::FocusNext);
+
+        let commands = app.update(Action::ToggleStage);
+        match commands.as_slice() {
+            [Command::StageFiles(_, paths)] => assert_eq!(paths, &[PathBuf::from("a.txt")]),
+            other => panic!("expected exactly one StageFiles command, got {other:?}"),
+        }
+        assert!(
+            matches!(
+                app.operation(),
+                OperationState::InProgress(OperationKind::StageFiles)
+            ),
+            "a Safe operation must skip the Confirming step"
+        );
+    }
+
+    #[test]
+    fn checking_out_the_current_branch_is_a_no_op() {
+        let (mut app, _port) = new_app();
+        app.on_repository_opened(Ok(sample_repository()));
+        app.on_branches_loaded(
+            app.session().unwrap().generation(),
+            Ok(vec![sample_branch("main", true)]),
+        );
+
+        app.update(Action::RequestCheckout);
+        assert!(app.operation().is_idle());
+    }
+
+    #[test]
+    fn checking_out_another_branch_confirms_then_dispatches_switch_branch() {
+        let (mut app, _port) = new_app();
+        app.on_repository_opened(Ok(sample_repository()));
+        app.on_branches_loaded(
+            app.session().unwrap().generation(),
+            Ok(vec![
+                sample_branch("main", true),
+                sample_branch("develop", false),
+            ]),
+        );
+        app.update(Action::MoveDown);
+
+        app.update(Action::RequestCheckout);
+        assert!(matches!(
+            app.operation(),
+            OperationState::Confirming(OperationKind::SwitchBranch { .. })
+        ));
+
+        let commands = app.update(Action::Activate);
+        match commands.as_slice() {
+            [Command::SwitchBranch(_, name)] => assert_eq!(name.as_str(), "develop"),
+            other => panic!("expected exactly one SwitchBranch command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cancelling_a_pending_branch_confirmation_never_dispatches_anything() {
+        let (mut app, _port) = new_app();
+        app.on_repository_opened(Ok(sample_repository()));
+        app.on_branches_loaded(
+            app.session().unwrap().generation(),
+            Ok(vec![
+                sample_branch("main", true),
+                sample_branch("develop", false),
+            ]),
+        );
+        app.update(Action::MoveDown);
+        app.update(Action::RequestDeleteBranch);
+        assert!(matches!(
+            app.operation(),
+            OperationState::Confirming(OperationKind::DeleteBranch { .. })
+        ));
+
+        app.update(Action::Dismiss);
+        assert!(app.operation().is_idle());
+    }
+
+    #[test]
+    fn creating_a_branch_types_a_name_then_confirms_then_dispatches() {
+        let (mut app, _port) = new_app();
+        app.on_repository_opened(Ok(sample_repository()));
+        app.on_branches_loaded(app.session().unwrap().generation(), Ok(vec![]));
+
+        app.update(Action::StartCreateBranch);
+        for c in "feature/x".chars() {
+            app.update(Action::BranchNameInput(c));
+        }
+        app.update(Action::Activate);
+        assert!(matches!(
+            app.operation(),
+            OperationState::Confirming(OperationKind::CreateBranch { .. })
+        ));
+        assert!(
+            app.branch_input().is_none(),
+            "the prompt closes once the name is committed to the confirmation"
+        );
+
+        let commands = app.update(Action::Activate);
+        match commands.as_slice() {
+            [Command::CreateBranch(_, name, None)] => assert_eq!(name.as_str(), "feature/x"),
+            other => panic!("expected exactly one CreateBranch command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_failed_operation_never_refreshes_and_leaves_state_untouched() {
+        let (mut app, _port) = new_app();
+        open_and_load_dirty_status(&mut app);
+        app.update(Action::FocusNext);
+        app.update(Action::FocusNext);
+        app.update(Action::ToggleStage);
+
+        let commands =
+            app.on_operation_finished(Err(GitSailError::new(ErrorCode::OperationConflict, "boom")));
+        assert!(
+            commands.is_empty(),
+            "a failure must never trigger a refresh"
+        );
+        assert!(matches!(app.operation(), OperationState::Failed(_, _)));
+    }
+
+    #[test]
+    fn composing_a_commit_shows_the_message_and_a_failure_preserves_it() {
+        let (mut app, _port) = new_app();
+        open_and_load_dirty_status(&mut app);
+
+        app.update(Action::StartCommit);
+        for c in "fix bug".chars() {
+            app.update(Action::CommitMessageInput(c));
+        }
+        assert_eq!(app.commit_message(), Some("fix bug"));
+
+        app.update(Action::Activate);
+        assert!(matches!(
+            app.operation(),
+            OperationState::Confirming(OperationKind::CreateCommit)
+        ));
+
+        let commands = app.update(Action::Activate);
+        match commands.as_slice() {
+            [Command::CreateCommit(_, message)] => assert_eq!(message, "fix bug"),
+            other => panic!("expected exactly one CreateCommit command, got {other:?}"),
+        }
+
+        let refresh_commands = app.on_commit_created(Err(GitSailError::new(
+            ErrorCode::ProcessFailure,
+            "hook rejected",
+        )));
+        assert!(refresh_commands.is_empty(), "a failure must never refresh");
+        assert_eq!(
+            app.commit_message(),
+            Some("fix bug"),
+            "a failed commit must preserve the typed message"
+        );
+        assert!(matches!(app.operation(), OperationState::Failed(_, _)));
+    }
+
+    #[test]
+    fn a_successful_commit_clears_the_composer_and_refreshes() {
+        let (mut app, _port) = new_app();
+        open_and_load_dirty_status(&mut app);
+
+        app.update(Action::StartCommit);
+        app.update(Action::CommitMessageInput('x'));
+        app.update(Action::Activate);
+        app.update(Action::Activate);
+
+        let commands = app.on_commit_created(Ok(CommitHash::new(
+            "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+        )
+        .unwrap()));
+        assert!(
+            matches!(
+                commands.as_slice(),
+                [Command::RefreshStatus(_, _), Command::LoadBranches(_, _)]
+            ),
+            "success must refresh status and branches"
+        );
+        assert!(app.commit_message().is_none());
+        assert!(matches!(app.operation(), OperationState::Succeeded(_)));
     }
 }

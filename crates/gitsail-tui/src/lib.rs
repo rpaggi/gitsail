@@ -31,13 +31,16 @@ pub mod event;
 pub mod keymap;
 pub mod message;
 pub mod operation;
+pub mod sanitize;
+pub mod status_view;
 pub mod terminal;
 pub mod ui;
 pub mod worker;
 
 pub use action::Action;
-pub use app::{App, Panel, ViewPhase};
+pub use app::{App, DiffViewMode, Panel, ViewPhase};
 pub use keymap::InputContext;
 pub use message::Message;
 pub use operation::{OperationKind, OperationRisk, OperationState};
+pub use status_view::{DiffScope, StatusEntry};
 pub use worker::Command;

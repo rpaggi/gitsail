@@ -34,4 +34,31 @@ pub enum Action {
     Refresh,
     /// Requests a clean shutdown.
     Quit,
+
+    // -- US-046: status/diff/blame inspection --------------------------
+    /// Toggles the Diff panel between its diff and blame sub-views.
+    ToggleBlameView,
+
+    // -- US-048: branch administration ----------------------------------
+    /// Opens the new-branch name prompt (`n`, Sidebar only).
+    StartCreateBranch,
+    /// Appends one character to the branch-name prompt.
+    BranchNameInput(char),
+    /// Removes the last character from the branch-name prompt.
+    BranchNameBackspace,
+    /// Requests a confirmation to check out the highlighted branch (`c`).
+    RequestCheckout,
+    /// Requests a confirmation to delete the highlighted branch (`d`).
+    RequestDeleteBranch,
+
+    // -- US-047: stage/unstage/commit -----------------------------------
+    /// Stages or unstages the status entry under the cursor, depending on
+    /// its scope (`s`, Details only).
+    ToggleStage,
+    /// Opens the commit-message composer (`C`).
+    StartCommit,
+    /// Appends one character to the commit message.
+    CommitMessageInput(char),
+    /// Removes the last character from the commit message.
+    CommitMessageBackspace,
 }

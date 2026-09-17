@@ -20,7 +20,12 @@ use gitsail_domain::{BranchName, CommitHash, FileDiff, GitSailError, Repository}
 
 /// Mutation capability against a Git repository's index and history
 /// (SAD §9's v0.2/v0.3 mutation use cases; ADR-009).
-pub trait RepositoryWritePort {
+///
+/// `Send + Sync` so an `Arc<dyn RepositoryWritePort>` can be handed to a
+/// background thread, matching [`crate::ports::RepositoryReadPort`] — first
+/// exercised by `gitsail-tui` (EPIC-10), which never runs a mutation on its
+/// render/event loop (SAD §18, §26).
+pub trait RepositoryWritePort: Send + Sync {
     /// Stages exactly `paths` into the index, including paths whose
     /// working-tree entry was deleted (US-011 criterion 1).
     fn stage_files(&self, repo: &Repository, paths: &[PathBuf]) -> Result<(), GitSailError>;

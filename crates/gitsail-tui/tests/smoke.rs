@@ -11,79 +11,22 @@
 //! layout change that drops one of the five required regions, the branch
 //! name, or the loading/empty/error indicators breaks a test here.
 
-use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+mod support;
 
-use gitsail_application::{GetRepositoryStatus, ListBranches, OpenRepository, RepositoryReadPort};
-use gitsail_git::{GitCliProvider, GitProcessRunner, GitProcessRunnerConfig};
+use std::path::PathBuf;
+
+use gitsail_application::{GetRepositoryStatus, ListBranches, OpenRepository};
 use gitsail_tui::{ui, App};
 use ratatui::backend::TestBackend;
 use ratatui::Terminal;
-
-struct TempDir(PathBuf);
-
-impl TempDir {
-    fn new(label: &str) -> Self {
-        static COUNTER: AtomicU32 = AtomicU32::new(0);
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-        let path = std::env::temp_dir().join(format!("gitsail-tui-smoke-{label}-{nanos}-{n}"));
-        std::fs::create_dir_all(&path).expect("create temp dir");
-        Self(path)
-    }
-
-    fn path(&self) -> &Path {
-        &self.0
-    }
-}
-
-impl Drop for TempDir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
-
-fn git(dir: &Path, args: &[&str]) {
-    let status = Command::new("git")
-        .args(args)
-        .current_dir(dir)
-        .env("LC_ALL", "C")
-        .env("LANG", "C")
-        .status()
-        .unwrap_or_else(|e| panic!("failed to spawn git {args:?}: {e}"));
-    assert!(status.success(), "git {args:?} failed in {dir:?}");
-}
-
-fn port() -> Arc<dyn RepositoryReadPort> {
-    let runner = GitProcessRunner::new(GitProcessRunnerConfig::default()).expect("git runner");
-    Arc::new(GitCliProvider::new(runner))
-}
-
-fn buffer_text(terminal: &Terminal<TestBackend>) -> String {
-    let buffer = terminal.backend().buffer();
-    let mut lines = Vec::new();
-    for y in 0..buffer.area.height {
-        let mut line = String::new();
-        for x in 0..buffer.area.width {
-            line.push_str(buffer[(x, y)].symbol());
-        }
-        lines.push(line);
-    }
-    lines.join("\n")
-}
+use support::{buffer_text, git, read_port, TempDir};
 
 #[test]
 fn initial_frame_shows_all_five_regions_in_the_loading_phase() {
-    let dir = TempDir::new("loading");
+    let dir = TempDir::new("smoke-loading");
     git(dir.path(), &["init", "--quiet", "--initial-branch=main"]);
 
-    let (app, _commands) = App::new(dir.path().to_path_buf(), port(), false);
+    let (app, _commands) = App::new(dir.path().to_path_buf(), read_port(), false);
     let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
     terminal.draw(|frame| ui::render(frame, &app)).unwrap();
 
@@ -101,15 +44,10 @@ fn initial_frame_shows_all_five_regions_in_the_loading_phase() {
 
 #[test]
 fn opening_a_known_fixture_repository_reaches_the_loaded_phase_with_its_branch() {
-    let dir = TempDir::new("loaded");
-    git(dir.path(), &["init", "--quiet", "--initial-branch=main"]);
-    git(dir.path(), &["config", "user.name", "Test User"]);
-    git(dir.path(), &["config", "user.email", "test@example.com"]);
-    std::fs::write(dir.path().join("README.md"), "hello\n").unwrap();
-    git(dir.path(), &["add", "README.md"]);
-    git(dir.path(), &["commit", "--quiet", "-m", "initial commit"]);
+    let dir = TempDir::new("smoke-loaded");
+    support::init_repo_with_initial_commit(dir.path());
 
-    let port = port();
+    let port = read_port();
     let (mut app, _commands) = App::new(dir.path().to_path_buf(), port.clone(), false);
 
     let repo = OpenRepository::new(port.clone())
@@ -146,10 +84,10 @@ fn opening_a_known_fixture_repository_reaches_the_loaded_phase_with_its_branch()
 
 #[test]
 fn opening_a_missing_repository_reaches_the_error_phase() {
-    let dir = TempDir::new("not-a-repo");
+    let dir = TempDir::new("smoke-not-a-repo");
 
-    let (mut app, _commands) = App::new(dir.path().to_path_buf(), port(), false);
-    let result = OpenRepository::new(port()).execute(dir.path());
+    let (mut app, _commands) = App::new(dir.path().to_path_buf(), read_port(), false);
+    let result = OpenRepository::new(read_port()).execute(dir.path());
     assert!(
         result.is_err(),
         "a plain directory must not resolve as a repository"
@@ -165,7 +103,7 @@ fn opening_a_missing_repository_reaches_the_error_phase() {
 
 #[test]
 fn a_terminal_below_the_minimum_size_shows_a_resize_message_instead_of_the_layout() {
-    let (app, _commands) = App::new(PathBuf::from("."), port(), false);
+    let (app, _commands) = App::new(PathBuf::from("."), read_port(), false);
     let mut terminal = Terminal::new(TestBackend::new(40, 10)).unwrap();
     terminal.draw(|frame| ui::render(frame, &app)).unwrap();
     let text = buffer_text(&terminal);
