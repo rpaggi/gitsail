@@ -263,6 +263,15 @@ mod tests {
         ) -> Result<Blame, GitSailError> {
             unimplemented!("not exercised by session tests")
         }
+
+        fn line_history(
+            &self,
+            _repo: &Repository,
+            _request: &crate::ports::LineHistoryRequest,
+            _cancel: &gitsail_domain::CancellationToken,
+        ) -> Result<gitsail_domain::LineHistory, GitSailError> {
+            unimplemented!("not exercised by session tests")
+        }
     }
 
     fn sample_repository(root: &str) -> Repository {
@@ -464,6 +473,14 @@ mod tests {
                 _request: &BlameRequest,
                 _cancel: &gitsail_domain::CancellationToken,
             ) -> Result<Blame, GitSailError> {
+                unimplemented!()
+            }
+            fn line_history(
+                &self,
+                _repo: &Repository,
+                _request: &crate::ports::LineHistoryRequest,
+                _cancel: &gitsail_domain::CancellationToken,
+            ) -> Result<gitsail_domain::LineHistory, GitSailError> {
                 unimplemented!()
             }
         }

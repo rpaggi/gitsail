@@ -12,11 +12,12 @@ pub mod write_ports;
 pub mod write_use_cases;
 
 pub use blame_cache::{BlameCache, BlameCacheKey, BlameQueryTicket};
-pub use ports::{BlameRequest, CommitQuery, DiffRequest, Page, RepositoryReadPort};
+pub use ports::{BlameRequest, CommitQuery, DiffRequest, LineHistoryRequest, Page, RepositoryReadPort};
 pub use session::{RefreshReason, RefreshTicket, RepositorySession, Selection};
 pub use use_cases::{
     CommitDiff, CompareRevisions, GetCommit, GetCommitDiff, GetCommitHistory, GetDiff,
-    GetFileBlame, GetRepositoryStatus, ListBranches, OpenRepository, RevisionComparison,
+    GetFileBlame, GetLineHistory, GetRepositoryStatus, ListBranches, OpenRepository,
+    RevisionComparison,
 };
 pub use write_ports::RepositoryWritePort;
 pub use write_use_cases::{

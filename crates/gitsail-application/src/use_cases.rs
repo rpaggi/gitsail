@@ -6,12 +6,12 @@ use std::path::Path;
 use std::sync::Arc;
 
 use gitsail_domain::{
-    Blame, Branch, CancellationToken, Commit, CommitHash, Diff, GitSailError, Repository,
-    RepositoryStatus,
+    Blame, Branch, CancellationToken, Commit, CommitHash, Diff, GitSailError, LineHistory,
+    Repository, RepositoryStatus,
 };
 
 use crate::blame_cache::{BlameCache, BlameCacheKey};
-use crate::ports::{BlameRequest, CommitQuery, DiffRequest, Page, RepositoryReadPort};
+use crate::ports::{BlameRequest, CommitQuery, DiffRequest, LineHistoryRequest, Page, RepositoryReadPort};
 
 /// The SHA-1 hash of the empty tree object: a value fixed by Git's object
 /// format (identical in every repository, not repository state) used as
@@ -265,6 +265,26 @@ impl GetFileBlame {
     }
 }
 
+/// Traces the commit-level history of a line range within a file (US-019).
+pub struct GetLineHistory {
+    port: Arc<dyn RepositoryReadPort>,
+}
+
+impl GetLineHistory {
+    pub fn new(port: Arc<dyn RepositoryReadPort>) -> Self {
+        Self { port }
+    }
+
+    pub fn execute(
+        &self,
+        repo: &Repository,
+        request: &LineHistoryRequest,
+        cancel: &CancellationToken,
+    ) -> Result<LineHistory, GitSailError> {
+        self.port.line_history(repo, request, cancel)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -286,9 +306,11 @@ mod tests {
         branches: Vec<Branch>,
         diff: Diff,
         blame: Blame,
+        line_history: LineHistory,
         revisions: std::collections::HashMap<String, CommitHash>,
         received_commit_query: Mutex<Option<CommitQuery>>,
         received_diff_request: Mutex<Option<DiffRequest>>,
+        received_line_history_request: Mutex<Option<LineHistoryRequest>>,
     }
 
     fn sample_signature() -> Signature {
@@ -363,9 +385,16 @@ mod tests {
                     revision: None,
                     lines: vec![],
                 },
+                line_history: LineHistory {
+                    file: PathBuf::new(),
+                    revision: CommitHash::new("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef").unwrap(),
+                    range: gitsail_domain::LineRange::new(1, 1),
+                    entries: vec![],
+                },
                 revisions: std::collections::HashMap::new(),
                 received_commit_query: Mutex::new(None),
                 received_diff_request: Mutex::new(None),
+                received_line_history_request: Mutex::new(None),
             }
         }
     }
@@ -436,6 +465,16 @@ mod tests {
             _cancel: &CancellationToken,
         ) -> Result<Blame, GitSailError> {
             Ok(self.blame.clone())
+        }
+
+        fn line_history(
+            &self,
+            _repo: &Repository,
+            request: &LineHistoryRequest,
+            _cancel: &CancellationToken,
+        ) -> Result<LineHistory, GitSailError> {
+            *self.received_line_history_request.lock().unwrap() = Some(request.clone());
+            Ok(self.line_history.clone())
         }
     }
 
@@ -709,5 +748,26 @@ mod tests {
             .execute(&port.repository, &request, 1, &CancellationToken::new())
             .unwrap();
         assert_eq!(after_invalidate, port.blame);
+    }
+
+    #[test]
+    fn get_line_history_forwards_request_and_returns_history() {
+        let port = Arc::new(FakeReadPort::new());
+        let use_case = GetLineHistory::new(port.clone());
+        let request = LineHistoryRequest {
+            file: PathBuf::from("src/lib.rs"),
+            revision: None,
+            range: gitsail_domain::LineRange::new(10, 20),
+        };
+
+        let history = use_case
+            .execute(&port.repository, &request, &CancellationToken::new())
+            .unwrap();
+
+        assert_eq!(history, port.line_history);
+        assert_eq!(
+            *port.received_line_history_request.lock().unwrap(),
+            Some(request)
+        );
     }
 }

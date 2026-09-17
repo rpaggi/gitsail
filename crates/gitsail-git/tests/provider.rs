@@ -10,8 +10,8 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use gitsail_application::{
-    BlameRequest, CommitQuery, CompareRevisions, DiffRequest, GetCommitDiff, RepositoryReadPort,
-    RepositoryWritePort,
+    BlameRequest, CommitQuery, CompareRevisions, DiffRequest, GetCommitDiff, LineHistoryRequest,
+    RepositoryReadPort, RepositoryWritePort,
 };
 use gitsail_domain::{
     BlameOrigin, BranchKind, BranchName, CancellationToken, ChangeType, CommitHash, Decoration,
@@ -2027,6 +2027,234 @@ fn blame_with_buffer_contents_fails_with_cancelled_when_the_token_is_already_can
     let err = provider
         .blame(&repo, &request, &cancel)
         .expect_err("a pre-cancelled token must stop the stdin-driven blame before it succeeds");
+
+    assert_eq!(err.code(), ErrorCode::Cancelled);
+}
+
+// ---------------------------------------------------------------------
+// Line/range history (US-019).
+// ---------------------------------------------------------------------
+
+fn line_history_request(file: &str, range: LineRange) -> LineHistoryRequest {
+    LineHistoryRequest {
+        file: PathBuf::from(file),
+        revision: None,
+        range,
+    }
+}
+
+#[test]
+fn line_history_traces_a_lines_evolution_and_ignores_a_pure_position_shift() {
+    let repo_dir = init_repo("line-history");
+    write_file(repo_dir.path(), "f.txt", "line1\nline2\nline3\n");
+    commit_all(repo_dir.path(), "introduce");
+
+    // Inserting a line before the tracked one shifts its position without
+    // changing its content — this must not appear as a history entry
+    // (US-019 criterion 2: tracking follows the line, not a fixed offset).
+    write_file(repo_dir.path(), "f.txt", "line0\nline1\nline2\nline3\n");
+    commit_all(repo_dir.path(), "insert-before");
+
+    write_file(repo_dir.path(), "f.txt", "line0\nline1\nline2X\nline3\n");
+    commit_all(repo_dir.path(), "modify");
+    let modify_hash = head_commit_hash(repo_dir.path());
+
+    let provider = provider();
+    let repo = provider.discover(repo_dir.path()).unwrap();
+
+    let history = provider
+        .line_history(&repo, &line_history_request("f.txt", LineRange::new(3, 3)), &CancellationToken::new())
+        .expect("line history should succeed for a valid range");
+
+    assert_eq!(history.entries.len(), 2, "the position-only shift must not produce an entry");
+    assert_eq!(history.entries[0].commit.subject, "modify");
+    assert_eq!(history.entries[0].commit.hash, modify_hash);
+    assert_eq!(history.entries[1].commit.subject, "introduce");
+
+    let modify_hunk = &history.entries[0].hunks[0];
+    assert_eq!((modify_hunk.old_start, modify_hunk.old_lines), (3, 1));
+    assert_eq!((modify_hunk.new_start, modify_hunk.new_lines), (3, 1));
+    assert_eq!(modify_hunk.lines[0].origin, DiffLineOrigin::Deletion);
+    assert_eq!(modify_hunk.lines[0].content, "line2");
+    assert_eq!(modify_hunk.lines[1].origin, DiffLineOrigin::Addition);
+    assert_eq!(modify_hunk.lines[1].content, "line2X");
+
+    let introduce_hunk = &history.entries[1].hunks[0];
+    assert_eq!((introduce_hunk.old_start, introduce_hunk.old_lines), (0, 0));
+    assert_eq!(introduce_hunk.lines[0].origin, DiffLineOrigin::Addition);
+    assert_eq!(introduce_hunk.lines[0].content, "line2");
+}
+
+#[test]
+fn line_history_at_an_older_revision_never_reports_commits_after_it() {
+    let repo_dir = init_repo("line-history-older-revision");
+    write_file(repo_dir.path(), "f.txt", "keep\ntarget\n");
+    commit_all(repo_dir.path(), "introduce");
+
+    write_file(repo_dir.path(), "f.txt", "keep\ntarget v2\n");
+    commit_all(repo_dir.path(), "modify");
+    let modify_hash = head_commit_hash(repo_dir.path());
+
+    // Removed entirely in a later commit (US-019 criterion 3: "removido...
+    // não recebe atribuição enganosa").
+    write_file(repo_dir.path(), "f.txt", "keep\n");
+    commit_all(repo_dir.path(), "remove");
+
+    let provider = provider();
+    let repo = provider.discover(repo_dir.path()).unwrap();
+    let request = LineHistoryRequest {
+        file: PathBuf::from("f.txt"),
+        revision: Some(modify_hash.clone()),
+        range: LineRange::new(2, 2),
+    };
+
+    let history = provider
+        .line_history(&repo, &request, &CancellationToken::new())
+        .expect("history pinned to a revision before the removal should still succeed");
+
+    assert_eq!(history.revision, modify_hash);
+    assert_eq!(history.entries.len(), 2);
+    assert_eq!(history.entries[0].commit.subject, "modify");
+    assert_eq!(history.entries[1].commit.subject, "introduce");
+    assert!(
+        history.entries.iter().all(|e| e.commit.subject != "remove"),
+        "a revision pinned before the removal must never surface the removal commit"
+    );
+}
+
+#[test]
+fn line_history_ignores_uncommitted_working_tree_changes() {
+    let repo_dir = init_repo("line-history-uncommitted");
+    write_file(repo_dir.path(), "f.txt", "committed content\n");
+    commit_all(repo_dir.path(), "commit the line");
+
+    // An uncommitted edit must never leak into a history that only exists
+    // for committed revisions (US-019 criterion 3).
+    write_file(repo_dir.path(), "f.txt", "uncommitted edit\n");
+
+    let provider = provider();
+    let repo = provider.discover(repo_dir.path()).unwrap();
+
+    let history = provider
+        .line_history(&repo, &line_history_request("f.txt", LineRange::new(1, 1)), &CancellationToken::new())
+        .expect("history should reflect only committed content");
+
+    assert_eq!(history.entries.len(), 1);
+    let hunk = &history.entries[0].hunks[0];
+    assert!(hunk.lines.iter().any(|l| l.content == "committed content"));
+    assert!(hunk.lines.iter().all(|l| l.content != "uncommitted edit"));
+}
+
+#[test]
+fn line_history_result_echoes_the_queried_file_range_and_resolves_head() {
+    let repo_dir = init_repo("line-history-echo");
+    write_file(repo_dir.path(), "f.txt", "only line\n");
+    commit_all(repo_dir.path(), "first commit");
+    let head = head_commit_hash(repo_dir.path());
+
+    let provider = provider();
+    let repo = provider.discover(repo_dir.path()).unwrap();
+
+    let history = provider
+        .line_history(
+            &repo,
+            &line_history_request("f.txt", LineRange::new(1, 1)),
+            &CancellationToken::new(),
+        )
+        .unwrap();
+
+    assert_eq!(history.file, PathBuf::from("f.txt"));
+    assert_eq!(history.range, LineRange::new(1, 1));
+    assert_eq!(history.revision, head, "a None revision must resolve to the actual HEAD commit");
+}
+
+#[test]
+fn line_history_with_a_structurally_invalid_line_range_is_rejected_before_running_git() {
+    let repo_dir = init_repo("line-history-invalid-range");
+    write_file(repo_dir.path(), "f.txt", "line1\n");
+    commit_all(repo_dir.path(), "first commit");
+
+    let provider = provider();
+    let repo = provider.discover(repo_dir.path()).unwrap();
+
+    let err = provider
+        .line_history(&repo, &line_history_request("f.txt", LineRange::new(5, 1)), &CancellationToken::new())
+        .expect_err("start after end must be rejected");
+
+    assert_eq!(err.code(), ErrorCode::ParseFailure);
+}
+
+#[test]
+fn line_history_with_a_line_range_beyond_the_files_length_returns_a_defined_error() {
+    let repo_dir = init_repo("line-history-out-of-bounds");
+    write_file(repo_dir.path(), "f.txt", "line1\nline2\n");
+    commit_all(repo_dir.path(), "first commit");
+
+    let provider = provider();
+    let repo = provider.discover(repo_dir.path()).unwrap();
+
+    let err = provider
+        .line_history(&repo, &line_history_request("f.txt", LineRange::new(10, 20)), &CancellationToken::new())
+        .expect_err("a range beyond the file's length must not silently return another range's data");
+
+    assert_eq!(err.code(), ErrorCode::ParseFailure);
+}
+
+#[test]
+fn line_history_with_a_nonexistent_file_returns_a_defined_error() {
+    let repo_dir = init_repo("line-history-missing-file");
+    write_file(repo_dir.path(), "f.txt", "line1\n");
+    commit_all(repo_dir.path(), "first commit");
+
+    let provider = provider();
+    let repo = provider.discover(repo_dir.path()).unwrap();
+
+    let err = provider
+        .line_history(
+            &repo,
+            &line_history_request("does-not-exist.txt", LineRange::new(1, 1)),
+            &CancellationToken::new(),
+        )
+        .expect_err("a nonexistent path must be a defined error, not fabricated history");
+
+    assert_eq!(err.code(), ErrorCode::RepositoryNotFound);
+}
+
+#[test]
+fn line_history_with_a_nonexistent_revision_returns_a_defined_error_not_another_versions_data() {
+    let repo_dir = init_repo("line-history-missing-revision");
+    write_file(repo_dir.path(), "f.txt", "line1\n");
+    commit_all(repo_dir.path(), "first commit");
+
+    let provider = provider();
+    let repo = provider.discover(repo_dir.path()).unwrap();
+    let request = LineHistoryRequest {
+        file: PathBuf::from("f.txt"),
+        revision: Some(CommitHash::new("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef").unwrap()),
+        range: LineRange::new(1, 1),
+    };
+
+    let err = provider
+        .line_history(&repo, &request, &CancellationToken::new())
+        .expect_err("an unresolvable revision must fail rather than fall back to HEAD");
+
+    assert_eq!(err.code(), ErrorCode::RepositoryNotFound);
+}
+
+#[test]
+fn line_history_fails_with_cancelled_when_the_token_is_already_cancelled() {
+    let repo_dir = init_repo("line-history-cancelled");
+    write_file(repo_dir.path(), "f.txt", "line1\n");
+    commit_all(repo_dir.path(), "first commit");
+
+    let provider = provider();
+    let repo = provider.discover(repo_dir.path()).unwrap();
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+
+    let err = provider
+        .line_history(&repo, &line_history_request("f.txt", LineRange::new(1, 1)), &cancel)
+        .expect_err("a pre-cancelled token must stop the line-history query before it succeeds");
 
     assert_eq!(err.code(), ErrorCode::Cancelled);
 }

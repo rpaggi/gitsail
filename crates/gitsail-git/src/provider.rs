@@ -20,13 +20,14 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use gitsail_application::{
-    BlameRequest, CommitQuery, DiffRequest, Page, RepositoryReadPort, RepositoryWritePort,
+    BlameRequest, CommitQuery, DiffRequest, LineHistoryRequest, Page, RepositoryReadPort,
+    RepositoryWritePort,
 };
 use gitsail_domain::{
     Blame, BlameLine, BlameOrigin, Branch, BranchKind, BranchName, ChangeType, Commit, CommitHash,
     Decoration, Diff, DiffHunk, DiffLine, DiffLineOrigin, ErrorCode, FileChange, FileDiff,
-    FileStatusCode, GitSailError, GitTimestamp, HeadState, Repository, RepositoryId,
-    RepositoryStatus, ShortHash, Signature,
+    FileStatusCode, GitSailError, GitTimestamp, HeadState, LineHistory, LineHistoryEntry,
+    Repository, RepositoryId, RepositoryStatus, ShortHash, Signature,
 };
 
 use crate::runner::{CancellationToken, GitProcessRunner, ProcessOutput, ProcessRequest};
@@ -506,6 +507,71 @@ impl RepositoryReadPort for GitCliProvider {
             lines,
         })
     }
+
+    /// Traces the commit-level history of `request.range` in `request.file`
+    /// via `git log -L` (US-019). Unlike `blame`, this always resolves to a
+    /// real commit — there is no working-tree mode — so `revision: None`
+    /// resolves explicitly to `HEAD` up front (criterion 3: uncommitted
+    /// content must never receive a misleading commit attribution).
+    ///
+    /// Known limitation inherited from `git log -L<range>:<path>`'s own
+    /// syntax: a `path` containing a colon cannot be expressed this way:
+    /// this is a Git CLI limitation, not one introduced by this adapter.
+    fn line_history(
+        &self,
+        repo: &Repository,
+        request: &LineHistoryRequest,
+        cancel: &CancellationToken,
+    ) -> Result<LineHistory, GitSailError> {
+        if !request.range.is_valid() {
+            return Err(parse_err(format!(
+                "invalid line range {}..={}: start must be at least 1 and not greater than end",
+                request.range.start, request.range.end
+            )));
+        }
+        // `request.revision` is already a resolved commit (mirroring
+        // `BlameRequest`): only a `None` default needs resolving, to echo
+        // back the exact commit `HEAD` named rather than the literal string
+        // "HEAD" (SAD's "echo back what was queried" convention, US-033).
+        let resolved_revision = match &request.revision {
+            Some(hash) => hash.clone(),
+            None => self.resolve_revision(repo, "HEAD")?,
+        };
+        let revision_arg = resolved_revision.as_str().to_string();
+
+        let args = vec![
+            "log".to_string(),
+            format!(
+                "-L{},{}:{}",
+                request.range.start,
+                request.range.end,
+                request.file.to_string_lossy()
+            ),
+            "--no-color".to_string(),
+            "--pretty=format:%H%x1e".to_string(),
+            revision_arg,
+        ];
+        let output = self
+            .run_cancellable(args, &repo.root_path, cancel)
+            .map_err(classify_line_history_failure)?;
+        let stdout = Self::stdout_string(&output)?;
+        let blocks = split_line_history_blocks(&stdout)?;
+
+        let mut entries = Vec::with_capacity(blocks.len());
+        for (hash, diff_lines) in blocks {
+            let commit_hash = CommitHash::new(hash)?;
+            let commit = self.commit(repo, &commit_hash)?;
+            let hunks = parse_line_history_hunks(&diff_lines)?;
+            entries.push(LineHistoryEntry { commit, hunks });
+        }
+
+        Ok(LineHistory {
+            file: request.file.clone(),
+            revision: resolved_revision,
+            range: request.range,
+            entries,
+        })
+    }
 }
 
 impl RepositoryWritePort for GitCliProvider {
@@ -885,6 +951,42 @@ fn classify_blame_failure(err: GitSailError) -> GitSailError {
     if diagnostic_text.contains("no such path")
         || diagnostic_text.contains("bad revision")
         || diagnostic_text.contains("bad object")
+    {
+        GitSailError::new(
+            ErrorCode::RepositoryNotFound,
+            "the file or revision could not be resolved",
+        )
+        .with_remediation("verify the file path and revision")
+        .with_source(err)
+    } else if diagnostic_text.contains("has only") {
+        GitSailError::new(
+            ErrorCode::ParseFailure,
+            "the requested line range is out of bounds for the file",
+        )
+        .with_remediation("choose a line range within the file's length at the queried revision")
+        .with_source(err)
+    } else {
+        err
+    }
+}
+
+/// Reclassifies a failed `git log -L` as `RepositoryNotFound` when the
+/// queried path does not exist at the queried revision or the revision
+/// itself does not resolve (US-019 criterion 3), or as `ParseFailure` when
+/// the requested line range falls outside the file — Git reports these with
+/// "There is no path", "bad object"/"bad revision", and "has only N lines"
+/// wording respectively, mirroring [`classify_blame_failure`]'s treatment
+/// of the same underlying failure kinds for `git blame`. Any other failure
+/// passes through unchanged.
+fn classify_line_history_failure(err: GitSailError) -> GitSailError {
+    if err.code() != ErrorCode::ProcessFailure {
+        return err;
+    }
+    let diagnostic_text = err.diagnostic().map(|d| d.to_string()).unwrap_or_default();
+    if diagnostic_text.contains("There is no path")
+        || diagnostic_text.contains("bad revision")
+        || diagnostic_text.contains("bad object")
+        || diagnostic_text.contains("unknown revision or path not in the working tree")
     {
         GitSailError::new(
             ErrorCode::RepositoryNotFound,
@@ -1886,6 +1988,60 @@ fn parse_blame_header(line: &str) -> Result<(String, u32, u32), GitSailError> {
         .parse()
         .map_err(|_| parse_err("blame final line number was not numeric"))?;
     Ok((hash, original_line, final_line))
+}
+
+// ---------------------------------------------------------------------
+// `git log -L ... --pretty=format:%H%x1e` line-history parsing.
+// ---------------------------------------------------------------------
+
+/// A header line is exactly the 40-character commit hash immediately
+/// followed by `RECORD_SEP` and nothing else — unambiguous, since a diff
+/// line can never start with 40 hex characters followed immediately by
+/// that control character.
+fn parse_line_history_header(line: &str) -> Option<&str> {
+    const HASH_LEN: usize = 40;
+    if line.len() != HASH_LEN + RECORD_SEP.len_utf8() {
+        return None;
+    }
+    let (hash, rest) = line.split_at(HASH_LEN);
+    if !rest.starts_with(RECORD_SEP) {
+        return None;
+    }
+    hash.bytes().all(|b| b.is_ascii_hexdigit()).then_some(hash)
+}
+
+/// Splits `-L`-with-hash-header output into one `(hash, diff_lines)` block
+/// per commit, most-recent-first (US-019). A line before the first header
+/// (not expected in practice) is discarded rather than misread as diff
+/// content belonging to no commit.
+fn split_line_history_blocks(raw: &str) -> Result<Vec<(String, Vec<&str>)>, GitSailError> {
+    let mut blocks: Vec<(String, Vec<&str>)> = Vec::new();
+    for line in raw_lines(raw) {
+        if let Some(hash) = parse_line_history_header(line) {
+            blocks.push((hash.to_string(), Vec::new()));
+        } else if let Some((_, diff_lines)) = blocks.last_mut() {
+            diff_lines.push(line);
+        }
+    }
+    Ok(blocks)
+}
+
+/// Parses every `@@ ... @@` hunk in a commit's `-L` diff block, reusing the
+/// same hunk grammar [`parse_diff_hunk`] uses for an ordinary `git diff`
+/// (the two are textually identical).
+fn parse_line_history_hunks(lines: &[&str]) -> Result<Vec<DiffHunk>, GitSailError> {
+    let mut hunks = Vec::new();
+    let mut i = 0;
+    while i < lines.len() {
+        if lines[i].starts_with("@@ ") {
+            let (hunk, consumed) = parse_diff_hunk(lines, i)?;
+            hunks.push(hunk);
+            i += consumed;
+        } else {
+            i += 1;
+        }
+    }
+    Ok(hunks)
 }
 
 #[cfg(test)]

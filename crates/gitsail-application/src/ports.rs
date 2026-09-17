@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use gitsail_domain::{
     Blame, Branch, BranchName, CancellationToken, Commit, CommitHash, Diff, GitSailError,
-    LineRange, Repository, RepositoryStatus,
+    LineHistory, LineRange, Repository, RepositoryStatus,
 };
 
 /// A single page of results plus continuation metadata (SAD §25).
@@ -102,6 +102,17 @@ pub struct BlameRequest {
     pub buffer_contents: Option<Vec<u8>>,
 }
 
+/// Selects the file, range, and starting revision for a line-history query
+/// (US-019). `revision: None` defaults to `HEAD`; unlike [`BlameRequest`],
+/// there is no working-tree/buffer option — line history only exists for
+/// committed revisions (US-019 criterion 3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LineHistoryRequest {
+    pub file: PathBuf,
+    pub revision: Option<CommitHash>,
+    pub range: LineRange,
+}
+
 /// Read-only inspection of a Git repository (SAD §9's initial read use
 /// cases, SAD §10). Adapters (e.g. `gitsail-git`) implement this trait
 /// against a real Git provider; application use cases and tests depend on
@@ -137,4 +148,13 @@ pub trait RepositoryReadPort {
         request: &BlameRequest,
         cancel: &CancellationToken,
     ) -> Result<Blame, GitSailError>;
+    /// Traces the commit-level evolution of a line range (US-019). `cancel`
+    /// matches [`Self::diff`]/[`Self::blame`]: a caller can stop a
+    /// long-running query from another thread.
+    fn line_history(
+        &self,
+        repo: &Repository,
+        request: &LineHistoryRequest,
+        cancel: &CancellationToken,
+    ) -> Result<LineHistory, GitSailError>;
 }
