@@ -1,0 +1,44 @@
+#!/bin/sh
+# A fake `git` used only by gitsail-cli's own integration tests (never
+# production code) to make --timeout/Ctrl+C cancellation deterministic: real
+# `git` is normally too fast to reliably outrace a short timeout, so this
+# script answers repository-discovery calls instantly and sleeps on
+# everything else, standing in for a slow Git invocation.
+
+case "$1" in
+    --version)
+        echo "git version 0.0.0-fake"
+        exit 0
+        ;;
+esac
+
+args="$*"
+case "$args" in
+    *--is-bare-repository*)
+        # Echo back the real invocation directory (gitsail always runs this
+        # check with cwd set to the path it was asked to discover) so every
+        # later call this fake receives a repository root that actually
+        # exists on disk, instead of a fabricated path `current_dir` would
+        # fail to `spawn()` into.
+        printf 'false\n%s\n' "$(pwd)"
+        exit 0
+        ;;
+    *--show-toplevel*)
+        pwd
+        exit 0
+        ;;
+    *"rev-parse --verify -q HEAD"*)
+        echo "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+        exit 0
+        ;;
+    *"symbolic-ref -q --short HEAD"*)
+        echo "main"
+        exit 0
+        ;;
+esac
+
+# `exec` replaces this shell process with `sleep` in place (no child
+# process forked): killing this single pid immediately closes its
+# stdout/stderr pipes, instead of leaving an orphaned grandchild holding
+# them open until its own sleep naturally elapses.
+exec sleep 5

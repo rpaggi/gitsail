@@ -927,13 +927,37 @@ Use CLI JSON as the first cross-process transport. Revisit local daemon/IPC when
 ### Consequences
 Simple distribution and debugging initially, at the cost of process startup overhead.
 
+## ADR-013 — clap for CLI argument parsing
+
+**Status:** Accepted
+
+### Context
+EPIC-08 needed a parser for the CLI's global flags, six subcommands and their per-command options/help text (US-036). Hand-rolling one would duplicate a well-solved problem; `gitsail-application`/`gitsail-domain` deliberately stay dependency-free, but the CLI crate is a presentation-layer binary with no such constraint.
+
+### Decision
+Use `clap` (derive API) for `gitsail-cli`. Usage errors (missing/unknown arguments, bad subcommands) exit with clap's own code `2` and message, kept distinct from the domain-error exit codes in `exit_code.rs`.
+
+### Consequences
+Consistent, discoverable `--help` text (including examples) essentially for free; adds one dependency tree to the CLI binary only, never to `gitsail-domain`/`gitsail-application`/`gitsail-git`.
+
+## ADR-014 — Protocol envelope, correlation and cursor shape
+
+**Status:** Accepted
+
+### Context
+ADR-008 established that a versioned envelope exists; it did not fix the exact JSON shape, and SAD §39 left "exact protocol envelope and cursor representation" open pending a concrete consumer (US-035, US-037).
+
+### Decision
+`gitsail-protocol::Envelope<T>` is tagged by a `status` field (`"ok"` or `"error"`), always carries `schemaVersion` (currently `1`) and a `requestId` (an opaque, process-generated correlation string), and holds either `data: T` or `error: ErrorPayload` — never both. Pagination reuses the same `nextCursor`/`hasMore` shape as `gitsail-application::Page`, with the cursor kept as an opaque string (the Git CLI adapter currently encodes it as a decimal offset, but consumers must not parse it).
+
+### Consequences
+Consumers (the CLI's own `--json` mode today, VS Code/Desktop later) branch on `status` alone and never need to guess the wire shape; a future breaking change increments `schemaVersion` (US-039) rather than being inferred from field presence.
+
 # 39. Open architecture decisions
 
 The following remain deliberately unresolved:
 - MIT vs Apache-2.0.
 - Tokio vs another async strategy in infrastructure.
-- Exact CLI parser library.
-- Exact protocol envelope and cursor representation.
 - Minimum supported Git version.
 - Rust MSRV.
 - Desktop state-management library.
