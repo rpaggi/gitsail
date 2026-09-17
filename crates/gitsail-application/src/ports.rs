@@ -117,7 +117,12 @@ pub struct LineHistoryRequest {
 /// cases, SAD §10). Adapters (e.g. `gitsail-git`) implement this trait
 /// against a real Git provider; application use cases and tests depend on
 /// the trait, never on a concrete adapter.
-pub trait RepositoryReadPort {
+///
+/// `Send + Sync` so an `Arc<dyn RepositoryReadPort>` can be handed to a
+/// background thread — required by any presentation layer that runs Git
+/// operations off its render/event loop rather than blocking it (SAD §18,
+/// §26; US-041 criterion 2, first exercised by `gitsail-tui`).
+pub trait RepositoryReadPort: Send + Sync {
     fn discover(&self, path: &Path) -> Result<Repository, GitSailError>;
     fn status(&self, repo: &Repository) -> Result<RepositoryStatus, GitSailError>;
     fn commits(&self, repo: &Repository, query: &CommitQuery)

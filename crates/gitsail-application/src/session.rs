@@ -104,6 +104,18 @@ impl RepositorySession {
         self.generation
     }
 
+    /// Whether `ticket` was issued for the session's current generation.
+    ///
+    /// [`apply_refresh`](Self::apply_refresh) already performs this check
+    /// internally when there is a [`RepositoryStatus`] to apply; this
+    /// method lets a caller make the same staleness decision for a
+    /// *failed* refresh, where there is no status to hand to
+    /// `apply_refresh` (e.g. US-041 criterion 3: a stale error must be
+    /// discarded exactly like a stale success).
+    pub fn is_current(&self, ticket: RefreshTicket) -> bool {
+        ticket.generation == self.generation
+    }
+
     pub fn select_branch(&mut self, branch: BranchName) {
         self.selection = Selection {
             branch: Some(branch),
@@ -396,6 +408,22 @@ mod tests {
         assert!(session.status().is_none());
         assert_eq!(session.selection(), &Selection::default());
         assert!(!session.apply_refresh(ticket, dirty_status()));
+    }
+
+    #[test]
+    fn is_current_reflects_generation_independently_of_apply_refresh() {
+        let port = Arc::new(FakePort::new(clean_status()));
+        let mut session = RepositorySession::new(port, sample_repository("/repo"));
+
+        let ticket = session.begin_refresh(RefreshReason::Manual);
+        assert!(session.is_current(ticket));
+
+        // A newer refresh starts before the first one's caller checks back in.
+        let _newer = session.begin_refresh(RefreshReason::Manual);
+        assert!(
+            !session.is_current(ticket),
+            "a ticket issued before a newer refresh must be reported stale"
+        );
     }
 
     #[test]
