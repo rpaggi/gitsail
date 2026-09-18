@@ -78,10 +78,18 @@ function originSymbol(origin: string): string {
 <template>
   <div class="diff-viewer">
     <div class="diff-viewer__toolbar">
-      <button :class="{ active: diff.mode === 'unified' }" @click="diff.setMode('unified')">
+      <button
+        :class="{ active: diff.mode === 'unified' }"
+        :aria-pressed="diff.mode === 'unified'"
+        @click="diff.setMode('unified')"
+      >
         Unified
       </button>
-      <button :class="{ active: diff.mode === 'sideBySide' }" @click="diff.setMode('sideBySide')">
+      <button
+        :class="{ active: diff.mode === 'sideBySide' }"
+        :aria-pressed="diff.mode === 'sideBySide'"
+        @click="diff.setMode('sideBySide')"
+      >
         Side-by-side
       </button>
       <span v-if="diff.file" class="diff-viewer__file">{{ diff.file }}</span>

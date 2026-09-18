@@ -227,7 +227,7 @@ onMounted(() => {
       <ul>
         <li v-for="file in conflictedFiles" :key="file.path" class="merge-panel__conflict">
           <div class="merge-panel__conflict-header">
-            <button class="link" @click="toggleInspect(file.path)">{{ file.path }}</button>
+            <button class="link" :aria-label="`Inspect conflict in ${file.path}`" @click="toggleInspect(file.path)">{{ file.path }}</button>
             <span class="stage">{{ stageLabel(file.stage) }}</span>
           </div>
 
@@ -242,9 +242,9 @@ onMounted(() => {
           </div>
 
           <div class="merge-panel__conflict-actions">
-            <button @click="merge.markResolved(file.path)">Mark resolved</button>
-            <button @click="merge.takeSide(file.path, 'ours')">Take ours</button>
-            <button @click="merge.takeSide(file.path, 'theirs')">Take theirs</button>
+            <button :aria-label="`Mark ${file.path} resolved`" @click="merge.markResolved(file.path)">Mark resolved</button>
+            <button :aria-label="`Take our side for ${file.path}`" @click="merge.takeSide(file.path, 'ours')">Take ours</button>
+            <button :aria-label="`Take their side for ${file.path}`" @click="merge.takeSide(file.path, 'theirs')">Take theirs</button>
           </div>
         </li>
       </ul>

@@ -83,7 +83,7 @@ onMounted(() => {
               — {{ pullRequestBranchSummary(item.sourceBranch, item.targetBranch) }}
             </span>
           </div>
-          <button @click="pullRequests.openInBrowser(item.url)">Open in browser</button>
+          <button :aria-label="`Open ${item.title} in browser`" @click="pullRequests.openInBrowser(item.url)">Open in browser</button>
         </li>
       </ul>
 

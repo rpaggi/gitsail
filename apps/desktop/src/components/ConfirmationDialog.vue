@@ -6,9 +6,41 @@
 // component renders whatever confirmation, progress, or result state that
 // produces. Mounted once in `App.vue`; never instantiated per-feature.
 
+import { nextTick, ref, watch } from "vue";
+
 import { useOperationStore } from "../stores/operation";
+import { focusFirst, handleFocusTrapKeydown } from "./focusTrap";
 
 const store = useOperationStore();
+const dialogEl = ref<HTMLElement | null>(null);
+
+// Focus management (US-055 criterion 1 / WCAG 2.1.2): move focus into the
+// dialog the moment it appears (any `status !== "idle"`), so a keyboard/
+// screen-reader user is never left with focus still on whatever page
+// element opened it. Watches `status` itself, not just its "idle" edge,
+// since `status` can also transition `confirming` -> `inProgress` ->
+// `succeeded` while the dialog stays open the whole time with a different
+// set of buttons each time — each of those also deserves a fresh focus
+// move onto its own (different) first button.
+watch(
+  () => store.status,
+  (status) => {
+    if (status !== "idle") {
+      void nextTick(() => focusFirst(dialogEl.value));
+    }
+  },
+);
+
+function onDialogKeydown(event: KeyboardEvent): void {
+  if (event.key === "Escape") {
+    event.preventDefault();
+    store.cancel();
+    return;
+  }
+  if (dialogEl.value) {
+    handleFocusTrapKeydown(dialogEl.value, event);
+  }
+}
 
 function riskLabel(risk: string): string {
   switch (risk) {
@@ -27,10 +59,12 @@ function riskLabel(risk: string): string {
 <template>
   <div v-if="store.status !== 'idle'" class="confirmation-overlay">
     <div
+      ref="dialogEl"
       class="confirmation-dialog"
       :class="`risk-${store.current?.risk}`"
       role="alertdialog"
       aria-modal="true"
+      @keydown="onDialogKeydown"
     >
       <template v-if="store.status === 'confirming' && store.current">
         <p class="risk-badge">{{ riskLabel(store.current.risk) }}</p>

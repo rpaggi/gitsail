@@ -80,6 +80,7 @@ function outcomeMessage(): string {
           <button
             v-if="isRelevant(file.indexStatus, 'staged')"
             :disabled="patchExport.isExporting"
+            :aria-label="`Copy staged patch for ${file.path}`"
             @click="copyPatch(file, true)"
           >
             Copy staged patch
@@ -87,6 +88,7 @@ function outcomeMessage(): string {
           <button
             v-if="isRelevant(file.worktreeStatus, 'worktree')"
             :disabled="patchExport.isExporting"
+            :aria-label="`Copy patch for ${file.path}`"
             @click="copyPatch(file, false)"
           >
             Copy patch

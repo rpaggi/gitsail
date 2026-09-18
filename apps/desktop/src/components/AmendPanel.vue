@@ -29,7 +29,8 @@ const operation = useOperationStore();
         }}
         will be folded into the amended commit.
       </p>
-      <textarea v-model="amend.message" rows="3" :disabled="operation.isBusy" />
+      <label for="amend-panel-message" class="sr-only">Amended commit message</label>
+      <textarea id="amend-panel-message" v-model="amend.message" rows="3" :disabled="operation.isBusy" />
       <button :disabled="amend.message.trim().length === 0 || operation.isBusy" @click="amend.requestAmend()">
         Amend HEAD
       </button>

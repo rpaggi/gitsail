@@ -81,8 +81,15 @@ function onDrop(event: DragEvent, zone: StagingZone): void {
             draggable="true"
             @dragstart="onDragStart($event, file, 'unstaged')"
           >
-            <span class="staging-panel__path" @click="viewDiff(file, false)">{{ file.path }}</span>
-            <button @click="staging.stageFiles([file.path])">Stage</button>
+            <button
+              class="staging-panel__path"
+              type="button"
+              :aria-label="`View diff for ${file.path}`"
+              @click="viewDiff(file, false)"
+            >
+              {{ file.path }}
+            </button>
+            <button :aria-label="`Stage ${file.path}`" @click="staging.stageFiles([file.path])">Stage</button>
           </li>
         </ul>
       </section>
@@ -100,15 +107,24 @@ function onDrop(event: DragEvent, zone: StagingZone): void {
             draggable="true"
             @dragstart="onDragStart($event, file, 'staged')"
           >
-            <span class="staging-panel__path" @click="viewDiff(file, true)">{{ file.path }}</span>
-            <button @click="staging.unstageFiles([file.path])">Unstage</button>
+            <button
+              class="staging-panel__path"
+              type="button"
+              :aria-label="`View diff for ${file.path}`"
+              @click="viewDiff(file, true)"
+            >
+              {{ file.path }}
+            </button>
+            <button :aria-label="`Unstage ${file.path}`" @click="staging.unstageFiles([file.path])">Unstage</button>
           </li>
         </ul>
       </section>
     </div>
 
     <div class="staging-panel__composer">
+      <label for="staging-panel-message" class="sr-only">Commit message</label>
       <textarea
+        id="staging-panel-message"
         v-model="staging.message"
         placeholder="Commit message"
         rows="3"
@@ -151,9 +167,20 @@ function onDrop(event: DragEvent, zone: StagingZone): void {
   padding: 0.15rem 0;
 }
 .staging-panel__path {
+  /* Reset native <button> chrome — this is a text-like trigger, not a
+     bordered button (US-055 criterion 1: it must still be a real <button>
+     so it is keyboard-reachable/activatable, just not styled like one). */
+  background: none;
+  border: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  padding: 0;
   cursor: pointer;
   overflow: hidden;
   text-overflow: ellipsis;
+  flex: 1;
+  min-width: 0;
 }
 .staging-panel__path:hover {
   text-decoration: underline;

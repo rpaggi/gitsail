@@ -42,7 +42,9 @@ function createBranchHere(hash: string): void {
 
 <template>
   <div class="search-palette">
+    <label for="gitsail-search-input" class="sr-only">Search commits and branches</label>
     <input
+      id="gitsail-search-input"
       v-model="queryInput"
       type="text"
       placeholder="Search commits (hash, message, author) or branches…"
@@ -54,9 +56,14 @@ function createBranchHere(hash: string): void {
     <div v-if="search.exactMatch" class="search-palette__exact-match">
       <strong>Exact match</strong>
       <div class="search-palette__result" :class="{ selected: graph.selectedHash === search.exactMatch.hash }">
-        <span @click="selectCommit(search.exactMatch)">
+        <button
+          class="search-palette__result-trigger"
+          type="button"
+          :aria-label="`Select commit ${search.exactMatch.shortHash}`"
+          @click="selectCommit(search.exactMatch)"
+        >
           <code>{{ search.exactMatch.shortHash }}</code> {{ search.exactMatch.subject }}
-        </span>
+        </button>
       </div>
     </div>
 
@@ -65,7 +72,7 @@ function createBranchHere(hash: string): void {
       <ul>
         <li v-for="branch in search.branchResults" :key="branch.name">
           <span>{{ branch.name }}</span>
-          <button @click="branches.requestSwitch(branch.name)">Switch</button>
+          <button :aria-label="`Switch to ${branch.name}`" @click="branches.requestSwitch(branch.name)">Switch</button>
         </li>
       </ul>
     </div>
@@ -78,12 +85,17 @@ function createBranchHere(hash: string): void {
           :key="commit.hash"
           :class="{ selected: graph.selectedHash === commit.hash }"
         >
-          <span @click="selectCommit(commit)">
+          <button
+            class="search-palette__result-trigger"
+            type="button"
+            :aria-label="`Select commit ${commit.shortHash}`"
+            @click="selectCommit(commit)"
+          >
             <code>{{ commit.shortHash }}</code> {{ commit.subject }}
-          </span>
+          </button>
           <span v-if="graph.selectedHash === commit.hash" class="search-palette__actions">
-            <button @click="copyHash(commit.hash)">Copy hash</button>
-            <button @click="createBranchHere(commit.hash)">Branch here…</button>
+            <button :aria-label="`Copy hash ${commit.shortHash}`" @click="copyHash(commit.hash)">Copy hash</button>
+            <button :aria-label="`Create branch at ${commit.shortHash}`" @click="createBranchHere(commit.hash)">Branch here…</button>
           </span>
         </li>
       </ul>
@@ -121,6 +133,17 @@ function createBranchHere(hash: string): void {
 .search-palette__actions {
   display: flex;
   gap: 0.25rem;
+}
+.search-palette__result-trigger {
+  background: none;
+  border: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  padding: 0;
+  cursor: pointer;
+  flex: 1;
+  min-width: 0;
 }
 .error {
   color: #c0392b;

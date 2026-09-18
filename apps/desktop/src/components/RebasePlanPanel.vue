@@ -64,18 +64,30 @@ function confirm(): void {
         <li v-for="(entry, index) in entries" :key="entry.commit" class="rebase-plan__entry">
           <div class="rebase-plan__entry-row">
             <span class="rebase-plan__move">
-              <button :disabled="isBusy || index === 0" title="Move up" @click="merge.moveRebasePlanEntry(index, 'up')">
+              <button
+                :disabled="isBusy || index === 0"
+                title="Move up"
+                :aria-label="`Move ${entry.shortHash} up`"
+                @click="merge.moveRebasePlanEntry(index, 'up')"
+              >
                 ↑
               </button>
               <button
                 :disabled="isBusy || index === entries.length - 1"
                 title="Move down"
+                :aria-label="`Move ${entry.shortHash} down`"
                 @click="merge.moveRebasePlanEntry(index, 'down')"
               >
                 ↓
               </button>
             </span>
-            <select :disabled="isBusy" :value="entry.action" @change="onActionChange(index, $event)">
+            <label :for="`rebase-plan-action-${entry.commit}`" class="sr-only">Action for {{ entry.shortHash }}</label>
+            <select
+              :id="`rebase-plan-action-${entry.commit}`"
+              :disabled="isBusy"
+              :value="entry.action"
+              @change="onActionChange(index, $event)"
+            >
               <option v-for="action in actions" :key="action" :value="action">{{ action }}</option>
             </select>
             <span class="rebase-plan__hash">{{ entry.shortHash }}</span>
@@ -88,6 +100,7 @@ function confirm(): void {
             :disabled="isBusy"
             :value="entry.messageOverride ?? entry.subject"
             placeholder="New commit message…"
+            :aria-label="`New commit message for ${entry.shortHash}`"
             @input="onMessageInput(index, $event)"
           ></textarea>
         </li>

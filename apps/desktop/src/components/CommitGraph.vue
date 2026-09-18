@@ -5,11 +5,12 @@
 // (criterion 2) — a large repository's history never renders thousands of
 // DOM/SVG nodes at once just because it has been paginated in.
 
-import { computed, onMounted, ref } from "vue";
+import { computed, nextTick, onMounted, ref } from "vue";
 
 import { useCommitGraphStore } from "../stores/graph";
 import { useMergeStore } from "../stores/merge";
 import { useResetStore } from "../stores/reset";
+import { rovingNextIndex } from "./keyboardNav";
 import {
   DEFAULT_LANE_WIDTH,
   DEFAULT_ROW_HEIGHT,
@@ -27,6 +28,7 @@ const viewport = ref<HTMLElement | null>(null);
 const scrollTop = ref(0);
 const viewportHeight = ref(0);
 const contextMenu = ref<{ x: number; y: number; hash: string } | null>(null);
+const contextMenuEl = ref<HTMLElement | null>(null);
 
 const laneCountForWidth = computed(() => Math.max(graph.laneCount, 1));
 const laneAreaWidth = computed(() => laneCountForWidth.value * DEFAULT_LANE_WIDTH);
@@ -82,14 +84,116 @@ function onRowHover(hash: string | null): void {
   graph.hover(hash);
 }
 
+/** DOM id for a commit row, shared between the row itself and the
+ * viewport's `aria-activedescendant` (US-055 criterion 1) — the
+ * WAI-ARIA "listbox with a virtualized/scrolling list" pattern: the
+ * viewport, not each row, stays the one focusable/tabbable element (rows
+ * come and go from the DOM as the list virtualizes), and
+ * `aria-activedescendant` is how a screen reader is told which currently
+ * rendered row counts as "focused" without literally moving DOM focus
+ * onto it. */
+function rowElementId(hash: string): string {
+  return `commit-graph-row-${hash}`;
+}
+
+function openMenuAt(x: number, y: number, hash: string): void {
+  graph.select(hash);
+  contextMenu.value = { x, y, hash };
+  // Move focus into the menu so keyboard users land somewhere actionable
+  // immediately, whether the menu was opened by a right-click or by the
+  // keyboard equivalent below — mirrors how `ConfirmationDialog.vue`/
+  // `HistoryEditingPanel.vue` are expected to receive focus on open.
+  void nextTick(() => {
+    contextMenuEl.value?.querySelector<HTMLButtonElement>("button")?.focus();
+  });
+}
+
 function onRowContextMenu(event: MouseEvent, hash: string): void {
   event.preventDefault();
-  graph.select(hash);
-  contextMenu.value = { x: event.clientX, y: event.clientY, hash };
+  openMenuAt(event.clientX, event.clientY, hash);
+}
+
+/** Keyboard equivalent of right-clicking a row (US-055 criterion 1: every
+ * mouse-only action needs a keyboard path) — the "Menu" key, or
+ * Shift+F10, both of which are the standard OS/browser convention for
+ * "open the context menu for whatever has focus". Positions the menu at
+ * the focused row's own on-screen location so it never appears somewhere
+ * unrelated to what it acts on. */
+function onRequestContextMenuFromKeyboard(hash: string): void {
+  const rowEl = document.getElementById(rowElementId(hash));
+  const rect = rowEl?.getBoundingClientRect();
+  if (rect) {
+    openMenuAt(rect.left + 24, rect.bottom, hash);
+  } else if (viewport.value) {
+    const viewportRect = viewport.value.getBoundingClientRect();
+    openMenuAt(viewportRect.left + 24, viewportRect.top + 24, hash);
+  }
 }
 
 function closeContextMenu(): void {
   contextMenu.value = null;
+}
+
+/** Closes the menu and returns focus to the graph viewport (WCAG 2.1
+ * "no keyboard trap" / focus-must-go-somewhere-sensible-on-close) — used
+ * by Escape rather than the generic `closeContextMenu` alone, which a
+ * mouse-driven close (clicking elsewhere) doesn't need. */
+function closeContextMenuAndReturnFocus(): void {
+  closeContextMenu();
+  viewport.value?.focus();
+}
+
+/** The row index currently selected, or `-1` before anything has ever been
+ * selected — arrow-key navigation below starts from row 0 in that case
+ * (the first Down/Up press selects the first/last loaded row, same as a
+ * native listbox with nothing pre-selected). */
+const selectedRowIndex = computed(() =>
+  graph.rows.findIndex((row) => row.commit.hash === graph.selectedHash),
+);
+
+/** Scrolls the viewport just enough to bring `index` into view — the
+ * virtualized-list equivalent of `Element.scrollIntoView`, which can't be
+ * used directly here since the row at `index` may not even be mounted yet
+ * (it is what we are about to scroll to). Setting `scrollTop` fires the
+ * viewport's own native `scroll` event, which `onScroll` already handles,
+ * so the visible/rendered range updates the normal way. */
+function scrollRowIntoView(index: number): void {
+  const el = viewport.value;
+  if (!el) {
+    return;
+  }
+  const top = index * DEFAULT_ROW_HEIGHT;
+  const bottom = top + DEFAULT_ROW_HEIGHT;
+  if (top < el.scrollTop) {
+    el.scrollTop = top;
+  } else if (bottom > el.scrollTop + el.clientHeight) {
+    el.scrollTop = bottom - el.clientHeight;
+  }
+}
+
+/** Arrow-key/Home/End navigation of the commit list, plus the keyboard
+ * context-menu shortcut (US-055 criterion 1: the graph's main actions —
+ * moving the selection, and reaching cherry-pick/revert/reset — must be
+ * reachable without a mouse). Non-wrapping: `Down` on the last *loaded*
+ * row does nothing rather than jumping back to row 0, since more rows may
+ * still load below (`graph.hasMore`). */
+function onViewportKeydown(event: KeyboardEvent): void {
+  if (event.key === "ContextMenu" || (event.key === "F10" && event.shiftKey)) {
+    event.preventDefault();
+    const hash = graph.selectedHash ?? graph.rows[0]?.commit.hash;
+    if (hash) {
+      onRequestContextMenuFromKeyboard(hash);
+    }
+    return;
+  }
+  const current = selectedRowIndex.value >= 0 ? selectedRowIndex.value : 0;
+  const next = rovingNextIndex(current, event.key, graph.rows.length, "vertical", false);
+  if (next === null) {
+    return;
+  }
+  event.preventDefault();
+  graph.select(graph.rows[next].commit.hash);
+  scrollRowIntoView(next);
 }
 
 function copySelectedHash(): void {
@@ -161,8 +265,13 @@ onMounted(() => {
     <div
       ref="viewport"
       class="commit-graph__viewport"
+      role="listbox"
+      aria-label="Commit history"
+      tabindex="0"
+      :aria-activedescendant="graph.selectedHash ? rowElementId(graph.selectedHash) : undefined"
       @scroll="onScroll"
       @mouseleave="onRowHover(null)"
+      @keydown="onViewportKeydown"
     >
       <div class="commit-graph__canvas" :style="{ height: `${canvasHeight}px` }">
         <svg
@@ -187,8 +296,11 @@ onMounted(() => {
 
         <div
           v-for="{ row, index } in visibleRows"
+          :id="rowElementId(row.commit.hash)"
           :key="row.commit.hash"
           class="commit-graph__row"
+          role="option"
+          :aria-selected="graph.selectedHash === row.commit.hash"
           :class="{
             'commit-graph__row--selected': graph.selectedHash === row.commit.hash,
             'commit-graph__row--hover': graph.hoverHash === row.commit.hash,
@@ -218,14 +330,18 @@ onMounted(() => {
 
     <div
       v-if="contextMenu"
+      ref="contextMenuEl"
       class="commit-graph__context-menu"
+      role="menu"
+      :aria-label="`Actions for commit ${contextMenu.hash.slice(0, 8)}`"
       :style="{ left: `${contextMenu.x}px`, top: `${contextMenu.y}px` }"
       @click.stop
+      @keydown.esc="closeContextMenuAndReturnFocus"
     >
-      <button @click="copySelectedHash">Copy hash ({{ contextMenu.hash.slice(0, 8) }})</button>
-      <button @click="requestCherryPick">Cherry-pick</button>
-      <button @click="requestRevert">Revert</button>
-      <button @click="requestReset">Reset to here…</button>
+      <button role="menuitem" @click="copySelectedHash">Copy hash ({{ contextMenu.hash.slice(0, 8) }})</button>
+      <button role="menuitem" @click="requestCherryPick">Cherry-pick commit {{ contextMenu.hash.slice(0, 8) }}</button>
+      <button role="menuitem" @click="requestRevert">Revert commit {{ contextMenu.hash.slice(0, 8) }}</button>
+      <button role="menuitem" @click="requestReset">Reset to {{ contextMenu.hash.slice(0, 8) }}…</button>
     </div>
   </div>
 </template>

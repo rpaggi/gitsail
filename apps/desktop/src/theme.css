@@ -1,0 +1,130 @@
+/*
+ * GitSail Desktop design tokens (T-186/US-053, T-188/US-055).
+ *
+ * v0.3 ships exactly one theme (dark) — theming/preferences (US-105/106,
+ * T-247/T-248) is later work, not yet implemented (see
+ * `stores/preferences.ts`). Every color a component needs is still read
+ * from a `--color-*` custom property defined once here, rather than
+ * hard-coded per component, specifically so that later work can add a
+ * `:root[data-theme="light"]` (or similar) block that only overrides these
+ * tokens, with zero component-level rework. This file is that seam.
+ *
+ * The palette itself is this identity's "sea and navigation" reading of the
+ * nautical concept (`docs/product/brand-identity.md`: sail + Git graph) —
+ * a deep sea-blue background with a lighter "sail cloth" accent — rather
+ * than an arbitrary dark theme, without introducing any new image asset.
+ */
+
+:root {
+  /* Surfaces (deep sea blue, darkest to lightest) */
+  --color-bg: #0f1720;
+  --color-surface: #16212c;
+  --color-surface-alt: #1c2a37;
+  --color-border: #2c3e4c;
+
+  /* Text */
+  --color-text: #e6edf3;
+  --color-text-muted: #9fb0bd;
+
+  /* Accent ("sail cloth" cyan-blue — the mast/sail line in the logo) */
+  --color-accent: #4fb6e8;
+  --color-accent-strong: #7cc9ee;
+  --color-accent-contrast: #06222e;
+
+  /* Semantic feedback colors — always paired with text/an icon elsewhere in
+     the markup (US-055 criterion 3: "estados usam texto/ícone além de
+     cor"), never the only signal. Chosen for >= 4.5:1 contrast against
+     both --color-bg and --color-surface at normal text size. */
+  --color-danger: #ff6b6b;
+  --color-danger-contrast: #3a0d0d;
+  --color-warning: #f2b84b;
+  --color-warning-contrast: #3a2a06;
+  --color-success: #57d38c;
+  --color-success-contrast: #042313;
+
+  /* Focus ring (US-055 criterion 1: "foco visível") — one token, applied
+     globally below, so every native interactive element (button, input,
+     select, textarea, link, and anything with an explicit tabindex) gets
+     the same visible outline without each component styling it itself. */
+  --color-focus-ring: #ffd166;
+
+  --font-sans: system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+}
+
+body {
+  font-family: var(--font-sans);
+  background: var(--color-bg);
+  color: var(--color-text);
+}
+
+button,
+input,
+select,
+textarea {
+  font-family: inherit;
+  color: inherit;
+}
+
+/* Visible focus indicator (US-055 criterion 1). `:focus-visible` (not
+   `:focus`) so a mouse click doesn't leave a ring behind, but Tab/arrow-key
+   navigation always does — the browser's own heuristic for "was this focus
+   the result of keyboard/programmatic navigation". Applied once, globally,
+   rather than per component, so no component can silently regress it. */
+:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
+/* A skip link (`AppShell.vue`) — off-screen until it receives focus, the
+   standard pattern for letting keyboard users jump straight past the
+   sidebar's many controls to the main graph/changes area (US-055 criterion
+   1: "ações principais" reachable without stepping through everything
+   ahead of them every time). */
+.skip-link {
+  position: absolute;
+  left: 0;
+  top: 0;
+  transform: translateY(-150%);
+  background: var(--color-accent);
+  color: var(--color-accent-contrast);
+  padding: 0.5rem 1rem;
+  z-index: 2000;
+  border-radius: 0 0 4px 0;
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.skip-link:focus {
+  transform: translateY(0%);
+}
+
+/* Visually-hidden but still announced by assistive tech (US-055 criterion
+   1: "labels ... em botões/ícones sem texto") — for a `<label>` a visible
+   placeholder already conveys the same information to sighted users, so a
+   second on-screen copy would be pure clutter, but the accessible name
+   still needs a real `<label>`/text node, since a placeholder alone is not
+   reliably exposed as one. `position: absolute` (not `display: none`) so
+   it stays in the accessibility tree instead of being removed from it. */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}

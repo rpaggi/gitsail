@@ -18,10 +18,39 @@
 // exactly like every other mutation in this workspace, never a bespoke
 // confirm button here.
 
+import { nextTick, ref, watch } from "vue";
+
 import type { ResetModeDto } from "../services/dto";
 import { useResetStore } from "../stores/reset";
+import { focusFirst, handleFocusTrapKeydown } from "./focusTrap";
 
 const reset = useResetStore();
+const dialogEl = ref<HTMLElement | null>(null);
+
+// Same focus-on-open / Tab-trap / Escape-to-cancel wiring as
+// `ConfirmationDialog.vue` (US-055 criterion 1 / WCAG 2.1.2) — this dialog
+// predates that one's focus handling and needs it just as much, since it
+// is a real modal (`role="dialog"`, `aria-modal="true"`) with its own
+// radio-button choice, not merely a confirm/cancel pair.
+watch(
+  () => reset.isOpen,
+  (isOpen) => {
+    if (isOpen) {
+      void nextTick(() => focusFirst(dialogEl.value));
+    }
+  },
+);
+
+function onDialogKeydown(event: KeyboardEvent): void {
+  if (event.key === "Escape") {
+    event.preventDefault();
+    reset.close();
+    return;
+  }
+  if (dialogEl.value) {
+    handleFocusTrapKeydown(dialogEl.value, event);
+  }
+}
 
 const MODES: { mode: ResetModeDto; label: string; description: string }[] = [
   {
@@ -48,7 +77,13 @@ function requestReset(): void {
 
 <template>
   <div v-if="reset.isOpen" class="history-editing-overlay">
-    <div class="history-editing-dialog" role="dialog" aria-modal="true">
+    <div
+      ref="dialogEl"
+      class="history-editing-dialog"
+      role="dialog"
+      aria-modal="true"
+      @keydown="onDialogKeydown"
+    >
       <h3>Reset to {{ reset.target?.shortHash }}</h3>
 
       <fieldset class="history-editing-modes">

@@ -31,7 +31,9 @@ async function openAndRefresh(): Promise<void> {
 
 <template>
   <div class="repository-opener">
+    <label for="repository-opener-path" class="sr-only">Repository path</label>
     <input
+      id="repository-opener-path"
       v-model="path"
       type="text"
       placeholder="/path/to/repository"

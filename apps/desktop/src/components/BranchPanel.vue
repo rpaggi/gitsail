@@ -61,7 +61,9 @@ onMounted(() => {
     <ul>
       <li v-for="branch in branches.branches" :key="branch.name" :class="{ current: branch.isCurrent }">
         <template v-if="renamingBranch === branch.name">
+          <label :for="`branch-rename-${branch.name}`" class="sr-only">New name for {{ branch.name }}</label>
           <input
+            :id="`branch-rename-${branch.name}`"
             v-model="renameInput"
             type="text"
             :placeholder="branch.name"
@@ -69,18 +71,18 @@ onMounted(() => {
             @keyup.esc="cancelRename"
           />
           <span class="branch-panel__actions">
-            <button :disabled="renameInput.trim().length === 0" @click="confirmRename">Save</button>
-            <button @click="cancelRename">Cancel</button>
+            <button :disabled="renameInput.trim().length === 0" :aria-label="`Save new name for ${branch.name}`" @click="confirmRename">Save</button>
+            <button :aria-label="`Cancel renaming ${branch.name}`" @click="cancelRename">Cancel</button>
           </span>
         </template>
         <template v-else>
           <span>{{ branch.name }}</span>
           <span class="branch-panel__actions">
-            <button v-if="!branch.isCurrent" @click="branches.requestSwitch(branch.name)">
+            <button v-if="!branch.isCurrent" :aria-label="`Switch to ${branch.name}`" @click="branches.requestSwitch(branch.name)">
               Switch
             </button>
-            <button @click="startRename(branch.name)">Rename</button>
-            <button v-if="!branch.isCurrent" @click="branches.requestDelete(branch.name, false)">
+            <button :aria-label="`Rename ${branch.name}`" @click="startRename(branch.name)">Rename</button>
+            <button v-if="!branch.isCurrent" :aria-label="`Delete ${branch.name}`" @click="branches.requestDelete(branch.name, false)">
               Delete
             </button>
           </span>
@@ -88,7 +90,14 @@ onMounted(() => {
       </li>
     </ul>
     <div class="branch-panel__create">
-      <input v-model="newBranchName" type="text" placeholder="new-branch-name" @keyup.enter="createBranch" />
+      <label for="branch-panel-new-name" class="sr-only">New branch name</label>
+      <input
+        id="branch-panel-new-name"
+        v-model="newBranchName"
+        type="text"
+        placeholder="new-branch-name"
+        @keyup.enter="createBranch"
+      />
       <button :disabled="newBranchName.trim().length === 0" @click="createBranch">Create</button>
     </div>
   </div>

@@ -1,20 +1,9 @@
 <script setup lang="ts">
 import { onBeforeUnmount, onMounted } from "vue";
 
-import AmendPanel from "./components/AmendPanel.vue";
-import BranchPanel from "./components/BranchPanel.vue";
-import CommitGraph from "./components/CommitGraph.vue";
+import AppShell from "./components/AppShell.vue";
 import ConfirmationDialog from "./components/ConfirmationDialog.vue";
-import DiffViewer from "./components/DiffViewer.vue";
 import HistoryEditingPanel from "./components/HistoryEditingPanel.vue";
-import MergePanel from "./components/MergePanel.vue";
-import PullRequestsPanel from "./components/PullRequestsPanel.vue";
-import RecentRepositories from "./components/RecentRepositories.vue";
-import RepositoryOpener from "./components/RepositoryOpener.vue";
-import SearchPalette from "./components/SearchPalette.vue";
-import StagingPanel from "./components/StagingPanel.vue";
-import StatusPanel from "./components/StatusPanel.vue";
-import SyncPanel from "./components/SyncPanel.vue";
 import { useAppDataStore } from "./stores/appData";
 import { useCommitGraphStore } from "./stores/graph";
 import { useRepositorySessionStore } from "./stores/session";
@@ -70,64 +59,19 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <main>
-    <h1>GitSail</h1>
-    <RepositoryOpener />
-    <RecentRepositories />
-    <StatusPanel />
-    <div class="workspace">
-      <aside class="workspace__sidebar">
-        <SearchPalette />
-        <BranchPanel />
-        <SyncPanel />
-        <MergePanel />
-        <AmendPanel />
-        <PullRequestsPanel />
-      </aside>
-      <div class="workspace__main">
-        <section class="graph-section">
-          <CommitGraph />
-        </section>
-        <StagingPanel />
-        <DiffViewer />
-      </div>
-    </div>
+  <div id="gitsail-app">
+    <!--
+      `AppShell.vue` (T-186/US-053) owns the actual page layout — header
+      with the GitSail identity, sidebar, and the tabbed main workspace —
+      and is this app's single `<main>` landmark. `ConfirmationDialog`/
+      `HistoryEditingPanel` stay mounted here, once, as app-global modal
+      overlays (T-194/US-061, T-240/US-088): they render above *everything*
+      AppShell contains regardless of which sidebar section or tab is
+      active, so they belong beside it, not nested inside one of its
+      regions.
+    -->
+    <AppShell />
     <ConfirmationDialog />
     <HistoryEditingPanel />
-  </main>
+  </div>
 </template>
-
-<style>
-body {
-  margin: 0;
-  font-family: system-ui, sans-serif;
-  background: #1e1e1e;
-  color: #e0e0e0;
-}
-main {
-  padding: 1.5rem;
-}
-.workspace {
-  display: flex;
-  gap: 1rem;
-  margin-top: 1rem;
-}
-.workspace__sidebar {
-  width: 20rem;
-  flex-shrink: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 1rem;
-}
-.workspace__main {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 1rem;
-}
-.graph-section {
-  height: 40vh;
-  border: 1px solid #444;
-}
-</style>
