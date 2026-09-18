@@ -953,6 +953,19 @@ ADR-008 established that a versioned envelope exists; it did not fix the exact J
 ### Consequences
 Consumers (the CLI's own `--json` mode today, VS Code/Desktop later) branch on `status` alone and never need to guess the wire shape; a future breaking change increments `schemaVersion` (US-039) rather than being inferred from field presence.
 
+## ADR-015 — VS Code binary distribution for v0.4
+
+**Status:** Accepted
+
+### Context
+EPIC-14/US-070 requires a registered decision on how the VS Code extension obtains the `gitsail-cli` binary it depends on (ADR-012), before the extension is packaged for v0.4. Two options exist: bundle a per-platform `gitsail-cli` build inside the `.vsix`, or require the user to install `gitsail` separately (PATH or an explicit configured path). EPIC-25 (Distribution & Updates) — the epic that would define a signed, per-OS/arch release pipeline — has not shipped at this point in the roadmap (v0.4), so there is no artifact this extension could bundle with verifiable origin.
+
+### Decision
+For v0.4, the VS Code extension does not bundle a `gitsail-cli` binary. It discovers `gitsail`/`gitsail.exe` on `PATH` by default, or uses an explicit `gitsail.binaryPath` setting (respected only in a trusted workspace — SAD §33). Before use, the extension spawns `--version` and compares the result against a minimum supported version, refusing to proceed silently on a missing or unrecognized binary rather than falling back to any alternate parsing. This mirrors ADR-010's stance ("GitSail avoids owning a sensitive subsystem it cannot yet do safely, but gives useful diagnostics") applied to binary provenance instead of credentials.
+
+### Consequences
+Users must install `gitsail` themselves before the extension is useful — a real onboarding cost, documented in `apps/vscode/README.md`. In exchange, the extension never silently trusts or executes a binary of unknown origin. This decision is revisited once EPIC-25 defines a signed-artifact pipeline the extension can safely embed per platform.
+
 # 39. Open architecture decisions
 
 The following remain deliberately unresolved:

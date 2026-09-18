@@ -1,0 +1,53 @@
+{
+  "name": "gitsail-vscode",
+  "displayName": "GitSail",
+  "description": "Git context in the editor, backed entirely by the gitsail CLI — never a second, editor-side implementation of Git.",
+  "version": "0.0.0",
+  "private": true,
+  "publisher": "gitsail",
+  "license": "SEE LICENSE IN ../../LICENSE",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "SCM Providers",
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "configuration": {
+      "title": "GitSail",
+      "properties": {
+        "gitsail.binaryPath": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Absolute path to the `gitsail` CLI executable. Only honored in a **trusted** workspace. Leave empty to discover `gitsail` on `PATH` — see this extension's README (\"Binary distribution\") for why v0.4 does not bundle a binary.",
+          "scope": "resource"
+        }
+      }
+    }
+  },
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": "limited",
+      "description": "GitSail repository context and CLI queries are unavailable until the workspace is trusted."
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "build": "tsc -p ./",
+    "lint": "tsc --noEmit -p ./",
+    "test": "vitest run",
+    "test:e2e": "node ./test-e2e/runTest.js"
+  },
+  "devDependencies": {
+    "@types/node": "^22",
+    "@types/vscode": "^1.85.0",
+    "@vscode/test-electron": "^2.4.0",
+    "typescript": "^5.6.0",
+    "vitest": "^5.0.1"
+  }
+}
