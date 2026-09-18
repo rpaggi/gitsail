@@ -2,3 +2,7 @@
 .DS_Store
 .codex/config.toml
 .mcp.json
+apps/desktop/node_modules/
+apps/desktop/dist/
+apps/desktop/src-tauri/target/
+apps/desktop/src-tauri/gen/

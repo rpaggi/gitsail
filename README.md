@@ -15,6 +15,21 @@ Run `cargo check --workspace` to verify the Rust workspace.
 
 All new project artifacts are written in English. Historical Portuguese planning documents remain unchanged as source material.
 
+## Desktop app
+
+`apps/desktop` is the Tauri v2 + Vue 3 Desktop shell (SAD §17; ADR-006). The Rust backend (`apps/desktop/src-tauri`) is a workspace member and covered by `cargo check --workspace`; it exposes thin Tauri commands (`apps/desktop/src-tauri/src/commands.rs`) that call straight into `gitsail-application`/`gitsail-git` and return `gitsail-protocol` DTOs, mirrored by hand as TypeScript types in `apps/desktop/src/services/dto.ts`.
+
+Local development, from `apps/desktop`:
+
+```sh
+npm install
+npm run tauri dev   # windowed dev build; needs a Linux display + WebKitGTK, or Windows/macOS
+npm run build        # type-checks and builds the frontend only
+npm run test          # frontend unit tests (Vitest)
+```
+
+On Linux, building the Rust backend also needs the system WebKitGTK/GTK/D-Bus development libraries Tauri links against (see the Tauri v2 Linux prerequisites).
+
 ## Documents and assets
 
 - [Product backlog](docs/product/GitSail_Product_Backlog_v1.0.md)

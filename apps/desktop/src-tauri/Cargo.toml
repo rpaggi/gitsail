@@ -1,0 +1,24 @@
+[package]
+name = "gitsail-desktop"
+version = "0.0.0"
+edition.workspace = true
+
+[lib]
+name = "gitsail_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+gitsail-application = { path = "../../../crates/gitsail-application" }
+gitsail-domain = { path = "../../../crates/gitsail-domain" }
+gitsail-git = { path = "../../../crates/gitsail-git" }
+gitsail-protocol = { path = "../../../crates/gitsail-protocol" }
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[lints]
+workspace = true
