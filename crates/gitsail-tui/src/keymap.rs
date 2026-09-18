@@ -22,6 +22,12 @@ pub enum InputContext {
     BranchName,
     /// The commit-message composer is active (US-047).
     CommitMessage,
+    /// The commit-search box is active (`/` on the Graph panel, US-045
+    /// criterion 2).
+    CommitSearch,
+    /// The commit-details overlay is open (Enter on the Graph panel,
+    /// US-045 criterion 3).
+    CommitDetails,
     /// No overlay is active; the five panels and shortcuts bar are live.
     Normal,
 }
@@ -59,6 +65,17 @@ pub fn action_for(key: KeyEvent, ctx: InputContext) -> Option<Action> {
             KeyCode::Enter => Some(Action::Activate),
             KeyCode::Backspace => Some(Action::CommitMessageBackspace),
             KeyCode::Char(c) => Some(Action::CommitMessageInput(c)),
+            _ => None,
+        },
+        InputContext::CommitSearch => match key.code {
+            KeyCode::Esc => Some(Action::Dismiss),
+            KeyCode::Enter => Some(Action::CommitSearchSubmit),
+            KeyCode::Backspace => Some(Action::CommitSearchBackspace),
+            KeyCode::Char(c) => Some(Action::CommitSearchInput(c)),
+            _ => None,
+        },
+        InputContext::CommitDetails => match key.code {
+            KeyCode::Char('q') | KeyCode::Esc => Some(Action::Dismiss),
             _ => None,
         },
         InputContext::Normal => match key.code {
@@ -133,6 +150,48 @@ mod tests {
             action_for(press(KeyCode::Tab), InputContext::Search),
             None,
             "focus change is not a documented search-mode shortcut"
+        );
+    }
+
+    #[test]
+    fn commit_search_context_routes_characters_and_submits_on_enter() {
+        assert_eq!(
+            action_for(press(KeyCode::Char('a')), InputContext::CommitSearch),
+            Some(Action::CommitSearchInput('a'))
+        );
+        assert_eq!(
+            action_for(press(KeyCode::Backspace), InputContext::CommitSearch),
+            Some(Action::CommitSearchBackspace)
+        );
+        assert_eq!(
+            action_for(press(KeyCode::Enter), InputContext::CommitSearch),
+            Some(Action::CommitSearchSubmit)
+        );
+        assert_eq!(
+            action_for(press(KeyCode::Esc), InputContext::CommitSearch),
+            Some(Action::Dismiss)
+        );
+        assert_eq!(
+            action_for(press(KeyCode::Tab), InputContext::CommitSearch),
+            None,
+            "focus change is not a documented commit-search shortcut"
+        );
+    }
+
+    #[test]
+    fn commit_details_context_only_accepts_dismiss_keys() {
+        assert_eq!(
+            action_for(press(KeyCode::Char('q')), InputContext::CommitDetails),
+            Some(Action::Dismiss)
+        );
+        assert_eq!(
+            action_for(press(KeyCode::Esc), InputContext::CommitDetails),
+            Some(Action::Dismiss)
+        );
+        assert_eq!(
+            action_for(press(KeyCode::Char('j')), InputContext::CommitDetails),
+            None,
+            "movement must not leak through the commit-details overlay"
         );
     }
 

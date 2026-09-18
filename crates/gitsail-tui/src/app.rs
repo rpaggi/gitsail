@@ -24,6 +24,7 @@ use gitsail_domain::{
 };
 
 use crate::action::Action;
+use crate::commit_search::parse_commit_search;
 use crate::keymap::InputContext;
 use crate::operation::{OperationKind, OperationState};
 use crate::status_view::{build_status_entries, DiffScope, StatusEntry};
@@ -124,6 +125,25 @@ pub struct App {
     graph_loading: bool,
     graph_error: Option<GitSailError>,
     graph_request_id: u64,
+    /// The commit-search box's text while it is being edited (US-045
+    /// criterion 2), distinct from `search` (the Sidebar's branch-name
+    /// filter, US-042) since the two apply to different panels and one
+    /// submits a new paginated query while the other is a pure client-side
+    /// filter.
+    commit_search: Option<String>,
+    /// The raw text of the last *submitted* commit search, or `None` when
+    /// the graph shows the unfiltered log — kept only for display (the
+    /// Graph panel's title), since the actual filters already live in the
+    /// [`CommitQuery`] a submission dispatches.
+    active_commit_filter: Option<String>,
+    /// Whether the commit-details overlay (Enter on the Graph panel,
+    /// US-045 criterion 3) is open. Reads the already-loaded
+    /// [`Self::graph_commits`] entry under `graph_cursor` rather than
+    /// issuing a fresh [`gitsail_application::GetCommit`] call — the same
+    /// `git log` invocation that filled the graph already returns every
+    /// field (`%H%h%P%an%ae%cn%ce%ad%cd%s%b%D`) `GetCommit` itself would,
+    /// so a second round-trip would only add latency for no new data.
+    commit_details_open: bool,
 
     // -- US-046: status/diff/blame inspection --------------------------
     status_cursor: usize,
@@ -189,6 +209,9 @@ impl App {
             graph_loading: false,
             graph_error: None,
             graph_request_id: 0,
+            commit_search: None,
+            active_commit_filter: None,
+            commit_details_open: false,
             status_cursor: 0,
             selected_file: None,
             diff: None,
@@ -365,6 +388,33 @@ impl App {
         self.graph_error.as_ref()
     }
 
+    /// The commit-search box's text while it is being edited (US-045
+    /// criterion 2), or `None` when the box is closed.
+    pub fn commit_search(&self) -> Option<&str> {
+        self.commit_search.as_deref()
+    }
+
+    /// The raw text of the last submitted commit search, or `None` while
+    /// the graph shows the unfiltered log (US-045 criterion 2).
+    pub fn active_commit_filter(&self) -> Option<&str> {
+        self.active_commit_filter.as_deref()
+    }
+
+    /// Whether the commit-details overlay is open (US-045 criterion 3).
+    pub fn commit_details_open(&self) -> bool {
+        self.commit_details_open
+    }
+
+    /// The full [`Commit`] the Graph panel's cursor currently points at —
+    /// the same commit the details overlay shows, and the same one a
+    /// separate "list" panel would need to keep in sync by hash (US-045
+    /// criterion 1). Since the Graph panel *is* the list (see this crate's
+    /// module docs on the Graph panel), staying in sync is simply reading
+    /// this one cursor rather than reconciling two.
+    pub fn selected_graph_commit(&self) -> Option<&Commit> {
+        self.graph_commits.get(self.graph_cursor)
+    }
+
     pub fn commit_message(&self) -> Option<&str> {
         self.commit_message.as_deref()
     }
@@ -391,19 +441,27 @@ impl App {
 
     /// Which keys are currently meaningful (US-042 criterion 3: help/
     /// search/prompts never let a hidden action through). Priority: the
-    /// help overlay always wins; then the commit composer, but only while
-    /// no operation is confirming/running — the moment `Enter` moves it to
-    /// `Confirming`, this falls through to `Normal` so the *second* `Enter`
-    /// is handled by the confirmation intercept in [`Self::handle_activate`]
-    /// instead of re-editing the message; then the branch-name prompt; then
-    /// search.
+    /// help overlay always wins; then the commit-details overlay (US-045
+    /// criterion 3); then the commit composer, but only while no operation
+    /// is confirming/running — the moment `Enter` moves it to `Confirming`,
+    /// this falls through to `Normal` so the *second* `Enter` is handled by
+    /// the confirmation intercept in [`Self::handle_activate`] instead of
+    /// re-editing the message; then the branch-name prompt; then the
+    /// commit-search box (US-045 criterion 2); then the branch-filter
+    /// search. Every one of these is opened by its own distinct action, so
+    /// at most one is ever `Some`/`true` at a time — the order here only
+    /// documents which this function would prefer, not a real conflict.
     pub fn input_context(&self) -> InputContext {
         if self.help_visible {
             InputContext::Help
+        } else if self.commit_details_open {
+            InputContext::CommitDetails
         } else if self.commit_message.is_some() && self.operation.is_idle() {
             InputContext::CommitMessage
         } else if self.branch_input.is_some() {
             InputContext::BranchName
+        } else if self.commit_search.is_some() {
+            InputContext::CommitSearch
         } else if self.search.is_some() {
             InputContext::Search
         } else {
@@ -442,9 +500,19 @@ impl App {
                 self.help_visible = !self.help_visible;
                 Vec::new()
             }
+            // Gated by focus exactly like `Action::StartCreateBranch`
+            // below: the same `/` key means "filter the branch list" on
+            // the Sidebar (US-042) and "search commits" on the Graph panel
+            // (US-045 criterion 2) — two different panels' own concern,
+            // never a shared text box.
             Action::StartSearch => {
-                self.search = Some(String::new());
-                self.sidebar_cursor = 0;
+                if self.focus == Panel::Graph {
+                    self.commit_search =
+                        Some(self.active_commit_filter.clone().unwrap_or_default());
+                } else {
+                    self.search = Some(String::new());
+                    self.sidebar_cursor = 0;
+                }
                 Vec::new()
             }
             Action::SearchInput(c) => {
@@ -511,6 +579,19 @@ impl App {
                 }
                 Vec::new()
             }
+            Action::CommitSearchInput(c) => {
+                if let Some(query) = self.commit_search.as_mut() {
+                    query.push(c);
+                }
+                Vec::new()
+            }
+            Action::CommitSearchBackspace => {
+                if let Some(query) = self.commit_search.as_mut() {
+                    query.pop();
+                }
+                Vec::new()
+            }
+            Action::CommitSearchSubmit => self.submit_commit_search(),
         }
     }
 
@@ -608,6 +689,54 @@ impl App {
         vec![Command::LoadCommitGraph(self.graph_request_id, repo, query)]
     }
 
+    /// Submits the commit-search box's current text (US-045 criterion 2),
+    /// closing it and parsing it into [`CommitQuery`] filters via
+    /// [`parse_commit_search`] — never a bespoke TUI-only filter — before
+    /// restarting the commit graph under those filters. An all-whitespace
+    /// submission clears [`Self::active_commit_filter`] and returns to the
+    /// unfiltered log, exactly like dismissing search does for the
+    /// Sidebar's branch filter.
+    fn submit_commit_search(&mut self) -> Vec<Command> {
+        let text = self.commit_search.take().unwrap_or_default();
+        let trimmed = text.trim();
+        self.active_commit_filter = if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        };
+        self.restart_commit_graph(parse_commit_search(trimmed))
+    }
+
+    /// Resets the commit graph to a brand new, empty page and requests its
+    /// first page under `filters` (US-045 criterion 2), exactly like
+    /// [`Self::on_repository_opened`] seeds the very first, unfiltered
+    /// load. A search is a new query, not an addition to whatever was
+    /// already loaded, so rows from a previous filter (or the unfiltered
+    /// log) must never linger mixed in with the new result — bumping
+    /// `graph_request_id` also makes any in-flight page for the *previous*
+    /// query discarded by [`Self::on_commit_graph_page_loaded`] once it
+    /// arrives late, the same staleness policy every other background read
+    /// in this module already uses.
+    fn restart_commit_graph(&mut self, filters: CommitQuery) -> Vec<Command> {
+        let Some(session) = self.session.as_ref() else {
+            return Vec::new();
+        };
+        let repo = session.repository().clone();
+        self.commit_graph = CommitGraph::new();
+        self.graph_commits.clear();
+        self.graph_cursor = 0;
+        self.graph_next_cursor = None;
+        self.graph_has_more = false;
+        self.graph_error = None;
+        self.graph_loading = true;
+        self.graph_request_id += 1;
+        let query = CommitQuery {
+            limit: Some(GRAPH_PAGE_SIZE),
+            ..filters
+        };
+        vec![Command::LoadCommitGraph(self.graph_request_id, repo, query)]
+    }
+
     /// Intercepts `Enter` for the modes that give it a meaning beyond
     /// per-panel activation, then falls through to [`Self::activate`]:
     /// starting a branch name means confirming it, confirming a pending
@@ -646,7 +775,23 @@ impl App {
                 Vec::new()
             }
             Panel::Details => self.load_selected_diff(),
+            Panel::Graph => {
+                self.open_commit_details();
+                Vec::new()
+            }
             _ => Vec::new(),
+        }
+    }
+
+    /// Opens the commit-details overlay for the commit currently under the
+    /// Graph panel's cursor (US-045 criterion 3), or does nothing when no
+    /// commit is loaded yet (e.g. an empty repository). See
+    /// [`Self::selected_graph_commit`] and the `commit_details_open` field
+    /// doc for why this never dispatches a [`Command`]: the data is
+    /// already resident from the graph's own load.
+    fn open_commit_details(&mut self) {
+        if self.selected_graph_commit().is_some() {
+            self.commit_details_open = true;
         }
     }
 
@@ -720,6 +865,8 @@ impl App {
     fn dismiss(&mut self) {
         if self.help_visible {
             self.help_visible = false;
+        } else if self.commit_details_open {
+            self.commit_details_open = false;
         } else if self.commit_message.is_some() && self.operation.is_idle() {
             // A confirmation in flight (`Confirming(CreateCommit)`) is left
             // alone here — cancelling *that* is `operation.cancel()` below,
@@ -729,6 +876,12 @@ impl App {
             self.commit_message = None;
         } else if self.branch_input.is_some() {
             self.branch_input = None;
+        } else if self.commit_search.is_some() {
+            // Closes the box without touching `active_commit_filter`/the
+            // loaded graph — an unsubmitted edit is discarded exactly like
+            // `branch_input` above, never applied as a side effect of
+            // merely leaving the box.
+            self.commit_search = None;
         } else if self.search.is_some() {
             self.search = None;
             self.sidebar_cursor = 0;
@@ -889,25 +1042,18 @@ impl App {
 
                 // A freshly opened (or re-opened) repository starts a brand
                 // new commit graph rather than appending to whatever the
-                // previous repository's session had loaded.
-                self.commit_graph = CommitGraph::new();
-                self.graph_commits.clear();
-                self.graph_cursor = 0;
-                self.graph_next_cursor = None;
-                self.graph_has_more = false;
-                self.graph_error = None;
-                self.graph_loading = true;
-                self.graph_request_id += 1;
-                let graph_query = CommitQuery {
-                    limit: Some(GRAPH_PAGE_SIZE),
-                    ..CommitQuery::default()
-                };
+                // previous repository's session had loaded, and drops any
+                // search/details state that referred to that old graph.
+                self.active_commit_filter = None;
+                self.commit_search = None;
+                self.commit_details_open = false;
 
-                vec![
+                let mut commands = vec![
                     Command::RefreshStatus(ticket, repo.clone()),
-                    Command::LoadBranches(generation, repo.clone()),
-                    Command::LoadCommitGraph(self.graph_request_id, repo, graph_query),
-                ]
+                    Command::LoadBranches(generation, repo),
+                ];
+                commands.extend(self.restart_commit_graph(CommitQuery::default()));
+                commands
             }
             Err(error) => {
                 self.discovery_error = Some(error);

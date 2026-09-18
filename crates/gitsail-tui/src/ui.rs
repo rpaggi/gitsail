@@ -6,7 +6,7 @@
 //! reaching a widget (SAD §33) — this module is the render boundary that
 //! rule applies at; `App` itself always holds the raw value.
 
-use gitsail_domain::{BlameOrigin, BranchKind, DiffLineOrigin};
+use gitsail_domain::{BlameOrigin, BranchKind, Commit, DiffLineOrigin, GitTimestamp};
 use crate::graph_view;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -193,7 +193,19 @@ fn render_sidebar(frame: &mut Frame, rect: Rect, app: &App) {
 /// view as `graph_cursor` moves or the terminal resizes (US-066 criterion
 /// 3).
 fn render_graph_panel(frame: &mut Frame, rect: Rect, app: &App) {
-    let block = panel_block(Panel::Graph.title(), app.focus() == Panel::Graph, app.low_color());
+    // The title carries the *submitted* filter (US-045 criterion 2) — the
+    // box being edited right now is shown as its own header line below,
+    // exactly like the Sidebar shows `app.search()` (US-042), so the two
+    // never compete for the same line.
+    let title = match app.active_commit_filter() {
+        Some(filter) => format!(
+            "{} (filter: {})",
+            Panel::Graph.title(),
+            sanitize::safe_line(filter)
+        ),
+        None => Panel::Graph.title().to_string(),
+    };
+    let block = panel_block(&title, app.focus() == Panel::Graph, app.low_color());
 
     if app.view_phase() != ViewPhase::Loaded {
         let text = phase_placeholder_text(app.view_phase(), Panel::Graph);
@@ -207,10 +219,24 @@ fn render_graph_panel(frame: &mut Frame, rect: Rect, app: &App) {
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
 
+    // While the commit-search box is open, its own line is reserved above
+    // the list — like the Sidebar reserves one for `app.search()` — so
+    // typing is visible without covering the currently loaded rows.
+    let content_area = if let Some(query) = app.commit_search() {
+        let split = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(1), Constraint::Min(0)])
+            .split(inner);
+        frame.render_widget(Paragraph::new(format!("/{query}")), split[0]);
+        split[1]
+    } else {
+        inner
+    };
+
     if let Some(error) = app.graph_error() {
         frame.render_widget(
             Paragraph::new(sanitize::safe_line(error.message())).wrap(Wrap { trim: true }),
-            inner,
+            content_area,
         );
         return;
     }
@@ -219,10 +245,12 @@ fn render_graph_panel(frame: &mut Frame, rect: Rect, app: &App) {
     if rows.is_empty() {
         let text = if app.graph_loading() {
             "Loading history…"
+        } else if app.active_commit_filter().is_some() {
+            "No commits match this search."
         } else {
             "No commits yet."
         };
-        frame.render_widget(Paragraph::new(text), inner);
+        frame.render_widget(Paragraph::new(text), content_area);
         return;
     }
 
@@ -245,7 +273,7 @@ fn render_graph_panel(frame: &mut Frame, rect: Rect, app: &App) {
 
     let mut state = ratatui::widgets::ListState::default();
     state.select(Some(app.graph_cursor()));
-    frame.render_stateful_widget(List::new(items), inner, &mut state);
+    frame.render_stateful_widget(List::new(items), content_area, &mut state);
 }
 
 /// Renders the Details panel as the status list (US-046 criterion 1):
@@ -425,7 +453,11 @@ fn blame_lines(app: &App) -> Vec<Line<'static>> {
 }
 
 fn render_shortcuts(frame: &mut Frame, rect: Rect, app: &App) {
-    let text = if app.search().is_some() {
+    let text = if app.commit_details_open() {
+        "Esc/q closes commit details".to_string()
+    } else if app.commit_search().is_some() {
+        "Type message/author:/branch:/hash · Enter searches · Esc cancels".to_string()
+    } else if app.search().is_some() {
         "Type to filter · Enter/Esc close search".to_string()
     } else if app.branch_input().is_some() {
         "Type branch name · Enter confirms · Esc cancels".to_string()
@@ -447,7 +479,9 @@ fn render_shortcuts(frame: &mut Frame, rect: Rect, app: &App) {
 /// contextual help always draws last so it is visible over anything else,
 /// matching [`crate::app::App`]'s dismiss priority.
 fn render_overlays(frame: &mut Frame, area: Rect, app: &App) {
-    if app.commit_message().is_some() {
+    if app.commit_details_open() {
+        render_commit_details(frame, area, app);
+    } else if app.commit_message().is_some() {
         render_commit_composer(frame, area, app);
     } else if !app.operation().is_idle() {
         render_operation_overlay(frame, area, app);
@@ -458,6 +492,82 @@ fn render_overlays(frame: &mut Frame, area: Rect, app: &App) {
     if app.help_visible() {
         render_help(frame, area);
     }
+}
+
+/// Shows the commit-details overlay (US-045 criterion 3): full hash,
+/// author (name, email, date), committer too when it differs from the
+/// author, and the complete message (subject plus body) — every field
+/// [`gitsail_application::GetCommit`] would also return, read directly off
+/// [`App::selected_graph_commit`] (see that method's doc for why no second
+/// fetch is issued).
+fn render_commit_details(frame: &mut Frame, area: Rect, app: &App) {
+    let Some(commit) = app.selected_graph_commit() else {
+        return;
+    };
+    let popup = centered_rect(80, 70, area);
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        Paragraph::new(commit_details_lines(commit))
+            .wrap(Wrap { trim: true })
+            .block(Block::default().title("Commit Details").borders(Borders::ALL)),
+        popup,
+    );
+}
+
+fn commit_details_lines(commit: &Commit) -> Vec<Line<'static>> {
+    let mut lines = vec![
+        Line::from(format!("commit {}", commit.hash.as_str())),
+        Line::from(format!(
+            "Author:      {} <{}>",
+            sanitize::safe_line(&commit.author.name),
+            sanitize::safe_line(&commit.author.email)
+        )),
+        Line::from(format!(
+            "AuthorDate:  {}",
+            format_timestamp(&commit.author_date)
+        )),
+    ];
+    // A commit's author and committer differ whenever a rebase, cherry-pick,
+    // or `am` recorded someone else as having committed it — showing the
+    // committer only in that case keeps the common (self-authored) case
+    // uncluttered while never hiding the distinction when it matters.
+    if commit.committer != commit.author {
+        lines.push(Line::from(format!(
+            "Committer:   {} <{}>",
+            sanitize::safe_line(&commit.committer.name),
+            sanitize::safe_line(&commit.committer.email)
+        )));
+        lines.push(Line::from(format!(
+            "CommitDate:  {}",
+            format_timestamp(&commit.commit_date)
+        )));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(sanitize::safe_line(&commit.subject)));
+    if !commit.body.trim().is_empty() {
+        lines.push(Line::from(""));
+        for body_line in commit.body.lines() {
+            lines.push(Line::from(sanitize::safe_line(body_line)));
+        }
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from("Esc/q closes"));
+    lines
+}
+
+/// Formats a [`GitTimestamp`] the same zero-dependency way `gitsail-cli`
+/// already does (no `chrono`/`time` crate anywhere in this workspace) —
+/// the raw Unix timestamp, plus the signer's own UTC offset so a reader
+/// does not have to convert it themselves.
+fn format_timestamp(ts: &GitTimestamp) -> String {
+    let sign = if ts.utc_offset_minutes >= 0 { '+' } else { '-' };
+    let offset = ts.utc_offset_minutes.unsigned_abs();
+    format!(
+        "{} ({sign}{:02}:{:02})",
+        ts.seconds_since_epoch,
+        offset / 60,
+        offset % 60
+    )
 }
 
 /// Shows a pending/running/finished mutation (US-047, US-048): what it
@@ -587,7 +697,9 @@ fn render_help(frame: &mut Frame, area: Rect) {
         Line::from("Tab / Shift+Tab   move focus between panels"),
         Line::from("Up/Down, j/k      move the selection"),
         Line::from("Enter             select / open / confirm"),
-        Line::from("/                 filter the branch list"),
+        Line::from("Enter (Graph)     open commit details (hash, author, message)"),
+        Line::from("/ (Sidebar)       filter the branch list"),
+        Line::from("/ (Graph)         search commits: text, author:, branch:, hash"),
         Line::from("b                 toggle diff/blame view"),
         Line::from("s                 stage/unstage the highlighted entry"),
         Line::from("C                 compose a commit"),

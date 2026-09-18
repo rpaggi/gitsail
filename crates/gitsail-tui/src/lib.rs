@@ -27,6 +27,7 @@
 
 pub mod action;
 pub mod app;
+pub mod commit_search;
 pub mod event;
 pub mod graph_view;
 pub mod keymap;

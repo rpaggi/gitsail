@@ -61,4 +61,18 @@ pub enum Action {
     CommitMessageInput(char),
     /// Removes the last character from the commit message.
     CommitMessageBackspace,
+
+    // -- US-045: explore history and details -----------------------------
+    /// Appends one character to the active commit-search box (`/` while
+    /// the Graph panel is focused, routed by [`crate::app::App::update`]
+    /// the same way [`Action::StartCreateBranch`] is gated to the Sidebar).
+    CommitSearchInput(char),
+    /// Removes the last character from the commit-search box.
+    CommitSearchBackspace,
+    /// Submits the commit-search box, replacing the loaded commit graph
+    /// with a freshly filtered page (criterion 2) — parsed into
+    /// [`gitsail_application::CommitQuery`] filters by
+    /// [`crate::commit_search::parse_commit_search`], never a TUI-only
+    /// text match.
+    CommitSearchSubmit,
 }
