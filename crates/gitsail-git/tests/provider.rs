@@ -2873,3 +2873,198 @@ fn delete_branch_refuses_unmerged_commits_without_force_but_allows_with_force() 
     let branches = provider.branches(&repo).unwrap();
     assert!(!branches.iter().any(|b| b.name.as_str() == "feature"));
 }
+
+// ---------------------------------------------------------------------
+// Patch export round-trip (US-029/T-162): `gitsail_application::export_patch`
+// renders a full `FileDiff` set (not just the hunks selected for staging),
+// but shares the exact same renderer `stage_hunks`/`unstage_hunks` already
+// exercise above through real `git apply`. These tests instead round-trip
+// through a plain, non-`--cached` `git apply` — the way a person applies a
+// patch they copied or saved — and assert the repository was never
+// mutated by generating the export itself (criterion 2).
+
+/// Runs `git <args>` and returns trimmed stdout as UTF-8 (test fixture
+/// inspection only, mirroring [`git`]'s own "never in production code"
+/// scope).
+fn git_output(dir: &Path, args: &[&str]) -> String {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .env("LC_ALL", "C")
+        .env("LANG", "C")
+        .output()
+        .unwrap_or_else(|e| panic!("failed to spawn git {args:?}: {e}"));
+    assert!(output.status.success(), "git {args:?} failed in {dir:?}");
+    String::from_utf8(output.stdout).unwrap().trim().to_string()
+}
+
+fn current_head(dir: &Path) -> String {
+    git_output(dir, &["rev-parse", "HEAD"])
+}
+
+/// Applies `patch` to `dir`'s working tree with a plain `git apply` (no
+/// `--cached`) — the same command a person runs after copying/saving a
+/// patch this crate exported, as opposed to [`GitCliProvider::stage_hunks`]'s
+/// index-only `git apply --cached`.
+fn apply_patch(dir: &Path, patch: &str) {
+    let patch_path = dir.join(".gitsail-test-export.patch");
+    std::fs::write(&patch_path, patch).expect("write patch fixture file");
+    git(
+        dir,
+        &["apply", "--whitespace=nowarn", ".gitsail-test-export.patch"],
+    );
+    std::fs::remove_file(&patch_path).expect("remove patch fixture file");
+}
+
+#[test]
+fn exported_patch_of_an_unstaged_change_applies_cleanly_and_reproduces_the_new_content() {
+    let repo_dir = init_repo("export-patch-unstaged");
+    write_file(repo_dir.path(), "a.txt", "one\ntwo\nthree\n");
+    commit_all(repo_dir.path(), "first commit");
+    write_file(repo_dir.path(), "a.txt", "one\nTWO\nthree\n");
+
+    let provider = provider();
+    let repo = provider.discover(repo_dir.path()).unwrap();
+    let diff = provider
+        .diff(&repo, &unstaged_diff_request(), &CancellationToken::new())
+        .unwrap();
+
+    let export = gitsail_application::export_patch(&diff.files);
+    assert_eq!(export.included_files, vec![PathBuf::from("a.txt")]);
+    assert!(!export.is_incomplete());
+    assert!(!export.is_empty());
+
+    // Revert the working tree to the pre-change content, then apply the
+    // exported patch back: this must reproduce the edited content exactly
+    // (DoD: "round-trip de patch textual em fixture comprova fidelidade").
+    git(repo_dir.path(), &["checkout", "--", "a.txt"]);
+    assert_eq!(
+        std::fs::read_to_string(repo_dir.path().join("a.txt")).unwrap(),
+        "one\ntwo\nthree\n"
+    );
+
+    apply_patch(repo_dir.path(), &export.patch);
+
+    assert_eq!(
+        std::fs::read_to_string(repo_dir.path().join("a.txt")).unwrap(),
+        "one\nTWO\nthree\n",
+        "applying the exported patch must reproduce the original diff's new content"
+    );
+}
+
+#[test]
+fn exported_patch_round_trips_a_deleted_file() {
+    let repo_dir = init_repo("export-patch-deleted");
+    write_file(repo_dir.path(), "gone.txt", "bye\n");
+    commit_all(repo_dir.path(), "first commit");
+    std::fs::remove_file(repo_dir.path().join("gone.txt")).unwrap();
+
+    let provider = provider();
+    let repo = provider.discover(repo_dir.path()).unwrap();
+    let diff = provider
+        .diff(&repo, &unstaged_diff_request(), &CancellationToken::new())
+        .unwrap();
+    let export = gitsail_application::export_patch(&diff.files);
+    assert!(!export.is_empty());
+
+    git(repo_dir.path(), &["checkout", "--", "gone.txt"]);
+    assert!(repo_dir.path().join("gone.txt").exists());
+
+    apply_patch(repo_dir.path(), &export.patch);
+
+    assert!(
+        !repo_dir.path().join("gone.txt").exists(),
+        "the exported patch must reproduce the deletion"
+    );
+}
+
+#[test]
+fn exported_patch_round_trips_an_added_file() {
+    let repo_dir = init_repo("export-patch-added");
+    write_file(repo_dir.path(), "base.txt", "base\n");
+    commit_all(repo_dir.path(), "first commit");
+    write_file(repo_dir.path(), "new.txt", "hello\nworld\n");
+    // `git diff` (no arguments) never reports a purely untracked file — it
+    // has to be staged first for `Added` to show up as a diff at all.
+    git(repo_dir.path(), &["add", "new.txt"]);
+
+    let provider = provider();
+    let repo = provider.discover(repo_dir.path()).unwrap();
+    let diff = provider
+        .diff(&repo, &staged_diff_request(), &CancellationToken::new())
+        .unwrap();
+    let new_file_only: Vec<FileDiff> = diff
+        .files
+        .into_iter()
+        .filter(|f| f.path == Path::new("new.txt"))
+        .collect();
+    let export = gitsail_application::export_patch(&new_file_only);
+    assert_eq!(export.included_files, vec![PathBuf::from("new.txt")]);
+
+    std::fs::remove_file(repo_dir.path().join("new.txt")).unwrap();
+
+    apply_patch(repo_dir.path(), &export.patch);
+
+    assert_eq!(
+        std::fs::read_to_string(repo_dir.path().join("new.txt")).unwrap(),
+        "hello\nworld\n",
+        "the exported patch must recreate the added file with its original content"
+    );
+}
+
+#[test]
+fn exported_patch_preserves_a_missing_trailing_newline_on_round_trip() {
+    let repo_dir = init_repo("export-patch-no-trailing-newline");
+    write_bytes(repo_dir.path(), "a.txt", b"one\ntwo");
+    commit_all(repo_dir.path(), "first commit");
+    write_bytes(repo_dir.path(), "a.txt", b"one\nTWO");
+
+    let provider = provider();
+    let repo = provider.discover(repo_dir.path()).unwrap();
+    let diff = provider
+        .diff(&repo, &unstaged_diff_request(), &CancellationToken::new())
+        .unwrap();
+    let export = gitsail_application::export_patch(&diff.files);
+    assert!(export.patch.contains("\\ No newline at end of file"));
+
+    git(repo_dir.path(), &["checkout", "--", "a.txt"]);
+    apply_patch(repo_dir.path(), &export.patch);
+
+    let bytes = std::fs::read(repo_dir.path().join("a.txt")).unwrap();
+    assert_eq!(
+        bytes, b"one\nTWO",
+        "the exported patch must reproduce the missing trailing newline exactly, never adding one"
+    );
+}
+
+#[test]
+fn generating_an_exported_patch_never_mutates_the_index_or_head() {
+    let repo_dir = init_repo("export-patch-read-only");
+    write_file(repo_dir.path(), "a.txt", "one\ntwo\n");
+    commit_all(repo_dir.path(), "first commit");
+    write_file(repo_dir.path(), "a.txt", "one\nTWO\n");
+    git(repo_dir.path(), &["add", "a.txt"]);
+
+    let provider = provider();
+    let repo = provider.discover(repo_dir.path()).unwrap();
+    let diff = provider
+        .diff(&repo, &staged_diff_request(), &CancellationToken::new())
+        .unwrap();
+
+    let head_before = current_head(repo_dir.path());
+    let status_before = git_output(repo_dir.path(), &["status", "--porcelain"]);
+
+    let export = gitsail_application::export_patch(&diff.files);
+    assert!(!export.is_empty());
+
+    assert_eq!(
+        current_head(repo_dir.path()),
+        head_before,
+        "exporting a patch must never move HEAD (US-029 criterion 2)"
+    );
+    assert_eq!(
+        git_output(repo_dir.path(), &["status", "--porcelain"]),
+        status_before,
+        "exporting a patch must never change staged/working-tree state (US-029 criterion 2)"
+    );
+}

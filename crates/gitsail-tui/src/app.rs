@@ -13,9 +13,10 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use gitsail_application::{
-    BlameRequest, CommitQuery, DiffRequest, Page, RefreshReason, RepositoryReadPort,
+    export_patch, BlameRequest, CommitQuery, DiffRequest, Page, RefreshReason, RepositoryReadPort,
     RepositorySession,
 };
 use gitsail_domain::{
@@ -24,6 +25,7 @@ use gitsail_domain::{
 };
 
 use crate::action::Action;
+use crate::clipboard::{ClipboardPort, SystemClipboard};
 use crate::commit_search::parse_commit_search;
 use crate::keymap::InputContext;
 use crate::operation::{OperationKind, OperationState};
@@ -89,6 +91,38 @@ pub enum ViewPhase {
 pub enum DiffViewMode {
     Diff,
     Blame,
+}
+
+/// Outcome of the last [`Action::ExportPatch`] (US-029 criterion 1: "origem
+/// e escopo do patch são informados"). Shown as a transient banner in the
+/// Diff panel until the next diff selection replaces it — never persisted
+/// across a new file selection, exactly like `diff`/`diff_error` are reset
+/// in [`App::load_selected_diff`], so a stale result from a previously
+/// viewed file can never be mistaken for feedback about the current one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PatchExportOutcome {
+    /// The patch was copied to the system clipboard (the primary action,
+    /// criterion 3).
+    Copied {
+        scope: String,
+        file_count: usize,
+        incomplete: bool,
+    },
+    /// The clipboard was unavailable or failed, so the patch was saved to
+    /// `path` instead (criterion 3's documented fallback). `reason` carries
+    /// the clipboard failure so it is never silently swallowed.
+    SavedToFile {
+        scope: String,
+        path: PathBuf,
+        incomplete: bool,
+        reason: String,
+    },
+    /// Neither the clipboard nor a fallback file could receive the patch.
+    Failed { reason: String },
+    /// There was nothing to export — every file in the current diff was
+    /// binary, truncated, or had no content hunks. Distinct from `Failed`:
+    /// nothing went wrong, there was simply no patchable content.
+    Empty,
 }
 
 /// How many commits [`App`] requests per commit-graph page (US-065, US-066
@@ -158,6 +192,15 @@ pub struct App {
     blame_scroll: u16,
     blame_request_id: u64,
 
+    // -- US-029: copy or export a patch -----------------------------------
+    /// Presentation-only side effect, injected so tests can exercise both
+    /// the copy-succeeds and clipboard-unavailable-falls-back-to-file paths
+    /// (criterion 3) without touching a real OS clipboard. See
+    /// [`crate::clipboard`]'s module docs for why this lives outside
+    /// `gitsail-application`.
+    clipboard: Arc<dyn ClipboardPort>,
+    patch_export: Option<PatchExportOutcome>,
+
     // -- US-048: branch administration ----------------------------------
     branch_input: Option<String>,
 
@@ -192,6 +235,19 @@ impl App {
         port: Arc<dyn RepositoryReadPort>,
         low_color: bool,
     ) -> (App, Vec<Command>) {
+        Self::new_with_clipboard(repo_path, port, low_color, Arc::new(SystemClipboard))
+    }
+
+    /// Like [`Self::new`], but takes the [`ClipboardPort`] explicitly
+    /// rather than always constructing the real [`SystemClipboard`] — the
+    /// entry point tests use to inject a fake clipboard (US-029 criterion
+    /// 3). Production code (`main.rs`) always goes through [`Self::new`].
+    pub fn new_with_clipboard(
+        repo_path: PathBuf,
+        port: Arc<dyn RepositoryReadPort>,
+        low_color: bool,
+        clipboard: Arc<dyn ClipboardPort>,
+    ) -> (App, Vec<Command>) {
         let app = App {
             repo_path: repo_path.clone(),
             port,
@@ -223,6 +279,8 @@ impl App {
             blame_error: None,
             blame_scroll: 0,
             blame_request_id: 0,
+            clipboard,
+            patch_export: None,
             branch_input: None,
             commit_message: None,
             pending_paths: Vec::new(),
@@ -355,6 +413,13 @@ impl App {
 
     pub fn blame_scroll(&self) -> u16 {
         self.blame_scroll
+    }
+
+    /// The outcome of the last patch export/copy action (US-029 criterion
+    /// 1), or `None` before one has ever run or after it was superseded by
+    /// a new diff selection.
+    pub fn patch_export(&self) -> Option<&PatchExportOutcome> {
+        self.patch_export.as_ref()
     }
 
     pub fn branch_input(&self) -> Option<&str> {
@@ -592,6 +657,10 @@ impl App {
                 Vec::new()
             }
             Action::CommitSearchSubmit => self.submit_commit_search(),
+            Action::ExportPatch => {
+                self.export_patch();
+                Vec::new()
+            }
         }
     }
 
@@ -812,6 +881,11 @@ impl App {
         self.blame_error = None;
         self.blame_scroll = 0;
         self.diff_request_id += 1;
+        // A patch-export result names the file/scope it was generated for
+        // (US-029 criterion 1); it must never linger once that scope is no
+        // longer what is shown, or it would silently describe the wrong
+        // diff.
+        self.patch_export = None;
 
         let Some(session) = self.session.as_ref() else {
             return Vec::new();
@@ -862,6 +936,73 @@ impl App {
         )]
     }
 
+    /// Copies the currently displayed diff's patch to the system clipboard,
+    /// falling back to saving it as a file when the clipboard is
+    /// unavailable or fails (US-029/T-162).
+    ///
+    /// A no-op outside the Diff panel — `y` has no meaning elsewhere, the
+    /// same gating [`Self::request_toggle_stage`] applies to `s` on the
+    /// Details panel. Reads only [`Self::diff`], the data already loaded
+    /// for on-screen display; this never issues a fresh [`Command`] and
+    /// never touches the repository (criterion 2) — `export_patch` is a
+    /// pure transform over data already in memory.
+    fn export_patch(&mut self) {
+        if self.focus != Panel::Diff {
+            return;
+        }
+        let Some(diff) = self.diff.as_ref() else {
+            self.patch_export = Some(PatchExportOutcome::Empty);
+            return;
+        };
+        let export = export_patch(&diff.files);
+        if export.is_empty() {
+            self.patch_export = Some(PatchExportOutcome::Empty);
+            return;
+        }
+
+        let scope = self.patch_scope_label();
+        let file_count = export.included_files.len();
+        let incomplete = export.is_incomplete();
+        self.patch_export = Some(match self.clipboard.set_text(&export.patch) {
+            Ok(()) => PatchExportOutcome::Copied {
+                scope,
+                file_count,
+                incomplete,
+            },
+            Err(clipboard_reason) => match save_patch_to_file(&export.patch) {
+                Ok(path) => PatchExportOutcome::SavedToFile {
+                    scope,
+                    path,
+                    incomplete,
+                    reason: clipboard_reason,
+                },
+                Err(save_reason) => PatchExportOutcome::Failed {
+                    reason: format!(
+                        "clipboard unavailable ({clipboard_reason}); saving to a file also failed ({save_reason})"
+                    ),
+                },
+            },
+        });
+    }
+
+    /// A short, human-readable description of what the exported patch
+    /// covers (US-029 criterion 1: "origem e escopo do patch são
+    /// informados") — which side of [`DiffScope`] and which file, mirroring
+    /// [`OperationKind::target_label`]'s "always name the target" rule for
+    /// mutations.
+    fn patch_scope_label(&self) -> String {
+        match &self.selected_file {
+            Some(entry) => {
+                let scope = match entry.scope {
+                    DiffScope::Staged => "staged",
+                    DiffScope::Worktree => "unstaged",
+                };
+                format!("{scope} changes — {}", entry.path.display())
+            }
+            None => "the current diff".to_string(),
+        }
+    }
+
     fn dismiss(&mut self) {
         if self.help_visible {
             self.help_visible = false;
@@ -885,6 +1026,8 @@ impl App {
         } else if self.search.is_some() {
             self.search = None;
             self.sidebar_cursor = 0;
+        } else if self.patch_export.is_some() {
+            self.patch_export = None;
         } else {
             self.operation.cancel();
         }
@@ -1245,11 +1388,28 @@ impl App {
     }
 }
 
+/// Saves `patch` to a fresh, uniquely named file in the current working
+/// directory (US-029 criterion 3's documented fallback when the clipboard
+/// is unavailable). A nanosecond timestamp keeps repeated exports from
+/// colliding without needing a counter shared across calls.
+fn save_patch_to_file(patch: &str) -> Result<PathBuf, String> {
+    let dir = std::env::current_dir().map_err(|e| e.to_string())?;
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| e.to_string())?
+        .as_nanos();
+    let path = dir.join(format!("gitsail-patch-{nanos}.patch"));
+    std::fs::write(&path, patch).map_err(|e| e.to_string())?;
+    Ok(path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::clipboard::FakeClipboard;
     use gitsail_domain::{
-        BranchKind, ChangeType, ErrorCode, FileChange, FileDiff, FileStatusCode, RepositoryId,
+        BranchKind, ChangeType, DiffHunk, DiffLine, DiffLineOrigin, ErrorCode, FileChange,
+        FileDiff, FileStatusCode, RepositoryId,
     };
     use std::path::PathBuf;
     use std::sync::mpsc;
@@ -1398,6 +1558,14 @@ mod tests {
     fn new_app() -> (App, Arc<FakePort>) {
         let port = port_without_gate();
         let (app, commands) = App::new(PathBuf::from("/repo"), port.clone() as _, false);
+        assert!(matches!(commands.as_slice(), [Command::OpenRepository(_)]));
+        (app, port)
+    }
+
+    fn new_app_with_clipboard(clipboard: Arc<dyn ClipboardPort>) -> (App, Arc<FakePort>) {
+        let port = port_without_gate();
+        let (app, commands) =
+            App::new_with_clipboard(PathBuf::from("/repo"), port.clone() as _, false, clipboard);
         assert!(matches!(commands.as_slice(), [Command::OpenRepository(_)]));
         (app, port)
     }
@@ -1919,5 +2087,200 @@ mod tests {
         );
         assert!(app.commit_message().is_none());
         assert!(matches!(app.operation(), OperationState::Succeeded(_)));
+    }
+
+    // -- US-029: copy or export a patch -----------------------------------
+
+    fn modified_a_txt_diff() -> Diff {
+        Diff {
+            files: vec![FileDiff {
+                path: PathBuf::from("a.txt"),
+                previous_path: None,
+                change_type: ChangeType::Modified,
+                is_binary: false,
+                truncated: false,
+                hunks: vec![DiffHunk {
+                    old_start: 1,
+                    old_lines: 1,
+                    new_start: 1,
+                    new_lines: 1,
+                    lines: vec![
+                        DiffLine {
+                            origin: DiffLineOrigin::Deletion,
+                            content: "old".to_string(),
+                            has_trailing_newline: true,
+                        },
+                        DiffLine {
+                            origin: DiffLineOrigin::Addition,
+                            content: "new".to_string(),
+                            has_trailing_newline: true,
+                        },
+                    ],
+                }],
+            }],
+        }
+    }
+
+    /// Drives `app` from a fresh, opened session to the Diff panel focused
+    /// with `diff` loaded for the single worktree entry `a.txt` — the setup
+    /// every `export_patch` test below needs.
+    fn app_with_diff_focused(app: &mut App, diff: Diff) {
+        open_and_load_dirty_status(app);
+        app.update(Action::FocusNext); // Sidebar -> Graph
+        app.update(Action::FocusNext); // Graph -> Details
+        let commands = app.update(Action::Activate); // load the diff for a.txt
+        let request_id = match commands.as_slice() {
+            [Command::LoadDiff(id, _, _)] => *id,
+            other => panic!("expected exactly one LoadDiff command, got {other:?}"),
+        };
+        app.on_diff_loaded(request_id, Ok(diff));
+        app.update(Action::FocusNext); // Details -> Diff
+        assert_eq!(app.focus(), Panel::Diff);
+    }
+
+    #[test]
+    fn export_patch_copies_the_current_diff_and_reports_its_scope() {
+        let clipboard = Arc::new(FakeClipboard::default());
+        let (mut app, _port) = new_app_with_clipboard(clipboard.clone());
+        app_with_diff_focused(&mut app, modified_a_txt_diff());
+
+        app.update(Action::ExportPatch);
+
+        let copied = clipboard.last_set.lock().unwrap().clone();
+        assert_eq!(
+            copied.as_deref(),
+            Some("--- a/a.txt\n+++ b/a.txt\n@@ -1,1 +1,1 @@\n-old\n+new\n"),
+            "the clipboard must receive exactly the rendered git-apply-compatible patch"
+        );
+        match app.patch_export() {
+            Some(PatchExportOutcome::Copied {
+                scope,
+                file_count,
+                incomplete,
+            }) => {
+                assert!(
+                    scope.contains("a.txt") && scope.contains("unstaged"),
+                    "the scope must name the origin (unstaged) and the file, got {scope:?}"
+                );
+                assert_eq!(*file_count, 1);
+                assert!(!incomplete);
+            }
+            other => panic!("expected Copied, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn export_patch_falls_back_to_a_file_when_the_clipboard_is_unavailable() {
+        let clipboard = Arc::new(FakeClipboard {
+            fail: true,
+            ..Default::default()
+        });
+        let (mut app, _port) = new_app_with_clipboard(clipboard.clone());
+        app_with_diff_focused(&mut app, modified_a_txt_diff());
+
+        app.update(Action::ExportPatch);
+
+        assert!(
+            clipboard.last_set.lock().unwrap().is_none(),
+            "a failed clipboard write must never be recorded as successful"
+        );
+        let path = match app.patch_export() {
+            Some(PatchExportOutcome::SavedToFile {
+                scope,
+                path,
+                incomplete,
+                reason,
+            }) => {
+                assert!(scope.contains("a.txt"));
+                assert!(!incomplete);
+                assert!(
+                    !reason.is_empty(),
+                    "the clipboard failure reason must be carried, never swallowed"
+                );
+                path.clone()
+            }
+            other => panic!("expected SavedToFile, got {other:?}"),
+        };
+
+        let saved = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("expected the fallback file to exist at {path:?}: {e}"));
+        assert_eq!(saved, "--- a/a.txt\n+++ b/a.txt\n@@ -1,1 +1,1 @@\n-old\n+new\n");
+        std::fs::remove_file(&path).expect("clean up the fallback file created by this test");
+    }
+
+    #[test]
+    fn export_patch_outside_the_diff_panel_is_a_no_op() {
+        let clipboard = Arc::new(FakeClipboard::default());
+        let (mut app, _port) = new_app_with_clipboard(clipboard.clone());
+        open_and_load_dirty_status(&mut app);
+        app.update(Action::FocusNext); // Sidebar -> Graph
+        app.update(Action::FocusNext); // Graph -> Details
+        assert_eq!(app.focus(), Panel::Details);
+
+        app.update(Action::ExportPatch);
+
+        assert!(app.patch_export().is_none());
+        assert!(clipboard.last_set.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn export_patch_with_nothing_loaded_reports_empty_rather_than_copying_stale_content() {
+        let clipboard = Arc::new(FakeClipboard::default());
+        let (mut app, _port) = new_app_with_clipboard(clipboard.clone());
+        open_and_load_dirty_status(&mut app);
+        app.update(Action::FocusNext); // Sidebar -> Graph
+        app.update(Action::FocusNext); // Graph -> Details
+        app.update(Action::FocusNext); // Details -> Diff
+        assert_eq!(app.focus(), Panel::Diff);
+
+        app.update(Action::ExportPatch);
+
+        assert_eq!(app.patch_export(), Some(&PatchExportOutcome::Empty));
+        assert!(clipboard.last_set.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn export_patch_of_a_binary_only_diff_reports_empty_without_fabricating_a_patch() {
+        let clipboard = Arc::new(FakeClipboard::default());
+        let (mut app, _port) = new_app_with_clipboard(clipboard.clone());
+        app_with_diff_focused(
+            &mut app,
+            Diff {
+                files: vec![FileDiff {
+                    path: PathBuf::from("a.txt"),
+                    previous_path: None,
+                    change_type: ChangeType::Modified,
+                    is_binary: true,
+                    truncated: false,
+                    hunks: vec![],
+                }],
+            },
+        );
+
+        app.update(Action::ExportPatch);
+
+        assert_eq!(app.patch_export(), Some(&PatchExportOutcome::Empty));
+        assert!(clipboard.last_set.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn selecting_a_new_diff_clears_a_previous_patch_export_result() {
+        let clipboard = Arc::new(FakeClipboard::default());
+        let (mut app, _port) = new_app_with_clipboard(clipboard.clone());
+        app_with_diff_focused(&mut app, modified_a_txt_diff());
+        app.update(Action::ExportPatch);
+        assert!(app.patch_export().is_some());
+
+        // Re-selecting the same entry from Details re-triggers
+        // `load_selected_diff`, which must invalidate the now-stale
+        // export result rather than let it silently describe a diff that
+        // is no longer the one on screen.
+        app.update(Action::FocusPrev); // Diff -> Details
+        app.update(Action::Activate);
+
+        assert!(
+            app.patch_export().is_none(),
+            "a new diff selection must clear the previous export result"
+        );
     }
 }

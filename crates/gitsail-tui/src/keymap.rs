@@ -97,6 +97,7 @@ pub fn action_for(key: KeyEvent, ctx: InputContext) -> Option<Action> {
             KeyCode::Char('d') => Some(Action::RequestDeleteBranch),
             KeyCode::Char('s') => Some(Action::ToggleStage),
             KeyCode::Char('C') => Some(Action::StartCommit),
+            KeyCode::Char('y') => Some(Action::ExportPatch),
             _ => None,
         },
     }
@@ -220,6 +221,14 @@ mod tests {
         assert_eq!(
             action_for(press(KeyCode::Char('?')), InputContext::Normal),
             Some(Action::ToggleHelp)
+        );
+    }
+
+    #[test]
+    fn y_maps_to_export_patch_in_the_normal_context() {
+        assert_eq!(
+            action_for(press(KeyCode::Char('y')), InputContext::Normal),
+            Some(Action::ExportPatch)
         );
     }
 

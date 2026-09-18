@@ -4,6 +4,17 @@ version = "0.0.0"
 edition.workspace = true
 
 [dependencies]
+# Chosen for patch export (US-029/T-162): `arboard` is the de facto
+# cross-platform (X11/Wayland/Windows/macOS) clipboard crate in the Rust
+# ecosystem, has no GUI toolkit dependency (unlike `copypasta`, which pulls
+# in a windowing crate this headless TUI has no other use for), and fails
+# cleanly with an `Err` — never a panic or a hang — when no display server
+# is reachable (the common remote-terminal/SSH case AC3 requires a fallback
+# for). No clipboard dependency existed in the workspace before this story.
+# `default-features = false` drops its default `image-data` feature (and
+# the `image`/`objc2`/`windows-sys` dependency tree that comes with it) —
+# this crate only ever copies patch text, never an image.
+arboard = { version = "3", default-features = false }
 clap = { version = "4", features = ["derive"] }
 crossterm = "0.29"
 gitsail-application = { path = "../gitsail-application" }

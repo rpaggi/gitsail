@@ -130,3 +130,17 @@ export interface RecentRepositoryDto {
   path: string;
   lastOpenedUnixSeconds: number;
 }
+
+// -- Patch export (US-029/T-162) ---------------------------------------
+//
+// Mirrors `crates/gitsail-protocol/src/dto.rs`'s `PatchExportDto`, itself
+// built from `gitsail_application::PatchExport`. The frontend never
+// renders or reconstructs the patch text itself — this is exactly what the
+// `export_patch` command returned, ready to copy or save as-is.
+
+export interface PatchExportDto {
+  patch: string;
+  includedFiles: string[];
+  skippedBinaryFiles: string[];
+  skippedTruncatedFiles: string[];
+}

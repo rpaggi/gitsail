@@ -15,17 +15,17 @@
 //! (SAD §26's "UI thread/render loop never waits on Git process
 //! execution").
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use gitsail_application::{
-    CommitQuery, ForgetRecentRepository, GetCommitHistory, ListRecentRepositories, OpenRepository,
-    RecordRecentRepository, RefreshReason,
+    CommitQuery, DiffRequest, ForgetRecentRepository, GetCommitHistory, GetDiff,
+    ListRecentRepositories, OpenRepository, RecordRecentRepository, RefreshReason,
 };
-use gitsail_domain::{BranchName, ErrorCode, GitSailError, GraphCommit};
+use gitsail_domain::{BranchName, CancellationToken, ErrorCode, GitSailError, GraphCommit};
 use gitsail_protocol::{
-    CommitGraphPageDto, CommitGraphRowDto, ErrorPayload, RecentRepositoryDto, RepositoryDto,
-    RepositoryStatusDto,
+    CommitGraphPageDto, CommitGraphRowDto, ErrorPayload, PatchExportDto, RecentRepositoryDto,
+    RepositoryDto, RepositoryStatusDto,
 };
 
 use crate::state::AppState;
@@ -100,6 +100,51 @@ pub fn forget_recent_repository(
 /// US-065's "no invented connections" guarantee at the pagination
 /// boundary). `reset: false` continues appending to whatever has already
 /// been accumulated — a "load more" call.
+/// Builds a full, `git apply`-compatible patch for `staged`/`path`'s diff
+/// (US-029/T-162 criterion 1: the caller states the exact scope — which
+/// side and, when given, which file — so the origin of what gets copied is
+/// never ambiguous). Read-only: this never touches the index, working
+/// tree, or HEAD (criterion 2) — it only calls the same `RepositoryReadPort::diff`
+/// every other diff-reading surface uses, then
+/// `gitsail_application::export_patch` to render it, mirroring
+/// `gitsail-tui`'s `y` shortcut so both interfaces share one Core behavior.
+///
+/// Copying the result to the clipboard and falling back to a file save
+/// (criterion 3) both happen in the frontend, which already has native
+/// access to the browser clipboard API and the Tauri dialog plugin — this
+/// command's only job is producing the patch text, never touching either.
+#[tauri::command]
+pub fn export_patch(
+    staged: bool,
+    path: Option<String>,
+    state: tauri::State<AppState>,
+) -> Result<PatchExportDto, ErrorPayload> {
+    export_patch_impl(&state, staged, path.as_deref()).map_err(|err| ErrorPayload::from(&err))
+}
+
+/// Writes `contents` to `path`, overwriting whatever was already there
+/// (US-029/T-162 criterion 3's file-based clipboard fallback). The frontend
+/// picks `path` via `@tauri-apps/plugin-dialog`'s native save dialog
+/// (already a dependency, used elsewhere for the "open repository" picker)
+/// — this command's only job is the write itself, so no new file-system
+/// plugin was needed for this story; see `AGENTS.md`/this crate's
+/// `Cargo.toml` for that choice if a future story needs richer fs access
+/// from the frontend.
+///
+/// Deliberately generic (not "save a patch"): the same primitive would
+/// serve any future "save this text to a file" need without a second,
+/// near-identical command.
+#[tauri::command]
+pub fn save_text_file(path: String, contents: String) -> Result<(), ErrorPayload> {
+    save_text_file_impl(&path, &contents).map_err(|err| ErrorPayload::from(&err))
+}
+
+fn save_text_file_impl(path: &str, contents: &str) -> Result<(), GitSailError> {
+    std::fs::write(path, contents).map_err(|err| {
+        GitSailError::new(ErrorCode::Internal, "failed to write the file").with_source(err)
+    })
+}
+
 #[tauri::command]
 pub fn get_commit_graph_page(
     branch: Option<String>,
@@ -152,6 +197,23 @@ fn forget_recent_repository_impl(
     let recents =
         ForgetRecentRepository::new(state.recent_repositories()).execute(Path::new(path))?;
     Ok(recents.entries().iter().map(RecentRepositoryDto::from).collect())
+}
+
+fn export_patch_impl(
+    state: &AppState,
+    staged: bool,
+    path: Option<&str>,
+) -> Result<PatchExportDto, GitSailError> {
+    let (repository, _epoch) = state.repository_with_epoch()?;
+    let request = DiffRequest {
+        staged,
+        path_filter: path.map(PathBuf::from),
+        ..DiffRequest::default()
+    };
+    let diff =
+        GetDiff::new(state.port()).execute(&repository, &request, &CancellationToken::new())?;
+    let export = gitsail_application::export_patch(&diff.files);
+    Ok(PatchExportDto::from(&export))
 }
 
 fn get_commit_graph_page_impl(
@@ -252,6 +314,7 @@ mod tests {
         repository: Repository,
         status: RepositoryStatus,
         history: Vec<Commit>,
+        diff: gitsail_domain::Diff,
     }
 
     impl gitsail_application::RepositoryReadPort for FakePort {
@@ -299,7 +362,7 @@ mod tests {
             _request: &DiffRequest,
             _cancel: &CancellationToken,
         ) -> Result<gitsail_domain::Diff, GitSailError> {
-            unimplemented!("not exercised by these tests")
+            Ok(self.diff.clone())
         }
 
         fn resolve_revision(
@@ -379,10 +442,19 @@ mod tests {
     }
 
     fn state_with_history(history: Vec<Commit>) -> AppState {
+        state_with_history_and_diff(history, gitsail_domain::Diff { files: vec![] })
+    }
+
+    fn state_with_diff(diff: gitsail_domain::Diff) -> AppState {
+        state_with_history_and_diff(vec![], diff)
+    }
+
+    fn state_with_history_and_diff(history: Vec<Commit>, diff: gitsail_domain::Diff) -> AppState {
         let port: Arc<dyn gitsail_application::RepositoryReadPort> = Arc::new(FakePort {
             repository: sample_repository(),
             status: dirty_status(),
             history,
+            diff,
         });
         AppState::new(port, InMemoryRecents::shared())
     }
@@ -454,6 +526,110 @@ mod tests {
         assert_eq!(parse_refresh_reason("after_mutation"), RefreshReason::AfterMutation);
         assert_eq!(parse_refresh_reason("manual"), RefreshReason::Manual);
         assert_eq!(parse_refresh_reason("something-unknown"), RefreshReason::Manual);
+    }
+
+    // -- US-029/T-162: copy or export a patch -----------------------------
+
+    fn modified_file_diff(path: &str) -> gitsail_domain::FileDiff {
+        gitsail_domain::FileDiff {
+            path: PathBuf::from(path),
+            previous_path: None,
+            change_type: ChangeType::Modified,
+            is_binary: false,
+            truncated: false,
+            hunks: vec![gitsail_domain::DiffHunk {
+                old_start: 1,
+                old_lines: 1,
+                new_start: 1,
+                new_lines: 1,
+                lines: vec![
+                    gitsail_domain::DiffLine {
+                        origin: gitsail_domain::DiffLineOrigin::Deletion,
+                        content: "old".to_string(),
+                        has_trailing_newline: true,
+                    },
+                    gitsail_domain::DiffLine {
+                        origin: gitsail_domain::DiffLineOrigin::Addition,
+                        content: "new".to_string(),
+                        has_trailing_newline: true,
+                    },
+                ],
+            }],
+        }
+    }
+
+    #[test]
+    fn export_patch_before_opening_fails_with_invalid_repository_state() {
+        let state = state_with_fake_port();
+
+        let err = export_patch_impl(&state, false, None).unwrap_err();
+
+        assert_eq!(err.code(), ErrorCode::InvalidRepositoryState);
+    }
+
+    #[test]
+    fn export_patch_renders_the_diffs_patch_and_lists_the_included_file() {
+        let state = state_with_diff(gitsail_domain::Diff {
+            files: vec![modified_file_diff("a.txt")],
+        });
+        open_repository_impl(&state, "/repo").unwrap();
+
+        let dto = export_patch_impl(&state, false, Some("a.txt")).unwrap();
+
+        assert_eq!(
+            dto.patch,
+            "--- a/a.txt\n+++ b/a.txt\n@@ -1,1 +1,1 @@\n-old\n+new\n"
+        );
+        assert_eq!(dto.included_files, vec!["a.txt".to_string()]);
+        assert!(dto.skipped_binary_files.is_empty());
+        assert!(dto.skipped_truncated_files.is_empty());
+    }
+
+    #[test]
+    fn save_text_file_writes_the_given_contents_to_the_given_path() {
+        let dir = std::env::temp_dir().join(format!(
+            "gitsail-desktop-save-text-file-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("exported.patch");
+
+        save_text_file_impl(path.to_str().unwrap(), "--- a/a.txt\n+++ b/a.txt\n").unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "--- a/a.txt\n+++ b/a.txt\n"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn save_text_file_reports_an_internal_error_for_an_unwritable_path() {
+        let err = save_text_file_impl("/nonexistent-dir-abcxyz/patch.txt", "content").unwrap_err();
+        assert_eq!(err.code(), ErrorCode::Internal);
+    }
+
+    #[test]
+    fn export_patch_of_a_binary_file_reports_it_as_skipped_rather_than_fabricating_hunks() {
+        let state = state_with_diff(gitsail_domain::Diff {
+            files: vec![gitsail_domain::FileDiff {
+                path: PathBuf::from("image.png"),
+                previous_path: None,
+                change_type: ChangeType::Modified,
+                is_binary: true,
+                truncated: false,
+                hunks: vec![],
+            }],
+        });
+        open_repository_impl(&state, "/repo").unwrap();
+
+        let dto = export_patch_impl(&state, false, None).unwrap();
+
+        assert!(dto.patch.is_empty());
+        assert_eq!(dto.skipped_binary_files, vec!["image.png".to_string()]);
     }
 
     fn linear_history() -> Vec<Commit> {

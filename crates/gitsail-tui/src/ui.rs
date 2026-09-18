@@ -14,7 +14,7 @@ use ratatui::text::Line;
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
 use ratatui::Frame;
 
-use crate::app::{App, DiffViewMode, Panel, ViewPhase};
+use crate::app::{App, DiffViewMode, Panel, PatchExportOutcome, ViewPhase};
 use crate::operation::OperationState;
 use crate::sanitize;
 use crate::status_view::DiffScope;
@@ -374,50 +374,102 @@ fn render_diff_panel(frame: &mut Frame, rect: Rect, app: &App) {
 /// criterion 2) come before any hunk, never in place of one — a truncated
 /// file's withheld hunks are never confused with "no changes".
 fn diff_lines(app: &App) -> Vec<Line<'static>> {
-    if let Some(err) = app.diff_error() {
-        return vec![Line::from(sanitize::safe_line(err.message()))];
-    }
-    let Some(diff) = app.diff() else {
-        return vec![Line::from("Loading diff…")];
-    };
-    let Some(file) = diff.files.first() else {
-        return vec![Line::from("No changes for this file.")];
-    };
+    // A patch-export result (US-029 criterion 1) is shown regardless of
+    // which of the states below applies — even "Loading diff…" or an error
+    // — since it reports on the *previous* action, not on what is
+    // currently loading; an `if let ... return` chain would otherwise hide
+    // it whenever one of those early states applies.
+    let banner = app.patch_export().map(patch_export_banner);
 
     let mut lines = Vec::new();
-    if file.is_binary {
-        lines.push(Line::from("[binary file]"));
-    }
-    if file.truncated {
-        lines.push(Line::from("[diff truncated — content withheld, not empty]"));
-    }
-    for (i, hunk) in file.hunks.iter().enumerate() {
-        let header = format!(
-            "@@ -{},{} +{},{} @@",
-            hunk.old_start, hunk.old_lines, hunk.new_start, hunk.new_lines
-        );
-        let header_style = if i == app.diff_hunk_cursor() {
-            Style::default().add_modifier(Modifier::REVERSED)
+    if let Some(err) = app.diff_error() {
+        lines.push(Line::from(sanitize::safe_line(err.message())));
+    } else if let Some(diff) = app.diff() {
+        if let Some(file) = diff.files.first() {
+            if file.is_binary {
+                lines.push(Line::from("[binary file]"));
+            }
+            if file.truncated {
+                lines.push(Line::from("[diff truncated — content withheld, not empty]"));
+            }
+            for (i, hunk) in file.hunks.iter().enumerate() {
+                let header = format!(
+                    "@@ -{},{} +{},{} @@",
+                    hunk.old_start, hunk.old_lines, hunk.new_start, hunk.new_lines
+                );
+                let header_style = if i == app.diff_hunk_cursor() {
+                    Style::default().add_modifier(Modifier::REVERSED)
+                } else {
+                    Style::default().add_modifier(Modifier::BOLD)
+                };
+                lines.push(Line::from(header).style(header_style));
+                for line in &hunk.lines {
+                    let prefix = match line.origin {
+                        DiffLineOrigin::Addition => '+',
+                        DiffLineOrigin::Deletion => '-',
+                        DiffLineOrigin::Context => ' ',
+                    };
+                    lines.push(Line::from(format!(
+                        "{prefix}{}",
+                        sanitize::safe_line(&line.content)
+                    )));
+                }
+            }
+            if lines.is_empty() {
+                lines.push(Line::from("No hunks."));
+            }
         } else {
-            Style::default().add_modifier(Modifier::BOLD)
-        };
-        lines.push(Line::from(header).style(header_style));
-        for line in &hunk.lines {
-            let prefix = match line.origin {
-                DiffLineOrigin::Addition => '+',
-                DiffLineOrigin::Deletion => '-',
-                DiffLineOrigin::Context => ' ',
-            };
-            lines.push(Line::from(format!(
-                "{prefix}{}",
-                sanitize::safe_line(&line.content)
-            )));
+            lines.push(Line::from("No changes for this file."));
         }
+    } else {
+        lines.push(Line::from("Loading diff…"));
     }
-    if lines.is_empty() {
-        lines.push(Line::from("No hunks."));
+
+    if let Some(banner) = banner {
+        lines.insert(0, banner);
     }
     lines
+}
+
+/// Renders the outcome of the last `y` (export patch) press as a single,
+/// bold banner line (US-029 criterion 1: origin/scope, criterion 3:
+/// clipboard vs. file-fallback outcome — both stated explicitly, never left
+/// for the person to infer).
+fn patch_export_banner(outcome: &PatchExportOutcome) -> Line<'static> {
+    let text = match outcome {
+        PatchExportOutcome::Copied {
+            scope,
+            file_count,
+            incomplete,
+        } => format!(
+            "Patch copied to clipboard — {scope} ({file_count} file{}){}",
+            if *file_count == 1 { "" } else { "s" },
+            if *incomplete {
+                " [incomplete: binary/truncated content skipped]"
+            } else {
+                ""
+            }
+        ),
+        PatchExportOutcome::SavedToFile {
+            scope,
+            path,
+            incomplete,
+            reason,
+        } => format!(
+            "Clipboard unavailable ({reason}) — patch for {scope} saved to {}{}",
+            path.display(),
+            if *incomplete {
+                " [incomplete: binary/truncated content skipped]"
+            } else {
+                ""
+            }
+        ),
+        PatchExportOutcome::Failed { reason } => format!("Patch export failed: {reason}"),
+        PatchExportOutcome::Empty => {
+            "Nothing to export — no content hunks in the current diff".to_string()
+        }
+    };
+    Line::from(sanitize::safe_line(&text)).style(Style::default().add_modifier(Modifier::BOLD))
 }
 
 /// Content lines for the blame sub-view (US-046 criterion 3): line number,
@@ -701,6 +753,7 @@ fn render_help(frame: &mut Frame, area: Rect) {
         Line::from("/ (Sidebar)       filter the branch list"),
         Line::from("/ (Graph)         search commits: text, author:, branch:, hash"),
         Line::from("b                 toggle diff/blame view"),
+        Line::from("y (Diff)          copy the diff's patch (or save to a file)"),
         Line::from("s                 stage/unstage the highlighted entry"),
         Line::from("C                 compose a commit"),
         Line::from("n                 create a branch"),

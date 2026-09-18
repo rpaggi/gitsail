@@ -27,6 +27,7 @@
 
 pub mod action;
 pub mod app;
+pub mod clipboard;
 pub mod commit_search;
 pub mod event;
 pub mod graph_view;
@@ -40,7 +41,8 @@ pub mod ui;
 pub mod worker;
 
 pub use action::Action;
-pub use app::{App, DiffViewMode, Panel, ViewPhase};
+pub use app::{App, DiffViewMode, Panel, PatchExportOutcome, ViewPhase};
+pub use clipboard::{ClipboardPort, FakeClipboard, SystemClipboard};
 pub use graph_view::GraphLine;
 pub use keymap::InputContext;
 pub use message::Message;

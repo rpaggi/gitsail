@@ -1043,64 +1043,15 @@ fn classify_delete_branch_failure(err: GitSailError) -> GitSailError {
 // Unified diff patch rendering for hunk-level stage/unstage (US-013).
 // ---------------------------------------------------------------------
 
-/// Renders `selection` into `git apply`-compatible unified diff text: the
-/// minimal `---`/`+++`/`@@` framing `git apply` accepts, without a
-/// `diff --git`/`index` header (none of that is needed to apply content
-/// hunks, and this adapter never needs to *parse* what it renders here).
+/// Renders `selection` into `git apply`-compatible unified diff text.
 ///
-/// A line with `has_trailing_newline: false` is rendered with the `\ No
-/// newline at end of file` marker `git apply` expects instead of a
-/// synthesized trailing newline (US-027 criterion 2).
+/// Thin wrapper over [`gitsail_application::render_unified_diff`]: the
+/// actual rendering logic lives there (T-162/US-029) so this adapter's
+/// hunk-level stage/unstage path and the patch-export use case TUI/Desktop
+/// call for US-029 share exactly one renderer instead of two that could
+/// drift apart.
 fn render_hunk_patch(selection: &[FileDiff]) -> String {
-    let mut out = String::new();
-    for file in selection {
-        if file.hunks.is_empty() {
-            continue;
-        }
-        let (old_path, new_path) = patch_paths(file);
-        out.push_str(&format!("--- {old_path}\n"));
-        out.push_str(&format!("+++ {new_path}\n"));
-        for hunk in &file.hunks {
-            out.push_str(&format!(
-                "@@ -{},{} +{},{} @@\n",
-                hunk.old_start, hunk.old_lines, hunk.new_start, hunk.new_lines
-            ));
-            for line in &hunk.lines {
-                let sigil = match line.origin {
-                    DiffLineOrigin::Context => ' ',
-                    DiffLineOrigin::Addition => '+',
-                    DiffLineOrigin::Deletion => '-',
-                };
-                out.push(sigil);
-                out.push_str(&line.content);
-                out.push('\n');
-                if !line.has_trailing_newline {
-                    out.push_str("\\ No newline at end of file\n");
-                }
-            }
-        }
-    }
-    out
-}
-
-fn patch_paths(file: &FileDiff) -> (String, String) {
-    match file.change_type {
-        ChangeType::Added => (
-            "/dev/null".to_string(),
-            format!("b/{}", file.path.to_string_lossy()),
-        ),
-        ChangeType::Deleted => (
-            format!("a/{}", file.path.to_string_lossy()),
-            "/dev/null".to_string(),
-        ),
-        _ => (
-            format!(
-                "a/{}",
-                file.previous_path.as_ref().unwrap_or(&file.path).to_string_lossy()
-            ),
-            format!("b/{}", file.path.to_string_lossy()),
-        ),
-    }
+    gitsail_application::render_unified_diff(selection)
 }
 
 fn parse_err(message: impl Into<String>) -> GitSailError {

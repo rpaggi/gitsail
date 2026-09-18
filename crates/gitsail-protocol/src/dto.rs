@@ -12,7 +12,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use gitsail_application::RecentRepositoryEntry;
+use gitsail_application::{PatchExport, RecentRepositoryEntry};
 use gitsail_domain::{
     Blame, BlameLine, BlameOrigin, Branch, BranchKind, ChangeType, Commit, Decoration, Diff,
     DiffHunk, DiffLine, DiffLineOrigin, FileChange, FileDiff, FileStatusCode, GitTimestamp,
@@ -522,6 +522,42 @@ impl From<&Diff> for DiffDto {
 }
 
 // ---------------------------------------------------------------------
+// Patch export (US-029/T-162). Mirrors
+// `gitsail_application::patch::PatchExport` — the rendering and scope
+// classification logic lives there (shared by the TUI), this crate only
+// adds the wire shape so the Desktop frontend can copy/save it without
+// ever parsing or reconstructing a patch itself.
+// ---------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PatchExportDto {
+    pub patch: String,
+    pub included_files: Vec<String>,
+    pub skipped_binary_files: Vec<String>,
+    pub skipped_truncated_files: Vec<String>,
+}
+
+impl From<&PatchExport> for PatchExportDto {
+    fn from(export: &PatchExport) -> Self {
+        Self {
+            patch: export.patch.clone(),
+            included_files: export.included_files.iter().map(|p| path_to_string(p)).collect(),
+            skipped_binary_files: export
+                .skipped_binary_files
+                .iter()
+                .map(|p| path_to_string(p))
+                .collect(),
+            skipped_truncated_files: export
+                .skipped_truncated_files
+                .iter()
+                .map(|p| path_to_string(p))
+                .collect(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------
 // Blame.
 // ---------------------------------------------------------------------
 
@@ -712,6 +748,24 @@ mod tests {
 
         assert_eq!(dto.path, "/repo");
         assert_eq!(json["lastOpenedUnixSeconds"], 1_700_000_000);
+    }
+
+    #[test]
+    fn patch_export_dto_maps_patch_text_and_every_scope_bucket() {
+        let export = PatchExport {
+            patch: "--- a/a.txt\n+++ b/a.txt\n".to_string(),
+            included_files: vec![PathBuf::from("a.txt")],
+            skipped_binary_files: vec![PathBuf::from("image.png")],
+            skipped_truncated_files: vec![PathBuf::from("huge.txt")],
+        };
+
+        let dto = PatchExportDto::from(&export);
+        let json = serde_json::to_value(&dto).unwrap();
+
+        assert_eq!(dto.patch, export.patch);
+        assert_eq!(json["includedFiles"], serde_json::json!(["a.txt"]));
+        assert_eq!(json["skippedBinaryFiles"], serde_json::json!(["image.png"]));
+        assert_eq!(json["skippedTruncatedFiles"], serde_json::json!(["huge.txt"]));
     }
 
     #[test]

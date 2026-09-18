@@ -16,8 +16,8 @@ pub use dto::{
     BlameDto, BlameLineDto, BlameOriginDto, BranchDto, BranchKindDto, ChangeTypeDto, CommitDto,
     CommitGraphPageDto, CommitGraphRowDto, DecorationDto, DiffDto, DiffHunkDto, DiffLineDto,
     DiffLineOriginDto, FileChangeDto, FileDiffDto, FileStatusCodeDto, GitTimestampDto,
-    GraphEdgeDto, HeadStateDto, RecentRepositoryDto, RepositoryDto, RepositoryStatusDto,
-    SignatureDto,
+    GraphEdgeDto, HeadStateDto, PatchExportDto, RecentRepositoryDto, RepositoryDto,
+    RepositoryStatusDto, SignatureDto,
 };
 pub use envelope::{Envelope, Page, SCHEMA_VERSION};
 pub use error::ErrorPayload;

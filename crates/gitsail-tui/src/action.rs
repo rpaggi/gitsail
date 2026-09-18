@@ -75,4 +75,10 @@ pub enum Action {
     /// [`crate::commit_search::parse_commit_search`], never a TUI-only
     /// text match.
     CommitSearchSubmit,
+
+    // -- US-029: copy or export a patch ----------------------------------
+    /// Copies the currently displayed diff's patch to the system clipboard
+    /// (`y`, Diff panel only), falling back to saving a file when the
+    /// clipboard is unavailable (US-029 criterion 3).
+    ExportPatch,
 }

@@ -4,8 +4,10 @@
 
 mod support;
 
+use std::sync::Arc;
+
 use gitsail_application::{GetRepositoryStatus, OpenRepository};
-use gitsail_tui::{ui, Action, App, Command};
+use gitsail_tui::{ui, Action, App, ClipboardPort, Command, FakeClipboard, PatchExportOutcome};
 use ratatui::backend::TestBackend;
 use ratatui::Terminal;
 use support::{buffer_text, git, init_repo_with_initial_commit, read_port, TempDir};
@@ -177,5 +179,105 @@ fn blame_shows_author_and_commit_without_terminal_control_codes() {
         text.contains("local"),
         "the uncommitted line must be attributed as local, not a fabricated commit:\n{text}"
     );
+}
+
+// ---------------------------------------------------------------------
+// Copy or export a patch (US-029/T-162).
+// ---------------------------------------------------------------------
+
+#[test]
+fn exporting_a_patch_copies_it_to_the_clipboard_and_names_its_scope() {
+    let dir = TempDir::new("export-patch-clipboard");
+    init_repo_with_initial_commit(dir.path());
+    std::fs::write(dir.path().join("README.md"), "hello\nworld\n").unwrap();
+
+    let clipboard: Arc<FakeClipboard> = Arc::new(FakeClipboard::default());
+    let (mut app, _commands) = App::new_with_clipboard(
+        dir.path().to_path_buf(),
+        read_port(),
+        false,
+        clipboard.clone() as Arc<dyn ClipboardPort>,
+    );
+    open_and_load(&mut app, dir.path());
+    focus_details(&mut app);
+    let commands = app.update(Action::Activate);
+    run_diff_or_blame_command(&mut app, commands);
+    app.update(Action::FocusNext); // Details -> Diff
+    assert_eq!(app.focus(), gitsail_tui::Panel::Diff);
+
+    app.update(Action::ExportPatch);
+
+    let copied = clipboard
+        .last_set
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("the patch must have been written to the clipboard");
+    assert!(
+        copied.contains("+world") && copied.starts_with("--- a/README.md\n+++ b/README.md\n"),
+        "the copied text must be the real git-apply-compatible patch:\n{copied}"
+    );
+
+    let text = render(&app);
+    assert!(
+        text.contains("copied") && text.contains("README.md") && text.contains("unstaged"),
+        "the UI must state the patch's origin and scope (US-029 criterion 1):\n{text}"
+    );
+}
+
+#[test]
+fn exporting_a_patch_falls_back_to_a_file_when_the_clipboard_is_unavailable_and_it_applies_cleanly()
+{
+    let dir = TempDir::new("export-patch-fallback");
+    init_repo_with_initial_commit(dir.path());
+    std::fs::write(dir.path().join("README.md"), "hello\nworld\n").unwrap();
+
+    let failing_clipboard: Arc<dyn ClipboardPort> = Arc::new(FakeClipboard {
+        fail: true,
+        ..Default::default()
+    });
+    let (mut app, _commands) = App::new_with_clipboard(
+        dir.path().to_path_buf(),
+        read_port(),
+        false,
+        failing_clipboard,
+    );
+    open_and_load(&mut app, dir.path());
+    focus_details(&mut app);
+    let commands = app.update(Action::Activate);
+    run_diff_or_blame_command(&mut app, commands);
+    app.update(Action::FocusNext); // Details -> Diff
+
+    app.update(Action::ExportPatch);
+
+    let path = match app.patch_export() {
+        Some(PatchExportOutcome::SavedToFile { path, .. }) => path.clone(),
+        other => panic!("expected the clipboard-unavailable fallback, got {other:?}"),
+    };
+    let text = render(&app);
+    assert!(
+        text.contains("saved to") && text.contains("README.md"),
+        "the UI must name the fallback file and the patch's scope:\n{text}"
+    );
+
+    // DoD: round-trip through a real `git apply` reproduces the diff this
+    // patch was exported from, closing the loop for the TUI exactly like
+    // `gitsail-git`'s own round-trip tests do for the underlying renderer.
+    git(dir.path(), &["checkout", "--", "README.md"]);
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("README.md")).unwrap(),
+        "hello\n"
+    );
+    git(
+        dir.path(),
+        &["apply", path.to_str().expect("utf-8 patch path")],
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("README.md")).unwrap(),
+        "hello\nworld\n",
+        "applying the saved patch file must reproduce the original diff"
+    );
+
+    std::fs::remove_file(&path).expect("clean up the fallback patch file created by this test");
 }
 

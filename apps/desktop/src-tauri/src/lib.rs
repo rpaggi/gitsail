@@ -43,6 +43,8 @@ pub fn run() {
             commands::get_commit_graph_page,
             commands::list_recent_repositories,
             commands::forget_recent_repository,
+            commands::export_patch,
+            commands::save_text_file,
         ])
         .run(tauri::generate_context!())
         .expect("error while running the GitSail Desktop application");

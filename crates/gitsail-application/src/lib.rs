@@ -5,6 +5,7 @@
 #![forbid(unsafe_code)]
 
 pub mod blame_cache;
+pub mod patch;
 pub mod ports;
 pub mod recent_repositories;
 pub mod session;
@@ -13,6 +14,7 @@ pub mod write_ports;
 pub mod write_use_cases;
 
 pub use blame_cache::{BlameCache, BlameCacheKey, BlameQueryTicket};
+pub use patch::{export_patch, render_unified_diff, PatchExport};
 pub use ports::{BlameRequest, CommitQuery, DiffRequest, LineHistoryRequest, Page, RepositoryReadPort};
 pub use recent_repositories::{
     ForgetRecentRepository, ListRecentRepositories, RecentRepositories, RecentRepositoriesPort,
