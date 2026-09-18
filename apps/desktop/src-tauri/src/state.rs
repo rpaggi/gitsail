@@ -42,10 +42,12 @@
 use std::sync::{Arc, Mutex};
 
 use gitsail_application::{
-    ForgeCredentialPort, PullRequestQueryPort, RecentRepositoriesPort, RepositoryReadPort,
-    RepositorySession, RepositoryWritePort,
+    ForgeCredentialPort, PreferencesPort, PullRequestQueryPort, RecentRepositoriesPort,
+    RepositoryReadPort, RepositorySession, RepositoryWritePort,
 };
 use gitsail_domain::{CommitGraph, ErrorCode, GitSailError, GraphCommit, GraphRow, Repository};
+
+use crate::keybindings_store::JsonFileKeybindingsStore;
 
 /// The Desktop process' parsed startup intent (EPIC-15's Desktop-side gap:
 /// see `lib.rs`'s `parse_startup_args`), consumed exactly once by the
@@ -101,6 +103,16 @@ pub struct AppState {
     /// dispatching to a real HTTP-backed adapter per forge) lives outside
     /// this crate, matching every other port `AppState` holds.
     pull_request_query: Arc<dyn PullRequestQueryPort>,
+    /// Persists GitSail's own local UI preferences — theme, as of T-248/
+    /// US-106 (Desktop's concrete adapter, a JSON file, lives in
+    /// `preferences_store`; `AppState` only depends on the port, matching
+    /// every other `gitsail-application` abstraction it holds).
+    preferences: Arc<dyn PreferencesPort>,
+    /// Persists custom keyboard shortcut overrides (T-249/US-107). A
+    /// concrete type, not a `dyn` port: see `keybindings_store`'s own doc
+    /// comment for why this is deliberately a Desktop-only concern with no
+    /// `gitsail-application` abstraction in front of it.
+    keybindings: Arc<JsonFileKeybindingsStore>,
     /// The startup intent parsed from `--repo`/`--commit` (see this
     /// module's own `StartupIntent` doc). `take` semantics (via
     /// `Mutex<Option<_>>`) rather than a plain field: consumed exactly
@@ -117,6 +129,8 @@ impl AppState {
         recent_repositories: Arc<dyn RecentRepositoriesPort>,
         forge_credentials: Arc<dyn ForgeCredentialPort>,
         pull_request_query: Arc<dyn PullRequestQueryPort>,
+        preferences: Arc<dyn PreferencesPort>,
+        keybindings: Arc<JsonFileKeybindingsStore>,
     ) -> Self {
         Self {
             port,
@@ -126,6 +140,8 @@ impl AppState {
             recent_repositories,
             forge_credentials,
             pull_request_query,
+            preferences,
+            keybindings,
             startup_intent: Mutex::new(None),
         }
     }
@@ -148,6 +164,14 @@ impl AppState {
 
     pub fn pull_request_query(&self) -> Arc<dyn PullRequestQueryPort> {
         self.pull_request_query.clone()
+    }
+
+    pub fn preferences(&self) -> Arc<dyn PreferencesPort> {
+        self.preferences.clone()
+    }
+
+    pub fn keybindings(&self) -> Arc<JsonFileKeybindingsStore> {
+        self.keybindings.clone()
     }
 
     /// Records the startup intent parsed from argv (`lib.rs::run`, once,
@@ -417,6 +441,27 @@ mod tests {
         }
     }
 
+    /// An in-memory [`PreferencesPort`] double, mirroring
+    /// `gitsail_application::preferences`'s own test double — `AppState`'s
+    /// tests care about session/epoch/commit-graph behavior, never about
+    /// how preferences are persisted (that is `preferences_store`'s job).
+    struct InMemoryPreferences(Mutex<Option<gitsail_application::Preferences>>);
+    impl InMemoryPreferences {
+        fn new() -> Self {
+            Self(Mutex::new(None))
+        }
+    }
+    impl PreferencesPort for InMemoryPreferences {
+        fn load(&self) -> Result<gitsail_application::PreferencesLoadOutcome, GitSailError> {
+            let stored = self.0.lock().unwrap().clone().unwrap_or_default();
+            Ok(gitsail_application::PreferencesLoadOutcome::clean(stored))
+        }
+        fn save(&self, preferences: &gitsail_application::Preferences) -> Result<(), GitSailError> {
+            *self.0.lock().unwrap() = Some(preferences.clone());
+            Ok(())
+        }
+    }
+
     fn state() -> AppState {
         AppState::new(
             Arc::new(UnimplementedPort),
@@ -424,6 +469,12 @@ mod tests {
             Arc::new(InMemoryRecents::new()),
             Arc::new(gitsail_forge::InMemoryForgeCredentialStore::new()),
             Arc::new(gitsail_forge::FakePullRequestQueryPort::default()),
+            Arc::new(InMemoryPreferences::new()),
+            Arc::new(JsonFileKeybindingsStore::new(std::env::temp_dir().join(format!(
+                "gitsail-state-test-keybindings-{}-{:?}.json",
+                std::process::id(),
+                std::thread::current().id()
+            )))),
         )
     }
 

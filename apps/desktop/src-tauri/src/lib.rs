@@ -9,6 +9,7 @@
 
 mod browser;
 mod commands;
+mod keybindings_store;
 mod preferences_store;
 mod recent_repositories_store;
 mod state;
@@ -16,11 +17,12 @@ mod state;
 use std::sync::Arc;
 
 use gitsail_application::{
-    ForgeCredentialPort, PullRequestQueryPort, RecentRepositoriesPort, RepositoryReadPort,
-    RepositoryWritePort,
+    ForgeCredentialPort, PreferencesPort, PullRequestQueryPort, RecentRepositoriesPort,
+    RepositoryReadPort, RepositoryWritePort,
 };
 use gitsail_git::{GitCliProvider, GitProcessRunner, GitProcessRunnerConfig};
 
+use preferences_store::JsonFilePreferencesStore;
 use recent_repositories_store::JsonFileRecentRepositoriesStore;
 use state::{AppState, StartupIntent};
 
@@ -85,12 +87,29 @@ pub fn run() {
     let pull_request_query: Arc<dyn PullRequestQueryPort> =
         Arc::new(gitsail_forge::CompositePullRequestQueryPort::production());
 
+    // T-248/US-106: theme preference, connecting T-247's until-now-unused
+    // `JsonFilePreferencesStore` the same way `recent_repositories` is wired
+    // above.
+    let preferences_path = JsonFilePreferencesStore::default_location()
+        .expect("could not resolve the preferences file location");
+    let preferences: Arc<dyn PreferencesPort> =
+        Arc::new(JsonFilePreferencesStore::new(preferences_path));
+
+    // T-249/US-107: keyboard shortcut overrides — a Desktop-only concern,
+    // deliberately not a `PreferencesPort` (see `keybindings_store`'s own
+    // module doc for why).
+    let keybindings_path = keybindings_store::JsonFileKeybindingsStore::default_location()
+        .expect("could not resolve the keybindings file location");
+    let keybindings = Arc::new(keybindings_store::JsonFileKeybindingsStore::new(keybindings_path));
+
     let app_state = AppState::new(
         port,
         write_port,
         recent_repositories,
         forge_credentials,
         pull_request_query,
+        preferences,
+        keybindings,
     );
     app_state.set_startup_intent(parse_startup_args(std::env::args()));
 
@@ -150,6 +169,12 @@ pub fn run() {
             commands::cherry_pick,
             commands::revert,
             commands::reset,
+            commands::get_preferences,
+            commands::set_theme,
+            commands::get_keybinding_overrides,
+            commands::set_keybinding_override,
+            commands::reset_keybinding_override,
+            commands::reset_all_keybinding_overrides,
         ])
         .run(tauri::generate_context!())
         .expect("error while running the GitSail Desktop application");

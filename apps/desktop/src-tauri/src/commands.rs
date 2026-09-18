@@ -18,16 +18,19 @@
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use std::collections::HashMap;
+
 use gitsail_application::{
     AbortOperation, AmendCommit, ApplyPatch, CherryPick, CommitQuery, ConnectForgeAccount,
     ContinueOperation, CreateBranch, CreateCommit, DeleteBranch, DetectInProgressOperation,
     DiffRequest, DisconnectForgeAccount, ExecuteRebasePlan, Fetch, ForgeToken,
     ForgetRecentRepository, GetCommit, GetCommitHistory, GetConflictSides, GetDiff,
     GetForgeConnectionStatus, GetForgeLink, ListBranches, ListPullRequests, ListRecentRepositories,
-    MarkConflictResolved, Merge, MergeParentPolicy, OpenRepository, PlanRebase, PreviewAmend,
-    PreviewPatchApplication, Pull, Push, Rebase, RebasePlan, RecordRecentRepository, RefreshReason,
-    RenameBranch, Reset, ResetMode, Revert, SkipOperation, StageFiles, StageHunks, SwitchBranch,
-    TakeConflictSide, UnstageFiles, UnstageHunks,
+    LoadPreferences, MarkConflictResolved, Merge, MergeParentPolicy, OpenRepository, PlanRebase,
+    PreviewAmend, PreviewPatchApplication, Pull, Push, Rebase, RebasePlan, RecordRecentRepository,
+    RefreshReason, RenameBranch, Reset, ResetMode, Revert, SetThemePreference, SkipOperation,
+    StageFiles, StageHunks, SwitchBranch, TakeConflictSide, ThemePreference, UnstageFiles,
+    UnstageHunks,
 };
 use gitsail_domain::{
     repository_location, Branch, BranchKind, BranchName, CancellationToken, CommitHash,
@@ -38,7 +41,7 @@ use gitsail_protocol::{
     CommitGraphPageDto, CommitGraphRowDto, CommitResultDto, ConflictSidesDto, DiffDto,
     ErrorPayload, FileDiffDto, ForgeAccountDto, ForgeConnectionStatusDto, ForgeLinkTargetDto,
     InProgressOperationDto, ListPullRequestsOutcomeDto, MergeResultDto, PatchExportDto,
-    PatchPreviewDto, PullOutcomeDto, PullResultDto, RebasePlanDto, RebaseResultDto,
+    PatchPreviewDto, PreferencesDto, PullOutcomeDto, PullResultDto, RebasePlanDto, RebaseResultDto,
     RecentRepositoryDto, RemoteDto, RepositoryDto, RepositoryStatusDto, RevertResultDto,
     SyncTargetDto,
 };
@@ -1439,6 +1442,120 @@ fn execute_rebase_plan_impl(
     Ok(RebaseResultDto::from(&result))
 }
 
+// -- T-248/US-106: theme preference --------------------------------------
+//
+// `get_preferences`/`set_theme` are the only two commands this story needs
+// (US-106's own scope is theme only — no arbitrary/custom theming; see
+// `gitsail_application::preferences`'s module doc). Neither depends on a
+// repository being open: preferences are app-global, read/settable before
+// any repository is ever opened (e.g. the very first launch, on the empty
+// shell state).
+
+/// Reads the currently persisted preferences (US-106 criterion 2: the
+/// theme choice persists across sessions). Never fails outright over a
+/// corrupted/unreadable preferences file — see
+/// [`gitsail_application::PreferencesLoadOutcome`]'s own contract — the
+/// resulting [`PreferencesDto::diagnostic`] carries that instead, so the
+/// frontend can still start with a safe default and inform the person once.
+#[tauri::command]
+pub fn get_preferences(state: tauri::State<AppState>) -> Result<PreferencesDto, ErrorPayload> {
+    get_preferences_impl(&state).map_err(|err| ErrorPayload::from(&err))
+}
+
+fn get_preferences_impl(state: &AppState) -> Result<PreferencesDto, GitSailError> {
+    let outcome = LoadPreferences::new(state.preferences()).execute()?;
+    let mut dto = PreferencesDto::from(&outcome.preferences);
+    dto.diagnostic = outcome.diagnostic.as_ref().map(ErrorPayload::from);
+    Ok(dto)
+}
+
+/// Parses the frontend's theme string ("system"/"light"/"dark") into
+/// [`ThemePreference`], mirroring every other "unknown value from the
+/// frontend" command in this file (e.g. [`parse_merge_parent_policy`],
+/// `take_conflict_side_impl`'s `side` parsing) rather than accepting a
+/// typed enum DTO for a single-argument command.
+fn parse_theme_preference(theme: &str) -> Result<ThemePreference, GitSailError> {
+    match theme {
+        "system" => Ok(ThemePreference::System),
+        "light" => Ok(ThemePreference::Light),
+        "dark" => Ok(ThemePreference::Dark),
+        other => Err(GitSailError::new(
+            ErrorCode::InvalidRepositoryState,
+            format!("unknown theme '{other}'"),
+        )
+        .with_remediation("pass 'system', 'light', or 'dark'")),
+    }
+}
+
+/// Sets and persists the theme preference (US-106 criteria 1/2): dark is
+/// this app's initial theme (`ThemePreference::default` in
+/// `gitsail_application::preferences` is `System`, and the frontend itself
+/// treats "no preference saved yet" as dark — see `stores/theme.ts` — so a
+/// fresh install never needs this command called at all to already look
+/// dark). Calling this with `"dark"` or `"light"` is what actually switches
+/// and persists a person's explicit choice.
+#[tauri::command]
+pub fn set_theme(theme: String, state: tauri::State<AppState>) -> Result<PreferencesDto, ErrorPayload> {
+    set_theme_impl(&state, &theme).map_err(|err| ErrorPayload::from(&err))
+}
+
+fn set_theme_impl(state: &AppState, theme: &str) -> Result<PreferencesDto, GitSailError> {
+    let theme = parse_theme_preference(theme)?;
+    let preferences = SetThemePreference::new(state.preferences()).execute(theme)?;
+    Ok(PreferencesDto::from(&preferences))
+}
+
+// -- T-249/US-107: keyboard shortcut overrides ----------------------------
+//
+// These four commands are thin wrappers around `state.keybindings()`
+// (`keybindings_store::JsonFileKeybindingsStore`, a plain Desktop-only
+// store — see that module's doc for why this bypasses
+// `gitsail_application` entirely). This crate never knows what a valid
+// action id is or what a well-formed binding string looks like: the
+// frontend's `src/keybindings.ts` owns the action registry and the
+// conflict-detection rule (US-107 criterion 2); these commands only
+// persist whatever `action_id`/`binding` string pair the frontend already
+// validated, exactly as blindly as `save_text_file` persists arbitrary
+// text.
+
+/// Reads every currently-overridden action id -> binding pair (US-107
+/// criterion 1). An action with no entry here is using its frontend-defined
+/// default.
+#[tauri::command]
+pub fn get_keybinding_overrides(state: tauri::State<AppState>) -> Result<HashMap<String, String>, ErrorPayload> {
+    state.keybindings().load().map_err(|err| ErrorPayload::from(&err))
+}
+
+/// Remaps `action_id` to `binding`, persisting it immediately.
+#[tauri::command]
+pub fn set_keybinding_override(
+    action_id: String,
+    binding: String,
+    state: tauri::State<AppState>,
+) -> Result<HashMap<String, String>, ErrorPayload> {
+    state
+        .keybindings()
+        .set_override(&action_id, Some(&binding))
+        .map_err(|err| ErrorPayload::from(&err))
+}
+
+/// Clears `action_id`'s override, reverting it to its frontend-defined
+/// default (US-107 criterion 1's "restaurar padrão", scoped to one action).
+#[tauri::command]
+pub fn reset_keybinding_override(
+    action_id: String,
+    state: tauri::State<AppState>,
+) -> Result<HashMap<String, String>, ErrorPayload> {
+    state.keybindings().set_override(&action_id, None).map_err(|err| ErrorPayload::from(&err))
+}
+
+/// Clears every override at once (US-107 criterion 1's "restaurar padrão",
+/// applied to the whole list).
+#[tauri::command]
+pub fn reset_all_keybinding_overrides(state: tauri::State<AppState>) -> Result<(), ErrorPayload> {
+    state.keybindings().reset_all().map_err(|err| ErrorPayload::from(&err))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1483,6 +1600,43 @@ mod tests {
     /// `gitsail-forge`'s crate docs for why that can't be exercised here).
     fn test_forge_credentials() -> Arc<dyn gitsail_application::ForgeCredentialPort> {
         Arc::new(gitsail_forge::InMemoryForgeCredentialStore::new())
+    }
+
+    /// A fresh in-memory [`gitsail_application::PreferencesPort`] double
+    /// (T-247/T-248) for every test `AppState` built in this module — these
+    /// tests care about command wiring, never about disk persistence (that
+    /// is `preferences_store`'s job).
+    struct InMemoryPreferences(Mutex<Option<gitsail_application::Preferences>>);
+    impl gitsail_application::PreferencesPort for InMemoryPreferences {
+        fn load(&self) -> Result<gitsail_application::PreferencesLoadOutcome, GitSailError> {
+            let stored = self.0.lock().unwrap().clone().unwrap_or_default();
+            Ok(gitsail_application::PreferencesLoadOutcome::clean(stored))
+        }
+        fn save(&self, preferences: &gitsail_application::Preferences) -> Result<(), GitSailError> {
+            *self.0.lock().unwrap() = Some(preferences.clone());
+            Ok(())
+        }
+    }
+    fn test_preferences() -> Arc<dyn gitsail_application::PreferencesPort> {
+        Arc::new(InMemoryPreferences(Mutex::new(None)))
+    }
+
+    /// A fresh, uniquely-pathed [`crate::keybindings_store::
+    /// JsonFileKeybindingsStore`] (T-249) for every test `AppState` built in
+    /// this module. Unlike [`test_preferences`]/[`InMemoryRecents`] this is
+    /// a real file-backed store rather than an in-memory double: that type
+    /// is a concrete struct, not a `dyn` port (see its own module doc for
+    /// why), so there is no trait to double against — a unique temp path per
+    /// call keeps tests isolated from each other and from a real install's
+    /// own `keybindings.json` exactly like `preferences_store`'s/
+    /// `recent_repositories_store`'s own tests do.
+    fn test_keybindings() -> Arc<crate::keybindings_store::JsonFileKeybindingsStore> {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let id = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let path = std::env::temp_dir()
+            .join(format!("gitsail-commands-test-keybindings-{}-{id}.json", std::process::id()));
+        Arc::new(crate::keybindings_store::JsonFileKeybindingsStore::new(path))
     }
 
     /// A `RepositoryReadPort` double exercising `discover`, `status`, and
@@ -1706,6 +1860,8 @@ mod tests {
             InMemoryRecents::shared(),
             test_forge_credentials(),
             Arc::new(gitsail_forge::FakePullRequestQueryPort::default()),
+            test_preferences(),
+            test_keybindings(),
         )
     }
 
@@ -1724,6 +1880,8 @@ mod tests {
             InMemoryRecents::shared(),
             test_forge_credentials(),
             Arc::new(pull_requests),
+            test_preferences(),
+            test_keybindings(),
         )
     }
 
@@ -3258,6 +3416,8 @@ mod tests {
                 InMemoryRecents::shared(),
                 test_forge_credentials(),
                 Arc::new(gitsail_forge::FakePullRequestQueryPort::default()),
+                test_preferences(),
+                test_keybindings(),
             );
         state.open_session(sample_repository());
 
@@ -3372,6 +3532,8 @@ mod tests {
                 InMemoryRecents::shared(),
                 test_forge_credentials(),
                 Arc::new(gitsail_forge::FakePullRequestQueryPort::default()),
+                test_preferences(),
+                test_keybindings(),
             ));
         state.open_session(sample_repository());
 
@@ -3529,6 +3691,8 @@ mod tests {
                 InMemoryRecents::shared(),
                 test_forge_credentials(),
                 Arc::new(gitsail_forge::FakePullRequestQueryPort::default()),
+                test_preferences(),
+                test_keybindings(),
             )
         }
 
@@ -3788,6 +3952,8 @@ mod tests {
                 InMemoryRecents::shared(),
                 test_forge_credentials(),
                 Arc::new(gitsail_forge::FakePullRequestQueryPort::default()),
+                test_preferences(),
+                test_keybindings(),
             )
         }
 

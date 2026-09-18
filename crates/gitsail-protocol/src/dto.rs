@@ -15,8 +15,8 @@ use serde::{Deserialize, Serialize};
 use gitsail_application::{
     AmendPreview, ApplyPatchResult, CherryPickResult, CommitDiff, ForgeAccountId,
     ForgeConnectionStatus, ListPullRequestsOutcome, MergeResult, PatchExport, PatchPreview,
-    PullOutcome, PullRequestPage, PullRequestState, PullRequestSummary, RebaseAction, RebasePlan,
-    RebasePlanEntry, RebaseResult, RecentRepositoryEntry, RevertResult,
+    Preferences, PullOutcome, PullRequestPage, PullRequestState, PullRequestSummary, RebaseAction,
+    RebasePlan, RebasePlanEntry, RebaseResult, RecentRepositoryEntry, RevertResult, ThemePreference,
 };
 use gitsail_domain::{
     Blame, BlameLine, BlameOrigin, Branch, BranchKind, BranchName, ChangeType, Commit, CommitHash,
@@ -1685,6 +1685,64 @@ impl From<ListPullRequestsOutcome> for ListPullRequestsOutcomeDto {
     }
 }
 
+// ---------------------------------------------------------------------
+// T-248/US-106: theme preference. The wire values ("system"/"light"/
+// "dark") intentionally match `preferences_store.rs`'s own on-disk
+// `StoredTheme` spelling — both are independent, adapter-owned mappings
+// off of the same `gitsail_application::ThemePreference` (Ports & Adapters:
+// the domain type carries no `serde`), so keeping their string spelling
+// identical is a readability choice, not a shared dependency.
+// ---------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ThemePreferenceDto {
+    System,
+    Light,
+    Dark,
+}
+
+impl From<ThemePreference> for ThemePreferenceDto {
+    fn from(theme: ThemePreference) -> Self {
+        match theme {
+            ThemePreference::System => Self::System,
+            ThemePreference::Light => Self::Light,
+            ThemePreference::Dark => Self::Dark,
+        }
+    }
+}
+
+impl From<ThemePreferenceDto> for ThemePreference {
+    fn from(theme: ThemePreferenceDto) -> Self {
+        match theme {
+            ThemePreferenceDto::System => Self::System,
+            ThemePreferenceDto::Light => Self::Light,
+            ThemePreferenceDto::Dark => Self::Dark,
+        }
+    }
+}
+
+/// [`Preferences`] over the wire (T-248/US-106), plus an optional
+/// [`crate::error::ErrorPayload`] diagnostic carried straight from
+/// [`gitsail_application::PreferencesLoadOutcome`] — a corrupted/
+/// unreadable preferences file must never surface as a silently-reset
+/// theme (see that type's own doc comment); the frontend can show it
+/// once, e.g. as a toast, rather than the user wondering why their theme
+/// reverted.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreferencesDto {
+    pub theme: ThemePreferenceDto,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub diagnostic: Option<crate::error::ErrorPayload>,
+}
+
+impl From<&Preferences> for PreferencesDto {
+    fn from(preferences: &Preferences) -> Self {
+        Self { theme: preferences.theme.into(), diagnostic: None }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2558,5 +2616,38 @@ mod tests {
         let dto = ListPullRequestsOutcomeDto::from(ListPullRequestsOutcome::Error(err));
         let json = serde_json::to_string(&dto).unwrap();
         assert!(!json.contains("super-secret-stderr-contents"));
+    }
+
+    #[test]
+    fn theme_preference_dto_wire_values_are_snake_case() {
+        let cases = [
+            (ThemePreference::System, "system"),
+            (ThemePreference::Light, "light"),
+            (ThemePreference::Dark, "dark"),
+        ];
+        for (theme, expected) in cases {
+            let dto = ThemePreferenceDto::from(theme);
+            let json = serde_json::to_value(dto).unwrap();
+            assert_eq!(json, expected);
+            assert_eq!(ThemePreference::from(dto), theme, "round trip must be lossless");
+        }
+    }
+
+    #[test]
+    fn preferences_dto_omits_a_none_diagnostic_and_carries_a_some_one() {
+        let clean = PreferencesDto::from(&Preferences { theme: ThemePreference::Dark });
+        let json = serde_json::to_value(&clean).unwrap();
+        assert_eq!(json["theme"], "dark");
+        assert!(json.get("diagnostic").is_none());
+
+        let with_diagnostic = PreferencesDto {
+            theme: ThemePreferenceDto::Dark,
+            diagnostic: Some(crate::error::ErrorPayload::from(&gitsail_domain::GitSailError::new(
+                gitsail_domain::ErrorCode::ParseFailure,
+                "corrupted",
+            ))),
+        };
+        let json = serde_json::to_value(&with_diagnostic).unwrap();
+        assert!(json.get("diagnostic").is_some());
     }
 }

@@ -6,11 +6,15 @@ import ConfirmationDialog from "./components/ConfirmationDialog.vue";
 import HistoryEditingPanel from "./components/HistoryEditingPanel.vue";
 import { useAppDataStore } from "./stores/appData";
 import { useCommitGraphStore } from "./stores/graph";
+import { useKeybindingsStore } from "./stores/keybindings";
+import { usePreferencesStore } from "./stores/preferences";
 import { useRepositorySessionStore } from "./stores/session";
 import { takeStartupIntent } from "./services/startup";
 
 const appData = useAppDataStore();
 const session = useRepositorySessionStore();
+const preferences = usePreferencesStore();
+const keybindings = useKeybindingsStore();
 
 // Refresh-on-window-focus (US-054 criterion 2): regaining focus refreshes
 // through the same shared `refreshStatus` action a manual click uses.
@@ -49,6 +53,14 @@ async function applyStartupIntent(): Promise<void> {
 
 onMounted(() => {
   void appData.loadRecentRepositories();
+  // T-248/US-106, T-249/US-107: app-global preferences, loaded once
+  // regardless of whether a repository is open — `preferences.load()`
+  // applies the persisted (or default-dark) theme to the document as soon
+  // as it resolves; `keybindings.load()` populates the overrides the
+  // global shortcut dispatcher (`AppShell.vue`) and `SearchPalette.vue`'s
+  // shortcut hint both read.
+  void preferences.load();
+  void keybindings.load();
   void applyStartupIntent();
   window.addEventListener("focus", handleFocus);
 });

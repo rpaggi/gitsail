@@ -7,18 +7,27 @@
 // a commit (copy its hash, branch from it) are offered, never a generic
 // action list.
 
-import { ref } from "vue";
+import { computed, ref } from "vue";
 
 import { useSearchStore } from "../stores/search";
 import { useCommitGraphStore } from "../stores/graph";
 import { useBranchesStore } from "../stores/branches";
+import { useKeybindingsStore } from "../stores/keybindings";
+import { formatBindingForDisplay } from "../keybindings";
 import type { CommitDto } from "../services/dto";
 
 const search = useSearchStore();
 const graph = useCommitGraphStore();
 const branches = useBranchesStore();
+const keybindings = useKeybindingsStore();
 
 const queryInput = ref("");
+
+// T-249/US-107 criterion 3: this shows whatever "focus-search" is
+// *currently* bound to (its default, or a person's own remap) — never a
+// hardcoded default, so remapping it in `KeybindingsPanel.vue` is
+// reflected here immediately.
+const focusSearchBinding = computed(() => formatBindingForDisplay(keybindings.bindings["focus-search"]));
 
 function runSearch(): void {
   void search.search(queryInput.value);
@@ -43,14 +52,17 @@ function createBranchHere(hash: string): void {
 <template>
   <div class="search-palette">
     <label for="gitsail-search-input" class="sr-only">Search commits and branches</label>
-    <input
-      id="gitsail-search-input"
-      v-model="queryInput"
-      type="text"
-      placeholder="Search commits (hash, message, author) or branches…"
-      @input="runSearch"
-      @keyup.enter="runSearch"
-    />
+    <div class="search-palette__input-row">
+      <input
+        id="gitsail-search-input"
+        v-model="queryInput"
+        type="text"
+        placeholder="Search commits (hash, message, author) or branches…"
+        @input="runSearch"
+        @keyup.enter="runSearch"
+      />
+      <kbd class="search-palette__shortcut" :title="`Shortcut: ${focusSearchBinding}`">{{ focusSearchBinding }}</kbd>
+    </div>
     <p v-if="search.lastError" class="error">{{ search.lastError.message }}</p>
 
     <div v-if="search.exactMatch" class="search-palette__exact-match">
@@ -104,9 +116,24 @@ function createBranchHere(hash: string): void {
 </template>
 
 <style scoped>
+.search-palette__input-row {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
 .search-palette input {
   width: 100%;
   box-sizing: border-box;
+}
+.search-palette__shortcut {
+  flex-shrink: 0;
+  background: var(--color-surface-alt);
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  padding: 0.1rem 0.35rem;
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  color: var(--color-text-muted);
 }
 .search-palette__section,
 .search-palette__exact-match {

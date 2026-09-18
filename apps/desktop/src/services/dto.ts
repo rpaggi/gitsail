@@ -473,3 +473,12 @@ export type ListPullRequestsOutcomeDto =
   | { state: "rateLimited"; retryAfterSeconds?: number }
   | { state: "offline"; message: string }
   | { state: "error"; error: ErrorPayload };
+
+// -- Preferences (T-248/US-106) ----------------------------------------
+
+export type ThemePreferenceDto = "system" | "light" | "dark";
+
+export interface PreferencesDto {
+  theme: ThemePreferenceDto;
+  diagnostic?: ErrorPayload;
+}

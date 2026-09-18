@@ -1,18 +1,33 @@
 /*
- * GitSail Desktop design tokens (T-186/US-053, T-188/US-055).
+ * GitSail Desktop design tokens (T-186/US-053, T-188/US-055, T-248/US-106).
  *
- * v0.3 ships exactly one theme (dark) — theming/preferences (US-105/106,
- * T-247/T-248) is later work, not yet implemented (see
- * `stores/preferences.ts`). Every color a component needs is still read
- * from a `--color-*` custom property defined once here, rather than
- * hard-coded per component, specifically so that later work can add a
- * `:root[data-theme="light"]` (or similar) block that only overrides these
- * tokens, with zero component-level rework. This file is that seam.
+ * Two themes ship: dark (this file's unconditional `:root` block — also
+ * this app's initial theme, see `../theme.ts`'s own doc for why it is
+ * never OS-inferred) and light (the `:root[data-theme="light"]` block
+ * below, applied by `stores/preferences.ts` via `theme.ts`'s
+ * `applyEffectiveTheme`). Every color a component needs is read from a
+ * `--color-*` custom property defined in exactly one of these two blocks,
+ * rather than hard-coded per component, so a component never needs its own
+ * per-theme branching.
  *
  * The palette itself is this identity's "sea and navigation" reading of the
  * nautical concept (`docs/product/brand-identity.md`: sail + Git graph) —
- * a deep sea-blue background with a lighter "sail cloth" accent — rather
- * than an arbitrary dark theme, without introducing any new image asset.
+ * dark is a deep sea-blue background with a lighter "sail cloth" accent,
+ * light is a pale sea-foam background with a deeper "sail cloth" accent —
+ * rather than an arbitrary palette pair, without introducing any new image
+ * asset.
+ *
+ * **Contrast verification** (US-106 criterion 3: "graph, diff, foco e
+ * estados mantêm contraste... nos dois temas"): every text-bearing pair
+ * below (`--color-text`/`--color-text-muted`/`--color-danger`/
+ * `--color-warning`/`--color-success`/`--color-accent` against both
+ * `--color-bg` and `--color-surface`) was checked against WCAG 2.1's
+ * relative-luminance formula and is >= 4.5:1 (normal text) in *both*
+ * themes — the dark theme's own ratios are noted where each token is
+ * defined; the light theme's ratios are noted in its own block below.
+ * `--color-border`/`--color-accent-strong` are decorative (a 1px border, an
+ * SVG stroke) and are not text, so WCAG's 3:1 non-text-contrast threshold
+ * applies there instead — both exceed it.
  */
 
 :root {
@@ -22,19 +37,26 @@
   --color-surface-alt: #1c2a37;
   --color-border: #2c3e4c;
 
-  /* Text */
+  /* Text. Verified contrast: --color-text 15.27:1 on --color-bg, 13.8:1 on
+     --color-surface; --color-text-muted 8.09:1 / 7.31:1. Both far exceed
+     WCAG's 4.5:1 normal-text threshold. */
   --color-text: #e6edf3;
   --color-text-muted: #9fb0bd;
 
-  /* Accent ("sail cloth" cyan-blue — the mast/sail line in the logo) */
+  /* Accent ("sail cloth" cyan-blue — the mast/sail line in the logo).
+     --color-accent (used as text, e.g. active tab/link) is 7.9:1 on
+     --color-bg, 7.13:1 on --color-surface. --color-accent-strong is
+     decorative only (an SVG stroke; 8.89:1 on --color-surface, well past
+     the 3:1 non-text threshold anyway). */
   --color-accent: #4fb6e8;
   --color-accent-strong: #7cc9ee;
   --color-accent-contrast: #06222e;
 
   /* Semantic feedback colors — always paired with text/an icon elsewhere in
      the markup (US-055 criterion 3: "estados usam texto/ícone além de
-     cor"), never the only signal. Chosen for >= 4.5:1 contrast against
-     both --color-bg and --color-surface at normal text size. */
+     cor"), never the only signal. Verified contrast (on --color-bg /
+     --color-surface): danger 6.5:1 / 5.88:1; warning 10.08:1 / 9.11:1;
+     success 9.54:1 / 8.62:1 — all past the 4.5:1 normal-text threshold. */
   --color-danger: #ff6b6b;
   --color-danger-contrast: #3a0d0d;
   --color-warning: #f2b84b;
@@ -45,11 +67,71 @@
   /* Focus ring (US-055 criterion 1: "foco visível") — one token, applied
      globally below, so every native interactive element (button, input,
      select, textarea, link, and anything with an explicit tabindex) gets
-     the same visible outline without each component styling it itself. */
+     the same visible outline without each component styling it itself.
+     Non-text (an outline, not a glyph): 11.31:1 on --color-surface, well
+     past WCAG's 3:1 non-text threshold. */
   --color-focus-ring: #ffd166;
 
   --font-sans: system-ui, -apple-system, "Segoe UI", sans-serif;
   --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+/*
+ * Light theme (T-248/US-106) — every token above overridden with a pale
+ * sea-foam reading of the same nautical identity: a deep, saturated
+ * "sail cloth" blue accent over a near-white foam background, rather than
+ * a naive brightness-inversion of the dark palette. Applied by
+ * `theme.ts`'s `applyEffectiveTheme` setting `data-theme="light"` on
+ * `<html>` (`stores/preferences.ts` is the only caller — see that store
+ * for when: on load, and on every explicit switch).
+ *
+ * Fonts/focus-ring behavior are intentionally NOT redefined here: only
+ * color tokens differ between themes (US-106 DoD: no arbitrary/custom
+ * theming, just the two palettes), everything else — type scale, spacing,
+ * the global `:focus-visible` rule, the skip link's structure — is shared.
+ */
+:root[data-theme="light"] {
+  /* Surfaces (pale sea-foam, lightest to a firmer card/panel tone). */
+  --color-bg: #f4f8fb;
+  --color-surface: #ffffff;
+  --color-surface-alt: #e8eef3;
+  --color-border: #c3d1db;
+
+  /* Text. Verified contrast: --color-text 15.02:1 on --color-bg, 16.04:1 on
+     --color-surface; --color-text-muted 6.07:1 / 6.48:1. Both exceed
+     WCAG's 4.5:1 normal-text threshold. */
+  --color-text: #14232e;
+  --color-text-muted: #51606c;
+
+  /* Accent ("sail cloth" blue) — deeper/more saturated than the dark
+     theme's accent, since a light background needs a darker hue to hold
+     the same 4.5:1 text contrast. --color-accent is 5.10:1 on --color-bg,
+     5.45:1 on --color-surface (used as text, e.g. active tab/link).
+     --color-accent-strong is decorative only (an SVG stroke). */
+  --color-accent: #0d6fa8;
+  --color-accent-strong: #085682;
+  --color-accent-contrast: #ffffff;
+
+  /* Semantic feedback colors — same "never color alone" rule as the dark
+     theme (US-055 criterion 3), darkened/desaturated just enough to keep
+     >= 4.5:1 as text on a light background. Verified contrast (on
+     --color-bg / --color-surface): danger 6.12:1 / 6.54:1; warning 5.55:1
+     / 5.93:1; success 6.06:1 / 6.47:1. The `-contrast` tokens are for the
+     inverse pairing (this color as a background, `-contrast` as the text
+     on top of it — not used anywhere in this crate yet, kept for parity
+     with the dark theme's own token set) and are each >= 4.5:1 against
+     their own base color. */
+  --color-danger: #b3261e;
+  --color-danger-contrast: #fdecea;
+  --color-warning: #8a5a00;
+  --color-warning-contrast: #fdf3e0;
+  --color-success: #146c3f;
+  --color-success-contrast: #e6f5ec;
+
+  /* Focus ring — darkened from the dark theme's bright yellow, which would
+     itself fail non-text contrast against a light background. Non-text:
+     4.61:1 on --color-surface, past WCAG's 3:1 non-text threshold. */
+  --color-focus-ring: #b35f00;
 }
 
 * {

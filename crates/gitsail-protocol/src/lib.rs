@@ -23,10 +23,11 @@ pub use dto::{
     FileStatusCodeDto, ForgeAccountDto, ForgeConnectionStatusDto, ForgeKindDto,
     ForgeLinkTargetDto, GitTimestampDto, GraphEdgeDto, HeadStateDto, InProgressOperationDto,
     LineHistoryDto, LineHistoryEntryDto, LineRangeDto, ListPullRequestsOutcomeDto, MergeResultDto,
-    OperationCapabilityDto, PatchExportDto, PatchPreviewDto, PullOutcomeDto,
+    OperationCapabilityDto, PatchExportDto, PatchPreviewDto, PreferencesDto, PullOutcomeDto,
     PullRequestPageDto, PullRequestStateDto, PullRequestSummaryDto, PullResultDto,
     RebaseActionDto, RebasePlanDto, RebasePlanEntryDto, RebaseResultDto, RecentRepositoryDto,
     RemoteDto, RepositoryDto, RepositoryStatusDto, RevertResultDto, SignatureDto, SyncTargetDto,
+    ThemePreferenceDto,
 };
 pub use envelope::{Envelope, Page, SCHEMA_VERSION};
 pub use error::ErrorPayload;

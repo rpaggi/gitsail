@@ -26,18 +26,11 @@
 //! surface, it just never blocks the app from starting with a usable
 //! (default) preference set.
 //!
-//! **Not yet wired into `AppState`/Tauri commands.** T-247/US-105's own
-//! scope is the storage mechanism itself (port + this adapter + tests),
-//! deliberately modeling `theme` only "to prove the mechanism" — the story
-//! explicitly defers the theme feature (reading it, applying it to the UI,
-//! and any command surface a frontend would call) to T-248/US-106. That
-//! story is expected to construct a [`JsonFilePreferencesStore`] in
-//! `lib.rs::run()` and hand it to `AppState`, exactly the way
-//! `recent_repositories_store::JsonFileRecentRepositoriesStore` is wired in
-//! today. Until then this module has no caller in this crate, hence the
-//! blanket allow below rather than leaving real, tested code flagged as
-//! dead.
-#![allow(dead_code)]
+//! **Wired into `AppState`/Tauri commands as of T-248/US-106**: `lib.rs::
+//! run()` constructs a [`JsonFilePreferencesStore`] and hands it to
+//! `AppState`, exactly the way
+//! `recent_repositories_store::JsonFileRecentRepositoriesStore` is wired —
+//! `commands::get_preferences`/`commands::set_theme` are its callers.
 
 use std::fs;
 use std::path::PathBuf;

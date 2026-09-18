@@ -30,12 +30,13 @@
 // `RepositoryOpener`/`RecentRepositories` (the one way to *reach* `ready`)
 // are always present regardless of state.
 
-import { computed, nextTick, ref } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref } from "vue";
 
 import AmendPanel from "./AmendPanel.vue";
 import BranchPanel from "./BranchPanel.vue";
 import CommitGraph from "./CommitGraph.vue";
 import DiffViewer from "./DiffViewer.vue";
+import KeybindingsPanel from "./KeybindingsPanel.vue";
 import MergePanel from "./MergePanel.vue";
 import PullRequestsPanel from "./PullRequestsPanel.vue";
 import RecentRepositories from "./RecentRepositories.vue";
@@ -44,11 +45,73 @@ import SearchPalette from "./SearchPalette.vue";
 import StagingPanel from "./StagingPanel.vue";
 import StatusPanel from "./StatusPanel.vue";
 import SyncPanel from "./SyncPanel.vue";
+import ThemeSwitcher from "./ThemeSwitcher.vue";
 import { rovingNextIndex } from "./keyboardNav";
 import { resolveShellState } from "./shellState";
+import { bindingFromKeyboardEvent } from "../keybindings";
+import { useKeybindingsStore } from "../stores/keybindings";
 import { useRepositorySessionStore } from "../stores/session";
+import { useStagingStore } from "../stores/staging";
+import { useSyncStore } from "../stores/sync";
 
 const session = useRepositorySessionStore();
+
+// -- T-249/US-107: global shortcut dispatch ------------------------------
+//
+// Maps each configurable action id to the real store call it already
+// triggers elsewhere in the UI (`SyncPanel.vue`'s Fetch/Pull/Push buttons,
+// `StagingPanel.vue`'s commit action) — this registry never invents a
+// shortcut for something the UI cannot otherwise do. `focus-search` is the
+// one exception with no store action: it just moves focus to
+// `SearchPalette.vue`'s input (matched by id).
+const keybindings = useKeybindingsStore();
+const sync = useSyncStore();
+const staging = useStagingStore();
+
+const GLOBAL_ACTION_HANDLERS: Record<string, () => void> = {
+  "focus-search": () => {
+    document.getElementById("gitsail-search-input")?.focus();
+  },
+  fetch: () => void sync.requestFetch(),
+  pull: () => void sync.requestPull(),
+  push: () => void sync.requestPush(),
+  commit: () => void staging.requestCommit(),
+};
+
+/** Dispatches a global keydown to whichever configurable action currently
+ * owns that binding (US-107 criterion 3: remapping an action changes what
+ * actually fires here, never just what a settings panel displays). When
+ * two actions share a binding (a detected conflict — see
+ * `KeybindingsPanel.vue`), the first one in `CONFIGURABLE_ACTIONS`'
+ * registration order wins, deterministically, rather than an undefined
+ * "whichever handler happened to run". A remap capture in progress
+ * (`KeybindingsPanel.vue`) always wins over this: its own listener is
+ * registered in the capture phase and stops propagation, so this
+ * bubble-phase listener never even sees that keydown. */
+function onGlobalKeydown(event: KeyboardEvent): void {
+  const binding = bindingFromKeyboardEvent(event);
+  if (binding === null) {
+    return;
+  }
+  for (const [actionId, effectiveBinding] of Object.entries(keybindings.bindings)) {
+    if (effectiveBinding !== binding) {
+      continue;
+    }
+    const handler = GLOBAL_ACTION_HANDLERS[actionId];
+    if (handler) {
+      event.preventDefault();
+      handler();
+    }
+    return;
+  }
+}
+
+onMounted(() => {
+  window.addEventListener("keydown", onGlobalKeydown);
+});
+onBeforeUnmount(() => {
+  window.removeEventListener("keydown", onGlobalKeydown);
+});
 
 const shellState = computed(() =>
   resolveShellState({
@@ -176,6 +239,21 @@ function onTabKeydown(event: KeyboardEvent, index: number): void {
           <h2 class="app-shell__section-title">Repository</h2>
           <RepositoryOpener />
           <RecentRepositories />
+        </section>
+
+        <!--
+          Settings (T-248/US-106, T-249/US-107): always visible regardless
+          of `shellState` — theme and keyboard shortcuts are app-global
+          preferences, never scoped to whichever repository (if any) is
+          currently open.
+        -->
+        <section class="app-shell__section">
+          <h2 class="app-shell__section-title">Settings</h2>
+          <ThemeSwitcher />
+          <details class="app-shell__shortcuts">
+            <summary>Keyboard shortcuts</summary>
+            <KeybindingsPanel />
+          </details>
         </section>
 
         <template v-if="shellState.kind === 'ready'">
@@ -402,6 +480,14 @@ function onTabKeydown(event: KeyboardEvent, index: number): void {
   font-size: 0.85rem;
   text-transform: uppercase;
   letter-spacing: 0.04em;
+  color: var(--color-text-muted);
+}
+
+.app-shell__shortcuts {
+  margin-top: 0.75rem;
+}
+.app-shell__shortcuts summary {
+  cursor: pointer;
   color: var(--color-text-muted);
 }
 
