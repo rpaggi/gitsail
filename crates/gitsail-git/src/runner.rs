@@ -10,9 +10,11 @@ use std::fmt;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use gitsail_domain::redact::{redact_credential_url, redact_secrets};
 use gitsail_domain::{ErrorCode, GitSailError};
 
 /// Re-exported from `gitsail-domain` so ports (`RepositoryReadPort`) can
@@ -34,20 +36,15 @@ const POLL_INTERVAL: Duration = Duration::from_millis(20);
 /// (e.g. a remote URL) before it is stored anywhere logs or errors might
 /// surface it. Arguments that do not look like such a URL pass through
 /// unchanged.
+///
+/// Thin wrapper over `gitsail_domain::redact::redact_credential_url`
+/// (EPIC-22/T-224/US-113): the canonical implementation moved to
+/// `gitsail-domain` so it is centralized and reusable from anywhere in the
+/// workspace (not duplicated here and in a future diagnostic-export path),
+/// while this name/signature stays stable for existing callers
+/// (`gitsail-cli`'s `eprint_debug`, this module's own callers below).
 pub fn redact_credentials(arg: &str) -> String {
-    let Some(scheme_end) = arg.find("://") else {
-        return arg.to_string();
-    };
-    let authority_start = scheme_end + 3;
-    let rest = &arg[authority_start..];
-    let Some(at) = rest.find('@') else {
-        return arg.to_string();
-    };
-    if rest[..at].contains('/') {
-        // The '@' belongs to the path, not to a credentials segment.
-        return arg.to_string();
-    }
-    format!("{}***@{}", &arg[..authority_start], &rest[at + 1..])
+    redact_credential_url(arg)
 }
 
 fn redact_args(args: &[String]) -> Vec<String> {
@@ -264,7 +261,6 @@ pub fn run_process(
     for (key, value) in &request.env {
         command.env(key, value);
     }
-
     let start = Instant::now();
     let mut child = command.spawn().map_err(|err| {
         GitSailError::new(ErrorCode::ProcessFailure, "failed to spawn git process")
@@ -288,30 +284,70 @@ pub fn run_process(
 
     // Read both pipes on dedicated threads: a process that fills stdout
     // while we only drain stderr (or vice versa) would otherwise deadlock.
-    let stdout_handle =
-        thread::spawn(move || read_capped(&mut stdout_pipe, MAX_CAPTURED_STREAM_BYTES));
-    let stderr_handle =
-        thread::spawn(move || read_capped(&mut stderr_pipe, MAX_CAPTURED_STREAM_BYTES));
+    // Results travel back over a channel (rather than a plain `JoinHandle`)
+    // so the timeout/cancellation path below can bound how long it waits
+    // for them (EPIC-22/T-223/US-112): `git` itself may spawn a credential
+    // helper, an askpass prompt, or another grandchild that inherits the
+    // piped stdout/stderr file descriptors. Killing only the direct child
+    // (`kill_and_reap`, below) does not guarantee such a grandchild is gone
+    // too — process-group-wide termination is inherently OS/environment
+    // dependent — so an unbounded `.join()` here could still block past any
+    // configured timeout on a lingering descendant. Losing at most the
+    // partial output of an already-killed, already-timed-out invocation is
+    // an acceptable trade for never hanging indefinitely.
+    let (stdout_tx, stdout_rx) = mpsc::channel();
+    let stdout_thread = thread::spawn(move || {
+        let _ = stdout_tx.send(read_capped(&mut stdout_pipe, MAX_CAPTURED_STREAM_BYTES));
+    });
+    let (stderr_tx, stderr_rx) = mpsc::channel();
+    let stderr_thread = thread::spawn(move || {
+        let _ = stderr_tx.send(read_capped(&mut stderr_pipe, MAX_CAPTURED_STREAM_BYTES));
+    });
 
     let outcome = wait_with_timeout(&mut child, request.timeout, cancel);
     let duration = start.elapsed();
 
-    // On timeout/cancellation, kill before joining the reader threads: a
+    // On timeout/cancellation, kill before waiting on the reader threads: a
     // silent child (e.g. `sleep`) never closes its pipes on its own, so
-    // joining first would block the reader threads until natural exit.
-    if matches!(outcome, WaitOutcome::TimedOut | WaitOutcome::Cancelled) {
+    // waiting first would block the reader threads until natural exit.
+    let read_grace = if matches!(outcome, WaitOutcome::TimedOut | WaitOutcome::Cancelled) {
         kill_and_reap(&mut child);
-    }
+        Some(READER_DRAIN_GRACE)
+    } else {
+        None
+    };
 
-    let stdout = stdout_handle.join().unwrap_or_default();
-    let stderr = stderr_handle.join().unwrap_or_default();
+    let stdout = recv_reader_result(stdout_rx, read_grace);
+    let stderr = recv_reader_result(stderr_rx, read_grace);
+    // The reader threads themselves are deliberately not joined: on the
+    // (rare) grace-period-expired path, one may still be blocked reading a
+    // lingering descendant's pipe. Detaching it here — it exits on its own
+    // whenever that descendant eventually closes the pipe — is what keeps
+    // this function itself from ever blocking past `read_grace`.
+    let _ = stdout_thread;
+    let _ = stderr_thread;
     if let Some(handle) = stdin_handle {
         let _ = handle.join();
     }
 
+    // Structured local logging only (SAD §28, EPIC-22/T-224/US-113): level,
+    // component, operation (the git subcommand, already redacted), duration
+    // and outcome/error code — never raw stdout/stderr or unredacted
+    // arguments. `operation` is just the subcommand name (e.g. "status",
+    // "log"), not the full, potentially path-bearing argument list.
+    let operation = safe_args.first().map(String::as_str).unwrap_or("git");
+    let duration_ms = duration.as_millis();
+
     match outcome {
         WaitOutcome::Exited(status) => {
             if status.success() {
+                tracing::debug!(
+                    component = "gitsail-git",
+                    operation,
+                    duration_ms,
+                    exit_code = status.code(),
+                    "git process completed"
+                );
                 Ok(ProcessOutput {
                     stdout,
                     stderr,
@@ -320,11 +356,37 @@ pub fn run_process(
                     cancelled: false,
                 })
             } else {
+                tracing::warn!(
+                    component = "gitsail-git",
+                    operation,
+                    duration_ms,
+                    exit_code = status.code(),
+                    error_code = ErrorCode::ProcessFailure.as_str(),
+                    "git process failed"
+                );
                 Err(process_failure_error(&safe_args, status.code(), &stderr))
             }
         }
-        WaitOutcome::TimedOut => Err(timeout_error(&safe_args, request.timeout, &stderr)),
-        WaitOutcome::Cancelled => Err(cancelled_error(&safe_args, &stderr)),
+        WaitOutcome::TimedOut => {
+            tracing::warn!(
+                component = "gitsail-git",
+                operation,
+                duration_ms,
+                error_code = ErrorCode::Timeout.as_str(),
+                "git process timed out"
+            );
+            Err(timeout_error(&safe_args, request.timeout, &stderr))
+        }
+        WaitOutcome::Cancelled => {
+            tracing::debug!(
+                component = "gitsail-git",
+                operation,
+                duration_ms,
+                error_code = ErrorCode::Cancelled.as_str(),
+                "git process cancelled"
+            );
+            Err(cancelled_error(&safe_args, &stderr))
+        }
     }
 }
 
@@ -356,9 +418,35 @@ fn wait_with_timeout(
     }
 }
 
+/// How long [`run_process`] waits for the stdout/stderr reader threads to
+/// finish after a timeout/cancellation before giving up on them (see
+/// [`recv_reader_result`]).
+const READER_DRAIN_GRACE: Duration = Duration::from_millis(500);
+
 fn kill_and_reap(child: &mut Child) {
+    // Kills the direct child only. A grandchild the child itself spawned
+    // (e.g. `git` invoking a credential helper) may keep running and keep
+    // the piped stdout/stderr open regardless — reliably reaching an
+    // entire process subtree from here is OS/environment dependent (process
+    // groups exist on Unix but not the same way on Windows, and are not
+    // always honored identically by every process-launching environment).
+    // [`READER_DRAIN_GRACE`] is what actually guarantees `run_process` never
+    // hangs on such a survivor, not this call.
     let _ = child.kill();
     let _ = child.wait();
+}
+
+/// Receives a reader thread's result, either unbounded (`grace: None`, the
+/// normal-exit path, where the child is expected to have already closed its
+/// pipes) or bounded by `grace` (the timeout/cancellation path, where a
+/// surviving grandchild could otherwise hold the pipe open indefinitely).
+/// Times out to an empty `Vec` rather than blocking — losing at most a
+/// killed process's trailing output, never the caller's own responsiveness.
+fn recv_reader_result(rx: mpsc::Receiver<Vec<u8>>, grace: Option<Duration>) -> Vec<u8> {
+    match grace {
+        None => rx.recv().unwrap_or_default(),
+        Some(grace) => rx.recv_timeout(grace).unwrap_or_default(),
+    }
 }
 
 /// Reads a pipe to completion, keeping only the first `cap` bytes. Bytes
@@ -383,13 +471,23 @@ fn read_capped<R: Read>(reader: &mut R, cap: usize) -> Vec<u8> {
 }
 
 /// Diagnostic detail attached to process-related errors via `with_source`.
-/// Never rendered as the user-safe message (SAD §19, §28); arguments are
-/// redacted before this is constructed.
+/// Never rendered as the user-safe message (SAD §19, §28); both `args` and
+/// `stderr` are redacted before this is constructed (EPIC-22/T-224/US-113):
+/// `git`'s own stderr can itself contain a credential-bearing URL (e.g.
+/// "fatal: could not read Username for 'https://user:pass@host'"), so
+/// redacting only the argument list this process was invoked with would not
+/// be enough.
 #[derive(Debug)]
 struct ProcessDiagnostic {
     args: Vec<String>,
     exit_code: Option<i32>,
     stderr: String,
+}
+
+/// Renders `stderr` as text with any secret-shaped fragment redacted
+/// (EPIC-22/T-224/US-113), for embedding in a [`ProcessDiagnostic`].
+fn redacted_stderr(stderr: &[u8]) -> String {
+    redact_secrets(&String::from_utf8_lossy(stderr))
 }
 
 impl fmt::Display for ProcessDiagnostic {
@@ -416,7 +514,7 @@ fn process_failure_error(
     .with_source(ProcessDiagnostic {
         args: safe_args.to_vec(),
         exit_code,
-        stderr: String::from_utf8_lossy(stderr).into_owned(),
+        stderr: redacted_stderr(stderr),
     })
 }
 
@@ -432,7 +530,7 @@ fn timeout_error(safe_args: &[String], timeout: Option<Duration>, stderr: &[u8])
     .with_source(ProcessDiagnostic {
         args: safe_args.to_vec(),
         exit_code: None,
-        stderr: String::from_utf8_lossy(stderr).into_owned(),
+        stderr: redacted_stderr(stderr),
     })
 }
 
@@ -441,7 +539,7 @@ fn cancelled_error(safe_args: &[String], stderr: &[u8]) -> GitSailError {
         ProcessDiagnostic {
             args: safe_args.to_vec(),
             exit_code: None,
-            stderr: String::from_utf8_lossy(stderr).into_owned(),
+            stderr: redacted_stderr(stderr),
         },
     )
 }

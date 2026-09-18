@@ -983,6 +983,37 @@ ADR-014 fixed the envelope's JSON shape and named `schemaVersion` as the mechani
 ### Consequences
 Changing a DTO's wire shape now fails a fast, local test instead of only surfacing when a mismatched client/CLI pair meets in the field. The matrix and fixtures are release artifacts a maintainer updates deliberately (documented in the matrix's own "when this table must change" section) rather than being inferred after the fact. No actual schema change ships with this decision — `SCHEMA_VERSION` stays `1`; the hypothetical incompatible fixture (`unsupported-v2.json`) is explicitly synthetic, invented only to exercise the rejection path.
 
+## ADR-017 — `tracing` for structured local logging, with centralized redaction
+
+**Status:** Accepted
+
+### Context
+SAD §28 already specified the shape of GitSail's local logs (level, component, operation ID, duration, safe command metadata, error code) and what must never appear in them (tokens, passwords, credential-bearing URLs, full file contents). No logging infrastructure existed yet (EPIC-22/T-224/US-113): `GitCliProvider`/`GitProcessRunner` only ever raised `GitSailError`s, and `gitsail-cli`'s `--debug` flag printed ad hoc `eprintln!` lines with no level/component/duration structure and no reusable redaction beyond a single URL-shaped-argument helper.
+
+### Decision
+Adopt `tracing` (not `log`) as the workspace's structured logging facade, since its field-based events (`tracing::debug!(component = ..., operation = ..., duration_ms = ..., error_code = ..., "...")`) map directly onto SAD §28's required log shape without string formatting, and its ecosystem (`tracing-subscriber`) is the idiomatic choice for a Rust binary that wants an install-once global subscriber. `gitsail-git`'s `GitProcessRunner::run_process` emits one event per invocation with exactly that field set — component, operation (the `git` subcommand only, already redacted), duration, exit/error code — and never raw stdout/stderr. `gitsail-cli` installs the one process-wide subscriber (`WARN` by default, `DEBUG` with `--debug`), writing to stderr only, alongside the existing `--debug` diagnostic output.
+
+Redaction itself is centralized in `gitsail_domain::redact` (`redact_credential_url` for a single URL-shaped argument, `redact_secrets` for free-form text such as `git`'s own stderr, covering credential-bearing URLs, `token=`/`password=`/`secret=`-shaped fragments, and `Authorization: <scheme> <token>` headers) rather than reimplemented per call site. `gitsail-git`'s `ProcessDiagnostic` now redacts `stderr` the same way it already redacted `args`, closing a gap where a credential embedded in Git's own error text (not just in the argument list) could have reached a diagnostic.
+
+### Consequences
+Positive: one dependency-light facade shared by every crate that needs to log (currently `gitsail-git`, `gitsail-cli`); verbosity (`--debug`) can never bypass redaction, because every event's fields are already redacted before being emitted, not filtered afterward. `tracing`/`tracing-subscriber` are new dependencies, added to `gitsail-git` and `gitsail-cli` only (never `gitsail-domain`/`gitsail-application`, preserving SAD §4's dependency-free-core rule). `gitsail-tui`/`apps/desktop`/`apps/vscode` do not install a subscriber as part of this decision — a future story wiring TUI/Desktop-side logging can reuse the same `gitsail_domain::redact` module and, if useful, install their own `tracing` subscriber without any change to how events are emitted deeper in the stack.
+
+## ADR-018 — Local-first privacy: telemetry opt-in and crash-report consent
+
+**Status:** Accepted
+
+### Context
+SAD §28/§33 and ADR-010 already established that GitSail is local-first and does not own a credential store; EPIC-22/T-225/US-114 asked for the same explicitness about *usage telemetry* and *crash reporting*, neither of which is implemented yet. Without a recorded decision, a future contributor could add either with an accidental default-on behavior, or with no consent gate at all.
+
+### Decision
+1. GitSail v0.1–v1.0 sends no telemetry and no crash report, period — confirmed by the absence of any HTTP/network client dependency in any crate's `Cargo.toml` in this workspace, and exercised by a factory-default-configuration test (`gitsail_application::privacy`).
+2. `gitsail_application::privacy::TelemetryPreference` and `CrashReportConsent` are reserved, explicit configuration types whose `Default` resolves to `Disabled`/`NotGranted`. If telemetry or crash-report upload is ever implemented, it must read one of these preferences and must not transmit anything unless the person explicitly opted in; opting in must be a documented, discoverable action, never a pre-ticked box or an inferred consent from continued use.
+3. A local crash (a Rust panic) is always logged locally — `gitsail-cli` installs a panic hook that logs through the same redacted, structured `tracing` path ADR-017 describes, then still runs Rust's default panic hook (preserving the usual stderr message/backtrace) — but this is strictly local file/stderr output. Nothing about local panic logging transmits a report anywhere; that would require the explicit consent policy 2 already imposes.
+4. This ADR does not itself add a telemetry or crash-reporting *implementation* — it fixes the policy such an implementation must follow, ahead of it existing, so the default is never accidentally "on."
+
+### Consequences
+Positive: a future telemetry/crash-reporting story has an unambiguous bar to clear (explicit opt-in, documented, revocable) rather than needing to invent the policy under implementation pressure; local diagnosis (via `--debug` and local logs) never requires any upload, matching ADR-010's "useful diagnostics without owning a sensitive subsystem" stance applied to telemetry instead of credentials. Trade-off: until a real telemetry story exists, `TelemetryPreference`/`CrashReportConsent` have no reader besides their own tests — they are a deliberately inert placeholder, not a feature.
+
 # 39. Open architecture decisions
 
 The following remain deliberately unresolved:

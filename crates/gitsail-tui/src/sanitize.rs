@@ -1,32 +1,13 @@
-//! Terminal-escape sanitization for repository-sourced text (SAD §33: "todo
-//! texto de repositório exibido é não confiável; sequências de escape/
-//! controle do terminal devem ser sanitizadas antes de renderizar").
+//! Terminal-escape sanitization for repository-sourced text (SAD §33).
 //!
-//! File names, branch names, and diff/blame content all originate from the
-//! repository and are rendered verbatim by `ui.rs` today — nothing stops a
-//! crafted file name containing e.g. an ANSI escape sequence from reaching
-//! the terminal. [`safe_line`]/[`safe_path`] are the single point every
-//! renderer must pass such text through; `App` itself keeps the raw value
-//! (for correct equality/lookup), only `ui` sanitizes at the render
-//! boundary.
+//! Moved to `gitsail_domain::sanitize` under EPIC-22/T-221 so this logic is
+//! centralized in exactly one place instead of being reimplemented per
+//! presentation layer (US-110 criterion 3) — this module now re-exports
+//! that implementation rather than defining its own, keeping every existing
+//! call site in `ui.rs`/`graph_view.rs` (which refer to `sanitize::safe_line`
+//! / `sanitize::safe_path`) unchanged.
 
-use std::path::Path;
-
-/// Replaces every control character (including ESC, and any other
-/// `char::is_control` code point) with the Unicode replacement character,
-/// preserving the string's character count so column alignment in a
-/// rendered diff/blame line is not disturbed.
-pub fn safe_line(input: &str) -> String {
-    input
-        .chars()
-        .map(|c| if c.is_control() { '\u{FFFD}' } else { c })
-        .collect()
-}
-
-/// [`safe_line`] applied to a path's display form.
-pub fn safe_path(path: &Path) -> String {
-    safe_line(&path.to_string_lossy())
-}
+pub use gitsail_domain::sanitize::{safe_line, safe_path};
 
 #[cfg(test)]
 mod tests {

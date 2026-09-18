@@ -17,8 +17,10 @@ pub mod file_content;
 pub mod graph;
 pub mod ids;
 pub mod line_history;
+pub mod redact;
 pub mod remote;
 pub mod repository;
+pub mod sanitize;
 pub mod stash;
 pub mod status;
 

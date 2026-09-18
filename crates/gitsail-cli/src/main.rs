@@ -14,8 +14,9 @@ use std::time::Duration;
 use clap::Parser;
 
 use gitsail_application::RepositoryReadPort;
+use gitsail_domain::redact::redact_secrets;
 use gitsail_domain::{CancellationToken, GitSailError};
-use gitsail_git::{redact_credentials, GitCliProvider, GitProcessRunner, GitProcessRunnerConfig};
+use gitsail_git::{GitCliProvider, GitProcessRunner, GitProcessRunnerConfig};
 use gitsail_protocol::{Envelope, ErrorPayload, RequestId, SCHEMA_VERSION};
 
 use cli::Cli;
@@ -24,12 +25,61 @@ use output::Output;
 
 fn main() {
     let cli = Cli::parse();
+    init_logging(cli.debug);
+    install_panic_hook();
     let cancel = CancellationToken::new();
     install_signal_handler(cancel.clone());
 
     let request_id = RequestId::generate();
     let exit_code = run(&cli, &cancel, &request_id);
     std::process::exit(exit_code);
+}
+
+/// Installs a minimal structured logger (SAD §28; EPIC-22/T-224/US-113):
+/// `--debug` raises the level to capture `gitsail-git`'s per-process
+/// events (component, operation, duration, error code — see
+/// `GitProcessRunner`'s `run_process`), otherwise only warnings/errors are
+/// shown. Every event this workspace emits already carries only redacted,
+/// structured fields (never raw stdout/stderr or an unredacted argument
+/// list), so raising verbosity here can never leak a secret — there is
+/// nothing "unlocked" by `--debug` that bypasses redaction.
+///
+/// Writes to stderr only, exactly like every other diagnostic this binary
+/// produces (US-038 criterion 3) — never to a file, and never transmitted
+/// anywhere (SAD §28; EPIC-22/T-225/US-114: GitSail sends nothing
+/// unsolicited over the network).
+fn init_logging(debug: bool) {
+    use tracing_subscriber::filter::LevelFilter;
+    let level = if debug {
+        LevelFilter::DEBUG
+    } else {
+        LevelFilter::WARN
+    };
+    // Best-effort: a second call (e.g. from a future embedder) or an
+    // already-installed global subscriber is not fatal, just a no-op.
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(level)
+        .with_writer(std::io::stderr)
+        .with_target(false)
+        .try_init();
+}
+
+/// Chains a panic hook in front of Rust's default one (EPIC-22/T-225/
+/// US-114): a panic is logged locally through the same structured,
+/// redacted logging path as everything else (in case a panic message
+/// happens to embed repository content or a secret-shaped fragment), then
+/// the default hook still runs so the usual stderr message/backtrace
+/// behavior is unchanged. This never writes anywhere but this process's own
+/// stderr and never transmits a crash report anywhere — GitSail has no
+/// crash-reporting upload at all, and if one is ever added, sending it
+/// requires explicit, informed user consent, never a default-on behavior.
+fn install_panic_hook() {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let redacted = redact_secrets(&info.to_string());
+        tracing::error!(component = "gitsail-cli", "panic: {redacted}");
+        previous(info);
+    }));
 }
 
 /// Installs a Ctrl+C handler that marks `cancel` instead of letting the
@@ -116,7 +166,7 @@ fn eprint_debug(err: &GitSailError) {
     if let Some(diagnostic) = err.diagnostic() {
         eprintln!(
             "[debug] diagnostic={}",
-            redact_credentials(&diagnostic.to_string())
+            redact_secrets(&diagnostic.to_string())
         );
     }
 }

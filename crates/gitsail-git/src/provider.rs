@@ -282,20 +282,32 @@ impl RepositoryReadPort for GitCliProvider {
         if let Some(text_query) = &query.text_query {
             args.push(format!("--grep={text_query}"));
         }
+        if query.path_filter.is_some() && query.follow_renames {
+            // `--follow` only makes sense (and is only accepted by Git)
+            // together with a single pathspec, which `path_filter` already
+            // guarantees. Pushed before `--end-of-options` below: every real
+            // option must precede it, or Git refuses with "option ... must
+            // come before non-option arguments".
+            args.push("--follow".to_string());
+        }
         let revision = query
             .branch
             .as_ref()
             .map(BranchName::as_str)
             .or(query.revision_range.as_deref())
             .unwrap_or("HEAD");
+        // `query.revision_range` (and, in principle, a branch name) is
+        // caller-controlled free text that must never be interpreted as a
+        // `git log` option (EPIC-22/US-110 criterion 1): a value crafted to
+        // look like a flag (e.g. `--output=...`) must fail as an
+        // unresolvable revision, not silently change what this invocation
+        // does. Plain `--` cannot be used here because `git log` treats a
+        // trailing `--` as the revision/pathspec boundary, not an
+        // options/positional boundary; `--end-of-options` (supported since
+        // Git 2.24) is the argument Git itself provides for exactly this.
+        args.push("--end-of-options".to_string());
         args.push(revision.to_string());
         if let Some(path) = &query.path_filter {
-            // `--follow` only makes sense (and is only accepted by Git)
-            // together with a single pathspec, which `path_filter` already
-            // guarantees.
-            if query.follow_renames {
-                args.push("--follow".to_string());
-            }
             args.push("--".to_string());
             args.push(path.to_string_lossy().into_owned());
         }
@@ -434,11 +446,22 @@ impl RepositoryReadPort for GitCliProvider {
         // `rev-parse` fail for anything that does not resolve to one, so a
         // caller always gets an unambiguous commit or a clear error rather
         // than a tree/blob id it cannot diff against (US-028 criterion 1).
+        //
+        // `revision` is caller-controlled free text (EPIC-22/US-110
+        // criterion 1) — e.g. `gitsail`'s own `--revision`/positional CLI
+        // arguments, or a TUI/Desktop text field — and must never be
+        // interpreted as a `rev-parse` option. `--end-of-options` (not plain
+        // `--`, which puts `rev-parse` into path-only mode and would make
+        // every revision fail to resolve) forces everything after it to be
+        // treated as a non-option argument, so a crafted value that looks
+        // like a flag fails as an unresolvable revision instead of being
+        // parsed as one.
         let output = self.try_run(
             vec![
                 "rev-parse".to_string(),
                 "--verify".to_string(),
                 "-q".to_string(),
+                "--end-of-options".to_string(),
                 format!("{revision}^{{commit}}"),
             ],
             &repo.root_path,
@@ -706,7 +729,17 @@ impl RepositoryWritePort for GitCliProvider {
 
     fn switch_branch(&self, repo: &Repository, target: &BranchName) -> Result<(), GitSailError> {
         require_worktree(repo, "switch branch")?;
-        let args = vec!["switch".to_string(), target.as_str().to_string()];
+        // `--` ends option parsing before `target` (EPIC-22/US-110 criterion
+        // 1): `git switch` accepts it, so a caller-supplied name that
+        // happens to look like a flag (e.g. `-f`, `--force`, one of
+        // `switch`'s own real options) is never parsed as one — it is
+        // rejected as an invalid branch name instead, exactly as any other
+        // unresolvable target would be.
+        let args = vec![
+            "switch".to_string(),
+            "--".to_string(),
+            target.as_str().to_string(),
+        ];
         self.run(args, &repo.root_path)
             .map_err(classify_switch_failure)?;
         Ok(())
@@ -718,7 +751,16 @@ impl RepositoryWritePort for GitCliProvider {
         name: &BranchName,
         start_point: Option<&CommitHash>,
     ) -> Result<(), GitSailError> {
-        let mut args = vec!["branch".to_string(), name.as_str().to_string()];
+        // `--` ends option parsing before `name`/`start_point` (same
+        // rationale as `switch_branch` above); `git branch` accepts it, and
+        // `start_point` (a hex-validated `CommitHash`) can never itself look
+        // like a flag, but keeping both positionals after the same `--`
+        // is simplest and matches how a person would type this on a shell.
+        let mut args = vec![
+            "branch".to_string(),
+            "--".to_string(),
+            name.as_str().to_string(),
+        ];
         if let Some(start) = start_point {
             args.push(start.as_str().to_string());
         }
@@ -734,9 +776,12 @@ impl RepositoryWritePort for GitCliProvider {
         force: bool,
     ) -> Result<(), GitSailError> {
         let flag = if force { "-D" } else { "-d" };
+        // `--` ends option parsing before `name` (same rationale as
+        // `switch_branch`/`create_branch` above).
         let args = vec![
             "branch".to_string(),
             flag.to_string(),
+            "--".to_string(),
             name.as_str().to_string(),
         ];
         self.run(args, &repo.root_path)
@@ -762,17 +807,22 @@ impl RepositoryWritePort for GitCliProvider {
         // `create_commit`'s pre-flight `status()` check just above: a
         // confirmation given against an older `HEAD` (from a preview read)
         // must never authorize amending whatever commit happens to be
-        // `HEAD` *now* (US-059 criterion 3).
+        // `HEAD` *now* (US-059 criterion 3). Built on
+        // `gitsail_application::Precondition` (EPIC-22/T-222/US-111) rather
+        // than a bespoke equality check, so this is the same mechanism any
+        // future mutation with the same preview/execute race window reuses.
         let current_head = RepositoryReadPort::resolve_revision(self, repo, "HEAD")?;
-        if current_head != *expected_head {
-            return Err(GitSailError::new(
-                ErrorCode::OperationConflict,
-                "HEAD changed since the amend was previewed",
-            )
-            .with_remediation(
-                "review the new HEAD commit and retry the amend if it is still what you intend to change",
-            ));
-        }
+        gitsail_application::Precondition::new(expected_head.clone())
+            .revalidate(&current_head)
+            .map_err(|_| {
+                GitSailError::new(
+                    ErrorCode::OperationConflict,
+                    "HEAD changed since the amend was previewed",
+                )
+                .with_remediation(
+                    "review the new HEAD commit and retry the amend if it is still what you intend to change",
+                )
+            })?;
 
         let args = vec![
             "commit".to_string(),
@@ -2101,6 +2151,29 @@ fn parse_line_history_hunks(lines: &[&str]) -> Result<Vec<DiffHunk>, GitSailErro
 mod tests {
     use super::*;
     use std::fmt;
+
+    /// EPIC-22/T-223/US-112 regression guard: this adapter must never set
+    /// `GIT_TERMINAL_PROMPT=0` (or otherwise disable Git's own credential
+    /// prompting) in a way that would hide an authentication failure behind
+    /// a silent hang or an opaque error instead of Git's own diagnostic.
+    /// `locale_env` is the *only* environment this adapter ever adds on top
+    /// of the inherited parent environment (`ProcessRequest::env` besides it
+    /// is always empty here), so asserting on it exhaustively is a genuine
+    /// guarantee, not merely a spot check.
+    #[test]
+    fn adapter_never_overrides_git_terminal_prompt_handling() {
+        let env = GitCliProvider::locale_env();
+        assert!(
+            env.iter().all(|(key, _)| key != "GIT_TERMINAL_PROMPT"),
+            "GitCliProvider must leave Git's own terminal-prompt behavior untouched: {env:?}"
+        );
+        // Only locale pinning is added; nothing here ever provides
+        // credentials or silences Git's own prompting.
+        assert_eq!(
+            env.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>(),
+            vec!["LC_ALL", "LANG"]
+        );
+    }
 
     /// A `StdError` double carrying pre-recorded `git` stderr, standing in
     /// for the `ProcessDiagnostic` a real `ProcessFailure` carries (that

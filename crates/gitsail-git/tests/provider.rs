@@ -3214,3 +3214,143 @@ fn generating_an_exported_patch_never_mutates_the_index_or_head() {
         "exporting a patch must never change staged/working-tree state (US-029 criterion 2)"
     );
 }
+
+// ---------------------------------------------------------------------
+// EPIC-22/T-221/US-110: caller-controlled strings (a branch name, a
+// revision expression) must never be misinterpreted as a `git` option, even
+// when a real ref by that name cannot exist (Git's own ref-format rules
+// already reject a name starting with `-`, but *how* that rejection happens
+// matters: it must be "invalid ref", never "ran a different git option than
+// intended").
+// ---------------------------------------------------------------------
+
+#[test]
+fn create_branch_with_a_flag_like_name_fails_as_an_invalid_name_not_as_a_git_option() {
+    let repo_dir = init_repo("create-branch-flag-like-name");
+    write_file(repo_dir.path(), "a.txt", "one\n");
+    commit_all(repo_dir.path(), "first commit");
+
+    let provider = provider();
+    let repo = provider.discover(repo_dir.path()).unwrap();
+    let name = BranchName::new("--force").unwrap();
+
+    let err = provider
+        .create_branch(&repo, &name, None)
+        .expect_err("a flag-like branch name must never be accepted as a real option");
+
+    // No branch was actually created under any interpretation of the name.
+    assert!(!git_output(repo_dir.path(), &["branch", "--list"]).contains("force"));
+    let _ = err;
+}
+
+#[test]
+fn switch_branch_with_a_flag_like_target_fails_without_changing_head() {
+    let repo_dir = init_repo("switch-branch-flag-like-target");
+    write_file(repo_dir.path(), "a.txt", "one\n");
+    commit_all(repo_dir.path(), "first commit");
+    let head_before = head_commit_hash(repo_dir.path());
+
+    let provider = provider();
+    let repo = provider.discover(repo_dir.path()).unwrap();
+    let target = BranchName::new("--detach").unwrap();
+
+    provider
+        .switch_branch(&repo, &target)
+        .expect_err("a flag-like switch target must never be accepted as a real option");
+
+    assert_eq!(
+        head_commit_hash(repo_dir.path()),
+        head_before,
+        "a refused switch must never move HEAD"
+    );
+}
+
+#[test]
+fn delete_branch_with_a_flag_like_name_fails_without_deleting_anything() {
+    let repo_dir = init_repo("delete-branch-flag-like-name");
+    write_file(repo_dir.path(), "a.txt", "one\n");
+    commit_all(repo_dir.path(), "first commit");
+    git(repo_dir.path(), &["branch", "feature-a"]);
+
+    let provider = provider();
+    let repo = provider.discover(repo_dir.path()).unwrap();
+    let name = BranchName::new("-D").unwrap();
+
+    provider
+        .delete_branch(&repo, &name, true)
+        .expect_err("a flag-like delete target must never be accepted as a real option");
+
+    // The unrelated real branch must still exist: a misinterpreted `-D`
+    // could otherwise have deleted something other than the (nonexistent)
+    // intended target.
+    assert!(git_output(repo_dir.path(), &["branch", "--list"]).contains("feature-a"));
+}
+
+#[test]
+fn resolve_revision_with_a_flag_like_string_fails_as_an_unresolvable_revision() {
+    let repo_dir = init_repo("resolve-revision-flag-like");
+    write_file(repo_dir.path(), "a.txt", "one\n");
+    commit_all(repo_dir.path(), "first commit");
+
+    let provider = provider();
+    let repo = provider.discover(repo_dir.path()).unwrap();
+
+    let err = provider
+        .resolve_revision(&repo, "--output=gitsail-should-not-create-this-file")
+        .expect_err("a flag-like revision must never be parsed as a real git option");
+
+    assert_eq!(err.code(), ErrorCode::RepositoryNotFound);
+    assert!(
+        !repo_dir
+            .path()
+            .join("gitsail-should-not-create-this-file")
+            .exists(),
+        "a flag-like revision must never cause git to act on the flag (e.g. writing a file)"
+    );
+}
+
+#[test]
+fn commits_with_a_flag_like_revision_range_is_a_controlled_empty_page_not_a_flag_run() {
+    let repo_dir = init_repo("commits-flag-like-revision-range");
+    write_file(repo_dir.path(), "a.txt", "one\n");
+    commit_all(repo_dir.path(), "first commit");
+
+    let provider = provider();
+    let repo = provider.discover(repo_dir.path()).unwrap();
+    let query = CommitQuery {
+        revision_range: Some("--output=gitsail-should-not-create-this-file".to_string()),
+        ..CommitQuery::default()
+    };
+
+    let page = provider
+        .commits(&repo, &query)
+        .expect("an unresolvable revision range is a controlled empty result, not a crash");
+
+    assert!(page.items.is_empty());
+    assert!(
+        !repo_dir
+            .path()
+            .join("gitsail-should-not-create-this-file")
+            .exists(),
+        "a flag-like revision range must never cause git to act on the flag (e.g. writing a file)"
+    );
+}
+
+#[test]
+fn create_branch_and_switch_branch_with_ordinary_names_still_work_after_the_dash_guard() {
+    let repo_dir = init_repo("branch-ops-regression");
+    write_file(repo_dir.path(), "a.txt", "one\n");
+    commit_all(repo_dir.path(), "first commit");
+
+    let provider = provider();
+    let repo = provider.discover(repo_dir.path()).unwrap();
+    let name = BranchName::new("feature/normal-name").unwrap();
+
+    provider.create_branch(&repo, &name, None).unwrap();
+    provider.switch_branch(&repo, &name).unwrap();
+
+    assert_eq!(
+        git_output(repo_dir.path(), &["rev-parse", "--abbrev-ref", "HEAD"]).trim(),
+        "feature/normal-name"
+    );
+}
