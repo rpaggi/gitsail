@@ -306,6 +306,50 @@ impl GetFileContent {
     }
 }
 
+/// Everything a caller needs to show before committing to an amend
+/// (US-059 criterion 1): `HEAD`'s exact commit (so its current message can
+/// be pre-filled and its identity displayed) and the staged diff (so the
+/// changes that would be folded in are visible, exactly like
+/// [`GetDiff`]'s `staged: true` diff every other staged-changes view
+/// already uses — no separate "what's about to be amended" computation is
+/// invented here).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AmendPreview {
+    pub head: Commit,
+    pub staged_diff: Diff,
+}
+
+/// Builds an [`AmendPreview`] read-only, never touching the index, working
+/// tree, or HEAD (US-059 criterion 1's preview step is a pure read). The
+/// exact [`Commit::hash`] this returns is what a caller must pass back as
+/// [`crate::write_ports::RepositoryWritePort::amend_commit`]'s
+/// `expected_head` — the revalidation that blocks the amend if HEAD moved
+/// between this preview and confirmation (US-059 criterion 3).
+pub struct PreviewAmend {
+    port: Arc<dyn RepositoryReadPort>,
+}
+
+impl PreviewAmend {
+    pub fn new(port: Arc<dyn RepositoryReadPort>) -> Self {
+        Self { port }
+    }
+
+    pub fn execute(
+        &self,
+        repo: &Repository,
+        cancel: &CancellationToken,
+    ) -> Result<AmendPreview, GitSailError> {
+        let head_hash = self.port.resolve_revision(repo, "HEAD")?;
+        let head = self.port.commit(repo, &head_hash)?;
+        let request = DiffRequest {
+            staged: true,
+            ..DiffRequest::default()
+        };
+        let staged_diff = self.port.diff(repo, &request, cancel)?;
+        Ok(AmendPreview { head, staged_diff })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -719,6 +763,39 @@ mod tests {
         assert!(
             port.received_diff_request.lock().unwrap().is_none(),
             "an unresolvable base must short-circuit before any diff is requested"
+        );
+    }
+
+    #[test]
+    fn preview_amend_resolves_head_and_requests_the_staged_diff() {
+        let mut port = FakeReadPort::new();
+        port.revisions
+            .insert("HEAD".to_string(), port.single_commit.hash.clone());
+        let port = Arc::new(port);
+        let use_case = PreviewAmend::new(port.clone());
+
+        let preview = use_case
+            .execute(&port.repository, &CancellationToken::new())
+            .unwrap();
+
+        assert_eq!(preview.head, port.single_commit);
+        let request = port.received_diff_request.lock().unwrap().clone().unwrap();
+        assert!(request.staged, "an amend preview must inspect the staged diff, never the worktree diff");
+    }
+
+    #[test]
+    fn preview_amend_fails_without_a_partial_preview_when_head_cannot_be_resolved() {
+        let port = Arc::new(FakeReadPort::new());
+        let use_case = PreviewAmend::new(port.clone());
+
+        let err = use_case
+            .execute(&port.repository, &CancellationToken::new())
+            .unwrap_err();
+
+        assert_eq!(err.code(), gitsail_domain::ErrorCode::RepositoryNotFound);
+        assert!(
+            port.received_diff_request.lock().unwrap().is_none(),
+            "an unresolvable HEAD must short-circuit before any diff is requested"
         );
     }
 

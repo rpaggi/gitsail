@@ -41,8 +41,23 @@
 
 use std::sync::{Arc, Mutex};
 
-use gitsail_application::{RecentRepositoriesPort, RepositoryReadPort, RepositorySession};
+use gitsail_application::{
+    RecentRepositoriesPort, RepositoryReadPort, RepositorySession, RepositoryWritePort,
+};
 use gitsail_domain::{CommitGraph, ErrorCode, GitSailError, GraphCommit, GraphRow, Repository};
+
+/// The Desktop process' parsed startup intent (EPIC-15's Desktop-side gap:
+/// see `lib.rs`'s `parse_startup_args`), consumed exactly once by the
+/// frontend's first call to `commands::take_startup_intent`. A VS Code
+/// handoff (T-210/US-077) launches this process with `--repo <path>
+/// --commit <hash>`; a plain launch (double-click, `tauri dev`, ...) leaves
+/// both `None`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StartupIntent {
+    pub repo_path: Option<String>,
+    pub commit_hash: Option<String>,
+}
 
 /// The active session together with the epoch it was opened at, guarded by
 /// one [`Mutex`] so a switch and its epoch bump are always observed
@@ -55,6 +70,12 @@ struct SessionSlot {
 
 pub struct AppState {
     port: Arc<dyn RepositoryReadPort>,
+    /// Mutation capability (EPIC-12: T-191/T-192/T-193's local-branch
+    /// subset), kept as a separate field/type from `port` for the same
+    /// ADR-009 reason `gitsail-application::write_ports` documents: nothing
+    /// that only holds `AppState::port()` gains mutation capability by
+    /// accident.
+    write_port: Arc<dyn RepositoryWritePort>,
     session: Mutex<SessionSlot>,
     /// The commit graph accumulated for the active repository (US-067),
     /// separate from `session`: a session tracks HEAD/status/selection
@@ -69,18 +90,28 @@ pub struct AppState {
     /// port, matching every other `gitsail-application` abstraction it
     /// holds.
     recent_repositories: Arc<dyn RecentRepositoriesPort>,
+    /// The startup intent parsed from `--repo`/`--commit` (see this
+    /// module's own `StartupIntent` doc). `take` semantics (via
+    /// `Mutex<Option<_>>`) rather than a plain field: consumed exactly
+    /// once, by whichever frontend call reads it first — a second read (a
+    /// stray re-render, a reload) must never re-open/re-select the same
+    /// startup target a second time behind the person's back.
+    startup_intent: Mutex<Option<StartupIntent>>,
 }
 
 impl AppState {
     pub fn new(
         port: Arc<dyn RepositoryReadPort>,
+        write_port: Arc<dyn RepositoryWritePort>,
         recent_repositories: Arc<dyn RecentRepositoriesPort>,
     ) -> Self {
         Self {
             port,
+            write_port,
             session: Mutex::new(SessionSlot { session: None, epoch: 0 }),
             commit_graph: Mutex::new(CommitGraph::new()),
             recent_repositories,
+            startup_intent: Mutex::new(None),
         }
     }
 
@@ -88,8 +119,29 @@ impl AppState {
         self.port.clone()
     }
 
+    pub fn write_port(&self) -> Arc<dyn RepositoryWritePort> {
+        self.write_port.clone()
+    }
+
     pub fn recent_repositories(&self) -> Arc<dyn RecentRepositoriesPort> {
         self.recent_repositories.clone()
+    }
+
+    /// Records the startup intent parsed from argv (`lib.rs::run`, once,
+    /// before the Tauri event loop starts).
+    pub fn set_startup_intent(&self, intent: StartupIntent) {
+        *self.startup_intent.lock().expect("startup intent mutex poisoned") = Some(intent);
+    }
+
+    /// Consumes and returns the startup intent, leaving `None` behind for
+    /// any later call — see [`StartupIntent`]'s own doc for why this is
+    /// "take", not "get".
+    pub fn take_startup_intent(&self) -> StartupIntent {
+        self.startup_intent
+            .lock()
+            .expect("startup intent mutex poisoned")
+            .take()
+            .unwrap_or_default()
     }
 
     /// Replaces the active session with a fresh one over `repository`,
@@ -265,6 +317,55 @@ mod tests {
         }
     }
 
+    struct UnimplementedWritePort;
+    impl RepositoryWritePort for UnimplementedWritePort {
+        fn stage_files(&self, _repo: &Repository, _paths: &[PathBuf]) -> Result<(), GitSailError> {
+            unimplemented!()
+        }
+        fn unstage_files(&self, _repo: &Repository, _paths: &[PathBuf]) -> Result<(), GitSailError> {
+            unimplemented!()
+        }
+        fn create_commit(&self, _repo: &Repository, _message: &str) -> Result<CommitHash, GitSailError> {
+            unimplemented!()
+        }
+        fn stage_hunks(
+            &self,
+            _repo: &Repository,
+            _selection: &[gitsail_domain::FileDiff],
+        ) -> Result<(), GitSailError> {
+            unimplemented!()
+        }
+        fn unstage_hunks(
+            &self,
+            _repo: &Repository,
+            _selection: &[gitsail_domain::FileDiff],
+        ) -> Result<(), GitSailError> {
+            unimplemented!()
+        }
+        fn switch_branch(&self, _repo: &Repository, _target: &BranchName) -> Result<(), GitSailError> {
+            unimplemented!()
+        }
+        fn create_branch(
+            &self,
+            _repo: &Repository,
+            _name: &BranchName,
+            _start_point: Option<&CommitHash>,
+        ) -> Result<(), GitSailError> {
+            unimplemented!()
+        }
+        fn delete_branch(&self, _repo: &Repository, _name: &BranchName, _force: bool) -> Result<(), GitSailError> {
+            unimplemented!()
+        }
+        fn amend_commit(
+            &self,
+            _repo: &Repository,
+            _message: &str,
+            _expected_head: &CommitHash,
+        ) -> Result<CommitHash, GitSailError> {
+            unimplemented!()
+        }
+    }
+
     /// An in-memory [`RecentRepositoriesPort`] double: `AppState`'s own
     /// tests care about session/epoch/commit-graph behavior, never about
     /// how recents are persisted (that is `recent_repositories_store`'s
@@ -286,7 +387,11 @@ mod tests {
     }
 
     fn state() -> AppState {
-        AppState::new(Arc::new(UnimplementedPort), Arc::new(InMemoryRecents::new()))
+        AppState::new(
+            Arc::new(UnimplementedPort),
+            Arc::new(UnimplementedWritePort),
+            Arc::new(InMemoryRecents::new()),
+        )
     }
 
     fn sample_repository(root: &str) -> Repository {
@@ -389,5 +494,34 @@ mod tests {
         .unwrap();
 
         assert_eq!(port.load().unwrap().entries().len(), 1);
+    }
+
+    #[test]
+    fn take_startup_intent_defaults_to_empty_when_nothing_was_set() {
+        let state = state();
+
+        let intent = state.take_startup_intent();
+
+        assert_eq!(intent, StartupIntent::default());
+    }
+
+    #[test]
+    fn take_startup_intent_returns_the_set_value_exactly_once() {
+        let state = state();
+        state.set_startup_intent(StartupIntent {
+            repo_path: Some("/repo".to_string()),
+            commit_hash: Some("a".repeat(40)),
+        });
+
+        let first = state.take_startup_intent();
+        let second = state.take_startup_intent();
+
+        assert_eq!(first.repo_path.as_deref(), Some("/repo"));
+        assert_eq!(first.commit_hash.as_deref(), Some("a".repeat(40).as_str()));
+        assert_eq!(
+            second,
+            StartupIntent::default(),
+            "a startup intent must be consumed exactly once, never re-applied on a later read"
+        );
     }
 }

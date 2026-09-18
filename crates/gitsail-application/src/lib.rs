@@ -22,12 +22,12 @@ pub use recent_repositories::{
 };
 pub use session::{RefreshReason, RefreshTicket, RepositorySession, Selection};
 pub use use_cases::{
-    CommitDiff, CompareRevisions, GetCommit, GetCommitDiff, GetCommitHistory, GetDiff,
-    GetFileBlame, GetFileContent, GetLineHistory, GetRepositoryStatus, ListBranches,
-    OpenRepository, RevisionComparison,
+    AmendPreview, CommitDiff, CompareRevisions, GetCommit, GetCommitDiff, GetCommitHistory,
+    GetDiff, GetFileBlame, GetFileContent, GetLineHistory, GetRepositoryStatus, ListBranches,
+    OpenRepository, PreviewAmend, RevisionComparison,
 };
 pub use write_ports::RepositoryWritePort;
 pub use write_use_cases::{
-    CreateBranch, CreateCommit, DeleteBranch, StageFiles, StageHunks, SwitchBranch, UnstageFiles,
-    UnstageHunks,
+    AmendCommit, CreateBranch, CreateCommit, DeleteBranch, StageFiles, StageHunks, SwitchBranch,
+    UnstageFiles, UnstageHunks,
 };

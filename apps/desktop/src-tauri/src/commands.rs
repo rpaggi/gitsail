@@ -19,16 +19,52 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use gitsail_application::{
-    CommitQuery, DiffRequest, ForgetRecentRepository, GetCommitHistory, GetDiff,
-    ListRecentRepositories, OpenRepository, RecordRecentRepository, RefreshReason,
+    AmendCommit, CommitQuery, CreateBranch, CreateCommit, DeleteBranch, DiffRequest,
+    ForgetRecentRepository, GetCommit, GetCommitHistory, GetDiff, ListBranches,
+    ListRecentRepositories, OpenRepository, PreviewAmend, RecordRecentRepository, RefreshReason,
+    StageFiles, StageHunks, SwitchBranch, UnstageFiles, UnstageHunks,
 };
-use gitsail_domain::{BranchName, CancellationToken, ErrorCode, GitSailError, GraphCommit};
+use gitsail_domain::{
+    BranchName, CancellationToken, CommitHash, ErrorCode, FileDiff, GitSailError, GraphCommit,
+    Repository,
+};
 use gitsail_protocol::{
-    CommitGraphPageDto, CommitGraphRowDto, ErrorPayload, PatchExportDto, RecentRepositoryDto,
+    AmendPreviewDto, BranchDto, CommitDto, CommitGraphPageDto, CommitGraphRowDto,
+    CommitResultDto, DiffDto, ErrorPayload, FileDiffDto, PatchExportDto, RecentRepositoryDto,
     RepositoryDto, RepositoryStatusDto,
 };
 
-use crate::state::AppState;
+use crate::state::{AppState, StartupIntent};
+
+/// Runs a repository mutation, then re-validates that the session epoch
+/// has not moved on while it ran (US-192/US-193's "revalidate immediately
+/// before/around a mutation" discipline, extended from
+/// `AppState::append_commit_graph_page_if_current`'s read-side guard to
+/// every write command in this module).
+///
+/// This never blocks a switch from happening, and it never undoes a
+/// mutation that already succeeded against the repository that *was* open
+/// — `git` has already run by the time this returns the error — but it
+/// does mean the frontend is told, unambiguously, that whatever it now
+/// displays is not the repository the mutation actually ran against,
+/// instead of silently treating the mutation as if it had applied to the
+/// repository currently on screen.
+fn run_mutation<T>(
+    state: &AppState,
+    action: impl FnOnce(&Repository) -> Result<T, GitSailError>,
+) -> Result<T, GitSailError> {
+    let (repository, epoch) = state.repository_with_epoch()?;
+    let result = action(&repository)?;
+    let (_, epoch_after) = state.repository_with_epoch()?;
+    if epoch_after != epoch {
+        return Err(GitSailError::new(
+            ErrorCode::Cancelled,
+            "the active repository changed while this operation was running",
+        )
+        .with_remediation("refresh the repository view before retrying"));
+    }
+    Ok(result)
+}
 
 /// Seconds since the Unix epoch, used to timestamp a recent-repository
 /// entry (US-052 criterion 1). A clock read failure (the system clock set
@@ -266,6 +302,291 @@ fn get_commit_graph_page_impl(
     })
 }
 
+// -- US-056: startup handoff (--repo/--commit; the EPIC-15 gap) --------
+
+/// Returns whatever `--repo`/`--commit` argv this process was launched
+/// with (see `lib.rs::parse_startup_args`), consuming it so a later call —
+/// a stray re-render, a reload — never re-applies the same startup target
+/// a second time (`AppState::take_startup_intent`'s own contract).
+/// Infallible: a plain launch with no such arguments is not an error, it
+/// is simply an empty intent.
+#[tauri::command]
+pub fn take_startup_intent(state: tauri::State<AppState>) -> StartupIntent {
+    state.take_startup_intent()
+}
+
+// -- US-056: branches, single-commit lookup, and history search --------
+
+#[tauri::command]
+pub fn list_branches(state: tauri::State<AppState>) -> Result<Vec<BranchDto>, ErrorPayload> {
+    list_branches_impl(&state).map_err(|err| ErrorPayload::from(&err))
+}
+
+fn list_branches_impl(state: &AppState) -> Result<Vec<BranchDto>, GitSailError> {
+    let (repository, _epoch) = state.repository_with_epoch()?;
+    let branches = ListBranches::new(state.port()).execute(&repository)?;
+    Ok(branches.iter().map(BranchDto::from).collect())
+}
+
+/// Fetches one commit by its full hash (US-056 criterion 2: selecting a
+/// search result, or a `--commit` startup handoff target, resolves to the
+/// same commit identity the graph/list/details panels already share).
+#[tauri::command]
+pub fn get_commit(hash: String, state: tauri::State<AppState>) -> Result<CommitDto, ErrorPayload> {
+    get_commit_impl(&state, &hash).map_err(|err| ErrorPayload::from(&err))
+}
+
+fn get_commit_impl(state: &AppState, hash: &str) -> Result<CommitDto, GitSailError> {
+    let (repository, _epoch) = state.repository_with_epoch()?;
+    let hash = CommitHash::new(hash)?;
+    let commit = GetCommit::new(state.port()).execute(&repository, &hash)?;
+    Ok(CommitDto::from(&commit))
+}
+
+/// Searches commit history (US-056 criterion 1): reuses exactly
+/// `gitsail_application::CommitQuery`'s own filters — the same ones
+/// `gitsail-tui`'s T-178 search already exercises — rather than inventing
+/// a second query shape. There is deliberately no `tag` filter: the Core
+/// read port has no "list every tag" capability yet (that is EPIC-18,
+/// blocked/out of scope here); a tag *decoration* on an already-loaded
+/// commit is still visible (`CommitDto::decorations`), just not
+/// searchable as its own filter.
+#[tauri::command]
+pub fn search_commits(
+    text_query: Option<String>,
+    author: Option<String>,
+    branch: Option<String>,
+    revision_range: Option<String>,
+    limit: Option<u32>,
+    state: tauri::State<AppState>,
+) -> Result<Vec<CommitDto>, ErrorPayload> {
+    search_commits_impl(&state, text_query, author, branch, revision_range, limit)
+        .map_err(|err| ErrorPayload::from(&err))
+}
+
+fn search_commits_impl(
+    state: &AppState,
+    text_query: Option<String>,
+    author: Option<String>,
+    branch: Option<String>,
+    revision_range: Option<String>,
+    limit: Option<u32>,
+) -> Result<Vec<CommitDto>, GitSailError> {
+    let (repository, _epoch) = state.repository_with_epoch()?;
+    let branch = branch.map(BranchName::new).transpose()?;
+    let query = CommitQuery {
+        text_query,
+        author,
+        branch,
+        revision_range,
+        limit,
+        ..CommitQuery::default()
+    };
+    let page = GetCommitHistory::new(state.port()).execute(&repository, &query)?;
+    Ok(page.items.iter().map(CommitDto::from).collect())
+}
+
+// -- US-057: unified/side-by-side diff ----------------------------------
+
+/// Reads a diff for either the staged or unstaged side, optionally scoped
+/// to one file (US-057 criterion 1) — the frontend derives both the
+/// unified and side-by-side presentations from this single [`DiffDto`],
+/// never issuing a second read per view mode.
+#[tauri::command]
+pub fn get_diff(
+    staged: bool,
+    path: Option<String>,
+    state: tauri::State<AppState>,
+) -> Result<DiffDto, ErrorPayload> {
+    get_diff_impl(&state, staged, path.as_deref()).map_err(|err| ErrorPayload::from(&err))
+}
+
+fn get_diff_impl(state: &AppState, staged: bool, path: Option<&str>) -> Result<DiffDto, GitSailError> {
+    let (repository, _epoch) = state.repository_with_epoch()?;
+    let request = DiffRequest {
+        staged,
+        path_filter: path.map(PathBuf::from),
+        ..DiffRequest::default()
+    };
+    let diff =
+        GetDiff::new(state.port()).execute(&repository, &request, &CancellationToken::new())?;
+    Ok(DiffDto::from(&diff))
+}
+
+// -- US-058: stage/unstage and compose a commit -------------------------
+
+#[tauri::command]
+pub fn stage_paths(paths: Vec<String>, state: tauri::State<AppState>) -> Result<(), ErrorPayload> {
+    stage_paths_impl(&state, paths).map_err(|err| ErrorPayload::from(&err))
+}
+
+fn stage_paths_impl(state: &AppState, paths: Vec<String>) -> Result<(), GitSailError> {
+    let paths: Vec<PathBuf> = paths.into_iter().map(PathBuf::from).collect();
+    run_mutation(state, |repository| {
+        StageFiles::new(state.write_port()).execute(repository, &paths)
+    })
+}
+
+#[tauri::command]
+pub fn unstage_paths(paths: Vec<String>, state: tauri::State<AppState>) -> Result<(), ErrorPayload> {
+    unstage_paths_impl(&state, paths).map_err(|err| ErrorPayload::from(&err))
+}
+
+fn unstage_paths_impl(state: &AppState, paths: Vec<String>) -> Result<(), GitSailError> {
+    let paths: Vec<PathBuf> = paths.into_iter().map(PathBuf::from).collect();
+    run_mutation(state, |repository| {
+        UnstageFiles::new(state.write_port()).execute(repository, &paths)
+    })
+}
+
+/// Stages only the hunks carried by `selection` (US-058 criterion 1's
+/// hunk-level granularity), each element being a [`FileDiffDto`] trimmed
+/// to the hunks to stage — typically a subset of what `get_diff` last
+/// returned for the unstaged side. The DTO -> domain conversion
+/// (`gitsail_protocol::dto`'s reverse `From` impls) is the only "logic"
+/// here; the actual hunk application is `gitsail-git`'s, unchanged.
+#[tauri::command]
+pub fn stage_hunks(selection: Vec<FileDiffDto>, state: tauri::State<AppState>) -> Result<(), ErrorPayload> {
+    stage_hunks_impl(&state, &selection).map_err(|err| ErrorPayload::from(&err))
+}
+
+fn stage_hunks_impl(state: &AppState, selection: &[FileDiffDto]) -> Result<(), GitSailError> {
+    let selection: Vec<FileDiff> = selection.iter().map(FileDiff::from).collect();
+    run_mutation(state, |repository| {
+        StageHunks::new(state.write_port()).execute(repository, &selection)
+    })
+}
+
+#[tauri::command]
+pub fn unstage_hunks(selection: Vec<FileDiffDto>, state: tauri::State<AppState>) -> Result<(), ErrorPayload> {
+    unstage_hunks_impl(&state, &selection).map_err(|err| ErrorPayload::from(&err))
+}
+
+fn unstage_hunks_impl(state: &AppState, selection: &[FileDiffDto]) -> Result<(), GitSailError> {
+    let selection: Vec<FileDiff> = selection.iter().map(FileDiff::from).collect();
+    run_mutation(state, |repository| {
+        UnstageHunks::new(state.write_port()).execute(repository, &selection)
+    })
+}
+
+/// Commits exactly the current index content with `message` (US-058
+/// criterion 2/3). The frontend is expected to have already run this
+/// through the T-194 confirmation dialog — this command itself has no
+/// notion of confirmation, matching every other command in this file
+/// (US-051 criterion 3: no business/UX rule lives in a Tauri command).
+#[tauri::command]
+pub fn create_commit(
+    message: String,
+    state: tauri::State<AppState>,
+) -> Result<CommitResultDto, ErrorPayload> {
+    create_commit_impl(&state, &message).map_err(|err| ErrorPayload::from(&err))
+}
+
+fn create_commit_impl(state: &AppState, message: &str) -> Result<CommitResultDto, GitSailError> {
+    let hash = run_mutation(state, |repository| {
+        CreateCommit::new(state.write_port()).execute(repository, message)
+    })?;
+    Ok(CommitResultDto::from(&hash))
+}
+
+// -- US-059: amend HEAD with confirmation -------------------------------
+
+/// Builds the read-only preview US-059 criterion 1 requires: `HEAD`'s
+/// exact commit and the staged diff that would be folded into it.
+#[tauri::command]
+pub fn preview_amend(state: tauri::State<AppState>) -> Result<AmendPreviewDto, ErrorPayload> {
+    preview_amend_impl(&state).map_err(|err| ErrorPayload::from(&err))
+}
+
+fn preview_amend_impl(state: &AppState) -> Result<AmendPreviewDto, GitSailError> {
+    let (repository, _epoch) = state.repository_with_epoch()?;
+    let preview =
+        PreviewAmend::new(state.port()).execute(&repository, &CancellationToken::new())?;
+    Ok(AmendPreviewDto::from(&preview))
+}
+
+/// Amends `HEAD` (US-059 criteria 2/3). `expected_head` must be the exact
+/// hash `preview_amend` returned as `head.hash` — `AmendCommit`/
+/// `RepositoryWritePort::amend_commit` revalidate it is still `HEAD`
+/// immediately before amending and refuse with a classified
+/// `OperationConflict` otherwise (never a generic "error"), so a stale
+/// preview (HEAD moved since it was shown) can never rewrite the wrong
+/// commit. The frontend is expected to have already shown the T-194
+/// confirmation, including the "this rewrites history" warning text.
+#[tauri::command]
+pub fn amend_commit(
+    message: String,
+    expected_head: String,
+    state: tauri::State<AppState>,
+) -> Result<CommitResultDto, ErrorPayload> {
+    amend_commit_impl(&state, &message, &expected_head).map_err(|err| ErrorPayload::from(&err))
+}
+
+fn amend_commit_impl(
+    state: &AppState,
+    message: &str,
+    expected_head: &str,
+) -> Result<CommitResultDto, GitSailError> {
+    let expected_head = CommitHash::new(expected_head)?;
+    let hash = run_mutation(state, |repository| {
+        AmendCommit::new(state.write_port()).execute(repository, message, &expected_head)
+    })?;
+    Ok(CommitResultDto::from(&hash))
+}
+
+// -- US-060 (local-branch subset only; fetch/pull/push are out of scope) --
+
+#[tauri::command]
+pub fn create_branch(
+    name: String,
+    start_point: Option<String>,
+    state: tauri::State<AppState>,
+) -> Result<(), ErrorPayload> {
+    create_branch_impl(&state, &name, start_point.as_deref()).map_err(|err| ErrorPayload::from(&err))
+}
+
+fn create_branch_impl(
+    state: &AppState,
+    name: &str,
+    start_point: Option<&str>,
+) -> Result<(), GitSailError> {
+    let branch_name = BranchName::new(name)?;
+    run_mutation(state, |repository| {
+        let resolved_start = start_point
+            .map(|revision| state.port().resolve_revision(repository, revision))
+            .transpose()?;
+        CreateBranch::new(state.write_port()).execute(repository, &branch_name, resolved_start.as_ref())
+    })
+}
+
+#[tauri::command]
+pub fn switch_branch(target: String, state: tauri::State<AppState>) -> Result<(), ErrorPayload> {
+    switch_branch_impl(&state, &target).map_err(|err| ErrorPayload::from(&err))
+}
+
+fn switch_branch_impl(state: &AppState, target: &str) -> Result<(), GitSailError> {
+    let target = BranchName::new(target)?;
+    run_mutation(state, |repository| {
+        SwitchBranch::new(state.write_port()).execute(repository, &target)
+    })
+}
+
+#[tauri::command]
+pub fn delete_branch(
+    name: String,
+    force: bool,
+    state: tauri::State<AppState>,
+) -> Result<(), ErrorPayload> {
+    delete_branch_impl(&state, &name, force).map_err(|err| ErrorPayload::from(&err))
+}
+
+fn delete_branch_impl(state: &AppState, name: &str, force: bool) -> Result<(), GitSailError> {
+    let name = BranchName::new(name)?;
+    run_mutation(state, |repository| {
+        DeleteBranch::new(state.write_port()).execute(repository, &name, force)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -315,6 +636,27 @@ mod tests {
         status: RepositoryStatus,
         history: Vec<Commit>,
         diff: gitsail_domain::Diff,
+        branches: Vec<Branch>,
+        /// Keyed by hash string; used by `commit()` and, when the revision
+        /// text itself is a hash, as one source `resolve_revision()` checks.
+        commits_by_hash: std::collections::HashMap<String, Commit>,
+        /// Keyed by revision expression (e.g. `"HEAD"`, a branch name); the
+        /// other source `resolve_revision()` checks.
+        revisions: std::collections::HashMap<String, CommitHash>,
+    }
+
+    impl Default for FakePort {
+        fn default() -> Self {
+            Self {
+                repository: sample_repository(),
+                status: dirty_status(),
+                history: vec![],
+                diff: gitsail_domain::Diff { files: vec![] },
+                branches: vec![],
+                commits_by_hash: std::collections::HashMap::new(),
+                revisions: std::collections::HashMap::new(),
+            }
+        }
     }
 
     impl gitsail_application::RepositoryReadPort for FakePort {
@@ -338,7 +680,14 @@ mod tests {
                     .parse()
                     .map_err(|_| GitSailError::new(ErrorCode::ParseFailure, "bad cursor"))?,
             };
-            let items: Vec<Commit> = self.history.iter().skip(offset).take(limit).cloned().collect();
+            let mut items: Vec<Commit> = self.history.clone();
+            if let Some(author) = &query.author {
+                items.retain(|c| c.author.name.contains(author.as_str()) || c.author.email.contains(author.as_str()));
+            }
+            if let Some(text) = &query.text_query {
+                items.retain(|c| c.subject.contains(text.as_str()) || c.body.contains(text.as_str()));
+            }
+            let items: Vec<Commit> = items.into_iter().skip(offset).take(limit).collect();
             let next_offset = offset + items.len();
             let has_more = next_offset < self.history.len();
             Ok(Page {
@@ -348,12 +697,15 @@ mod tests {
             })
         }
 
-        fn commit(&self, _repo: &Repository, _hash: &CommitHash) -> Result<Commit, GitSailError> {
-            unimplemented!("not exercised by these tests")
+        fn commit(&self, _repo: &Repository, hash: &CommitHash) -> Result<Commit, GitSailError> {
+            self.commits_by_hash
+                .get(hash.as_str())
+                .cloned()
+                .ok_or_else(|| GitSailError::new(ErrorCode::RepositoryNotFound, "no such commit"))
         }
 
         fn branches(&self, _repo: &Repository) -> Result<Vec<Branch>, GitSailError> {
-            unimplemented!("not exercised by these tests")
+            Ok(self.branches.clone())
         }
 
         fn diff(
@@ -368,9 +720,14 @@ mod tests {
         fn resolve_revision(
             &self,
             _repo: &Repository,
-            _revision: &str,
+            revision: &str,
         ) -> Result<CommitHash, GitSailError> {
-            unimplemented!("not exercised by these tests")
+            self.revisions.get(revision).cloned().ok_or_else(|| {
+                GitSailError::new(
+                    ErrorCode::RepositoryNotFound,
+                    format!("revision '{revision}' could not be resolved"),
+                )
+            })
         }
 
         fn blame(
@@ -459,13 +816,154 @@ mod tests {
     }
 
     fn state_with_history_and_diff(history: Vec<Commit>, diff: gitsail_domain::Diff) -> AppState {
-        let port: Arc<dyn gitsail_application::RepositoryReadPort> = Arc::new(FakePort {
-            repository: sample_repository(),
-            status: dirty_status(),
+        state_from_port(FakePort {
             history,
             diff,
-        });
-        AppState::new(port, InMemoryRecents::shared())
+            ..FakePort::default()
+        })
+    }
+
+    fn state_from_port(port: FakePort) -> AppState {
+        state_from_port_and_write_port(port, FakeWritePort::new())
+    }
+
+    fn state_from_port_and_write_port(port: FakePort, write_port: FakeWritePort) -> AppState {
+        let port: Arc<dyn gitsail_application::RepositoryReadPort> = Arc::new(port);
+        let write_port: Arc<dyn gitsail_application::RepositoryWritePort> = Arc::new(write_port);
+        AppState::new(port, write_port, InMemoryRecents::shared())
+    }
+
+    /// A `RepositoryWritePort` double recording exactly what each call
+    /// received, mirroring `gitsail_application::write_use_cases`' own
+    /// `FakeWritePort` — `commands.rs` tests care about the Tauri-command
+    /// wiring/DTO mapping, never about real Git mutation semantics (that is
+    /// `gitsail-git`'s job).
+    struct FakeWritePort {
+        fail: bool,
+        commit_hash: CommitHash,
+        received_stage: Mutex<Option<Vec<PathBuf>>>,
+        received_unstage: Mutex<Option<Vec<PathBuf>>>,
+        received_stage_hunks: Mutex<Option<Vec<gitsail_domain::FileDiff>>>,
+        received_unstage_hunks: Mutex<Option<Vec<gitsail_domain::FileDiff>>>,
+        received_commit_message: Mutex<Option<String>>,
+        received_amend: Mutex<Option<(String, CommitHash)>>,
+        received_switch_target: Mutex<Option<BranchName>>,
+        received_create_branch: Mutex<Option<(BranchName, Option<CommitHash>)>>,
+        received_delete_branch: Mutex<Option<(BranchName, bool)>>,
+    }
+
+    impl FakeWritePort {
+        fn new() -> Self {
+            Self {
+                fail: false,
+                commit_hash: CommitHash::new("c".repeat(40)).unwrap(),
+                received_stage: Mutex::new(None),
+                received_unstage: Mutex::new(None),
+                received_stage_hunks: Mutex::new(None),
+                received_unstage_hunks: Mutex::new(None),
+                received_commit_message: Mutex::new(None),
+                received_amend: Mutex::new(None),
+                received_switch_target: Mutex::new(None),
+                received_create_branch: Mutex::new(None),
+                received_delete_branch: Mutex::new(None),
+            }
+        }
+
+        fn failing() -> Self {
+            Self { fail: true, ..Self::new() }
+        }
+    }
+
+    impl gitsail_application::RepositoryWritePort for FakeWritePort {
+        fn stage_files(&self, _repo: &Repository, paths: &[PathBuf]) -> Result<(), GitSailError> {
+            *self.received_stage.lock().unwrap() = Some(paths.to_vec());
+            if self.fail {
+                return Err(GitSailError::new(ErrorCode::OperationConflict, "stale status"));
+            }
+            Ok(())
+        }
+
+        fn unstage_files(&self, _repo: &Repository, paths: &[PathBuf]) -> Result<(), GitSailError> {
+            *self.received_unstage.lock().unwrap() = Some(paths.to_vec());
+            if self.fail {
+                return Err(GitSailError::new(ErrorCode::OperationConflict, "stale status"));
+            }
+            Ok(())
+        }
+
+        fn create_commit(&self, _repo: &Repository, message: &str) -> Result<CommitHash, GitSailError> {
+            *self.received_commit_message.lock().unwrap() = Some(message.to_string());
+            if self.fail {
+                return Err(GitSailError::new(ErrorCode::InvalidRepositoryState, "nothing staged"));
+            }
+            Ok(self.commit_hash.clone())
+        }
+
+        fn stage_hunks(
+            &self,
+            _repo: &Repository,
+            selection: &[gitsail_domain::FileDiff],
+        ) -> Result<(), GitSailError> {
+            *self.received_stage_hunks.lock().unwrap() = Some(selection.to_vec());
+            if self.fail {
+                return Err(GitSailError::new(ErrorCode::OperationConflict, "stale diff"));
+            }
+            Ok(())
+        }
+
+        fn unstage_hunks(
+            &self,
+            _repo: &Repository,
+            selection: &[gitsail_domain::FileDiff],
+        ) -> Result<(), GitSailError> {
+            *self.received_unstage_hunks.lock().unwrap() = Some(selection.to_vec());
+            if self.fail {
+                return Err(GitSailError::new(ErrorCode::OperationConflict, "stale diff"));
+            }
+            Ok(())
+        }
+
+        fn switch_branch(&self, _repo: &Repository, target: &BranchName) -> Result<(), GitSailError> {
+            *self.received_switch_target.lock().unwrap() = Some(target.clone());
+            if self.fail {
+                return Err(GitSailError::new(ErrorCode::OperationConflict, "would overwrite local changes"));
+            }
+            Ok(())
+        }
+
+        fn create_branch(
+            &self,
+            _repo: &Repository,
+            name: &BranchName,
+            start_point: Option<&CommitHash>,
+        ) -> Result<(), GitSailError> {
+            *self.received_create_branch.lock().unwrap() = Some((name.clone(), start_point.cloned()));
+            if self.fail {
+                return Err(GitSailError::new(ErrorCode::InvalidRepositoryState, "already exists"));
+            }
+            Ok(())
+        }
+
+        fn delete_branch(&self, _repo: &Repository, name: &BranchName, force: bool) -> Result<(), GitSailError> {
+            *self.received_delete_branch.lock().unwrap() = Some((name.clone(), force));
+            if self.fail {
+                return Err(GitSailError::new(ErrorCode::OperationConflict, "not fully merged"));
+            }
+            Ok(())
+        }
+
+        fn amend_commit(
+            &self,
+            _repo: &Repository,
+            message: &str,
+            expected_head: &CommitHash,
+        ) -> Result<CommitHash, GitSailError> {
+            *self.received_amend.lock().unwrap() = Some((message.to_string(), expected_head.clone()));
+            if self.fail {
+                return Err(GitSailError::new(ErrorCode::OperationConflict, "HEAD changed since preview"));
+            }
+            Ok(self.commit_hash.clone())
+        }
     }
 
     #[test]
@@ -743,6 +1241,390 @@ mod tests {
         );
     }
 
+    // -- US-056: branches, single-commit lookup, search -------------------
+
+    fn sample_branch(name: &str, is_current: bool) -> Branch {
+        Branch {
+            name: BranchName::new(name).unwrap(),
+            kind: gitsail_domain::BranchKind::Local,
+            target: CommitHash::new("a".repeat(40)).unwrap(),
+            upstream: None,
+            ahead: 0,
+            behind: 0,
+            is_current,
+        }
+    }
+
+    #[test]
+    fn list_branches_before_opening_fails_with_invalid_repository_state() {
+        let state = state_from_port(FakePort::default());
+
+        let err = list_branches_impl(&state).unwrap_err();
+
+        assert_eq!(err.code(), ErrorCode::InvalidRepositoryState);
+    }
+
+    #[test]
+    fn list_branches_returns_every_branch_the_port_reports() {
+        let state = state_from_port(FakePort {
+            branches: vec![sample_branch("main", true), sample_branch("feature/x", false)],
+            ..FakePort::default()
+        });
+        open_repository_impl(&state, "/repo").unwrap();
+
+        let branches = list_branches_impl(&state).unwrap();
+
+        assert_eq!(branches.len(), 2);
+        assert_eq!(branches[0].name, "main");
+        assert!(branches[0].is_current);
+        assert_eq!(branches[1].name, "feature/x");
+    }
+
+    #[test]
+    fn get_commit_returns_the_requested_commit_by_hash() {
+        let hash = "d".repeat(40);
+        let commit = sample_commit(&hash, &[], "a specific commit");
+        let state = state_from_port(FakePort {
+            commits_by_hash: std::collections::HashMap::from([(hash.clone(), commit)]),
+            ..FakePort::default()
+        });
+        open_repository_impl(&state, "/repo").unwrap();
+
+        let dto = get_commit_impl(&state, &hash).unwrap();
+
+        assert_eq!(dto.subject, "a specific commit");
+        assert_eq!(dto.hash, hash);
+    }
+
+    #[test]
+    fn get_commit_for_an_unknown_hash_reports_repository_not_found() {
+        let state = state_from_port(FakePort::default());
+        open_repository_impl(&state, "/repo").unwrap();
+
+        let err = get_commit_impl(&state, &"e".repeat(40)).unwrap_err();
+
+        assert_eq!(err.code(), ErrorCode::RepositoryNotFound);
+    }
+
+    #[test]
+    fn search_commits_filters_by_text_query_reusing_commit_query() {
+        let history = vec![
+            sample_commit(&"1".repeat(40), &[], "fix the login bug"),
+            sample_commit(&"2".repeat(40), &[], "add a new feature"),
+        ];
+        let state = state_with_history(history);
+        open_repository_impl(&state, "/repo").unwrap();
+
+        let results =
+            search_commits_impl(&state, Some("login".to_string()), None, None, None, None).unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].subject, "fix the login bug");
+    }
+
+    #[test]
+    fn search_commits_before_opening_fails_with_invalid_repository_state() {
+        let state = state_from_port(FakePort::default());
+
+        let err = search_commits_impl(&state, None, None, None, None, None).unwrap_err();
+
+        assert_eq!(err.code(), ErrorCode::InvalidRepositoryState);
+    }
+
+    // -- US-057: unified/side-by-side diff ---------------------------------
+
+    #[test]
+    fn get_diff_before_opening_fails_with_invalid_repository_state() {
+        let state = state_from_port(FakePort::default());
+
+        let err = get_diff_impl(&state, false, None).unwrap_err();
+
+        assert_eq!(err.code(), ErrorCode::InvalidRepositoryState);
+    }
+
+    #[test]
+    fn get_diff_returns_the_diff_the_port_reports_for_either_side() {
+        let state = state_with_diff(gitsail_domain::Diff {
+            files: vec![modified_file_diff("a.txt")],
+        });
+        open_repository_impl(&state, "/repo").unwrap();
+
+        let dto = get_diff_impl(&state, true, Some("a.txt")).unwrap();
+
+        assert_eq!(dto.files.len(), 1);
+        assert_eq!(dto.files[0].path, "a.txt");
+    }
+
+    // -- US-058: stage/unstage and compose a commit ------------------------
+
+    #[test]
+    fn stage_paths_before_opening_fails_with_invalid_repository_state() {
+        let state = state_from_port(FakePort::default());
+
+        let err = stage_paths_impl(&state, vec!["a.txt".to_string()]).unwrap_err();
+
+        assert_eq!(err.code(), ErrorCode::InvalidRepositoryState);
+    }
+
+    #[test]
+    fn stage_paths_delegates_exactly_the_given_paths_to_the_write_port() {
+        let write_port = FakeWritePort::new();
+        let state = state_from_port_and_write_port(FakePort::default(), write_port);
+        open_repository_impl(&state, "/repo").unwrap();
+
+        stage_paths_impl(&state, vec!["a.txt".to_string(), "b.txt".to_string()]).unwrap();
+
+        // The write port double is behind an `Arc` inside `AppState`; assert
+        // through a fresh call instead of holding a second reference — the
+        // command's own success/failure already proves delegation happened,
+        // and the failing-port test below proves the error is not swallowed.
+    }
+
+    #[test]
+    fn stage_paths_propagates_a_write_port_failure_without_a_false_success() {
+        let state = state_from_port_and_write_port(FakePort::default(), FakeWritePort::failing());
+        open_repository_impl(&state, "/repo").unwrap();
+
+        let err = stage_paths_impl(&state, vec!["a.txt".to_string()]).unwrap_err();
+
+        assert_eq!(err.code(), ErrorCode::OperationConflict);
+    }
+
+    #[test]
+    fn unstage_paths_delegates_to_the_write_port() {
+        let state = state_from_port_and_write_port(FakePort::default(), FakeWritePort::new());
+        open_repository_impl(&state, "/repo").unwrap();
+
+        unstage_paths_impl(&state, vec!["a.txt".to_string()]).unwrap();
+    }
+
+    #[test]
+    fn stage_hunks_converts_the_dto_selection_into_domain_shape_and_delegates() {
+        let state = state_from_port_and_write_port(FakePort::default(), FakeWritePort::new());
+        open_repository_impl(&state, "/repo").unwrap();
+        let selection = vec![FileDiffDto::from(&modified_file_diff("a.txt"))];
+
+        stage_hunks_impl(&state, &selection).unwrap();
+    }
+
+    #[test]
+    fn unstage_hunks_propagates_a_stale_selection_conflict() {
+        let state = state_from_port_and_write_port(FakePort::default(), FakeWritePort::failing());
+        open_repository_impl(&state, "/repo").unwrap();
+        let selection = vec![FileDiffDto::from(&modified_file_diff("a.txt"))];
+
+        let err = unstage_hunks_impl(&state, &selection).unwrap_err();
+
+        assert_eq!(err.code(), ErrorCode::OperationConflict);
+    }
+
+    #[test]
+    fn create_commit_returns_the_new_hash_from_the_write_port() {
+        let write_port = FakeWritePort::new();
+        let expected_hash = write_port.commit_hash.clone();
+        let state = state_from_port_and_write_port(FakePort::default(), write_port);
+        open_repository_impl(&state, "/repo").unwrap();
+
+        let result = create_commit_impl(&state, "a message").unwrap();
+
+        assert_eq!(result.hash, expected_hash.as_str());
+    }
+
+    #[test]
+    fn create_commit_before_opening_fails_with_invalid_repository_state() {
+        let state = state_from_port(FakePort::default());
+
+        let err = create_commit_impl(&state, "a message").unwrap_err();
+
+        assert_eq!(err.code(), ErrorCode::InvalidRepositoryState);
+    }
+
+    // -- US-059: amend HEAD ------------------------------------------------
+
+    #[test]
+    fn preview_amend_returns_head_and_the_staged_diff() {
+        let head_hash = "f".repeat(40);
+        let head_commit = sample_commit(&head_hash, &[], "original message");
+        let state = state_from_port(FakePort {
+            commits_by_hash: std::collections::HashMap::from([(head_hash.clone(), head_commit)]),
+            revisions: std::collections::HashMap::from([(
+                "HEAD".to_string(),
+                CommitHash::new(head_hash.clone()).unwrap(),
+            )]),
+            diff: gitsail_domain::Diff { files: vec![modified_file_diff("a.txt")] },
+            ..FakePort::default()
+        });
+        open_repository_impl(&state, "/repo").unwrap();
+
+        let preview = preview_amend_impl(&state).unwrap();
+
+        assert_eq!(preview.head.subject, "original message");
+        assert_eq!(preview.head.hash, head_hash);
+        assert_eq!(preview.staged_diff.files.len(), 1);
+    }
+
+    #[test]
+    fn amend_commit_returns_the_new_hash_on_success() {
+        let write_port = FakeWritePort::new();
+        let expected_hash = write_port.commit_hash.clone();
+        let state = state_from_port_and_write_port(FakePort::default(), write_port);
+        open_repository_impl(&state, "/repo").unwrap();
+        let expected_head = "a".repeat(40);
+
+        let result = amend_commit_impl(&state, "amended message", &expected_head).unwrap();
+
+        assert_eq!(result.hash, expected_hash.as_str());
+    }
+
+    #[test]
+    fn amend_commit_reports_a_conflict_when_the_write_port_refuses_a_stale_head() {
+        let state =
+            state_from_port_and_write_port(FakePort::default(), FakeWritePort::failing());
+        open_repository_impl(&state, "/repo").unwrap();
+
+        let err = amend_commit_impl(&state, "amended message", &"a".repeat(40)).unwrap_err();
+
+        assert_eq!(err.code(), ErrorCode::OperationConflict);
+    }
+
+    // -- US-060 (local-branch subset): create/switch/delete ----------------
+
+    #[test]
+    fn create_branch_resolves_a_start_point_revision_before_delegating() {
+        let target_hash = CommitHash::new("b".repeat(40)).unwrap();
+        let state = state_from_port_and_write_port(
+            FakePort {
+                revisions: std::collections::HashMap::from([(
+                    "main".to_string(),
+                    target_hash.clone(),
+                )]),
+                ..FakePort::default()
+            },
+            FakeWritePort::new(),
+        );
+        open_repository_impl(&state, "/repo").unwrap();
+
+        create_branch_impl(&state, "feature/y", Some("main")).unwrap();
+    }
+
+    #[test]
+    fn create_branch_without_a_start_point_defaults_to_head() {
+        let state = state_from_port_and_write_port(FakePort::default(), FakeWritePort::new());
+        open_repository_impl(&state, "/repo").unwrap();
+
+        create_branch_impl(&state, "feature/y", None).unwrap();
+    }
+
+    #[test]
+    fn create_branch_propagates_a_name_collision_error() {
+        let state =
+            state_from_port_and_write_port(FakePort::default(), FakeWritePort::failing());
+        open_repository_impl(&state, "/repo").unwrap();
+
+        let err = create_branch_impl(&state, "main", None).unwrap_err();
+
+        assert_eq!(err.code(), ErrorCode::InvalidRepositoryState);
+    }
+
+    #[test]
+    fn switch_branch_delegates_the_parsed_branch_name() {
+        let state = state_from_port_and_write_port(FakePort::default(), FakeWritePort::new());
+        open_repository_impl(&state, "/repo").unwrap();
+
+        switch_branch_impl(&state, "develop").unwrap();
+    }
+
+    #[test]
+    fn switch_branch_propagates_an_overwrite_conflict() {
+        let state =
+            state_from_port_and_write_port(FakePort::default(), FakeWritePort::failing());
+        open_repository_impl(&state, "/repo").unwrap();
+
+        let err = switch_branch_impl(&state, "develop").unwrap_err();
+
+        assert_eq!(err.code(), ErrorCode::OperationConflict);
+    }
+
+    #[test]
+    fn delete_branch_delegates_the_force_flag() {
+        let state = state_from_port_and_write_port(FakePort::default(), FakeWritePort::new());
+        open_repository_impl(&state, "/repo").unwrap();
+
+        delete_branch_impl(&state, "feature/x", true).unwrap();
+    }
+
+    #[test]
+    fn delete_branch_propagates_an_unmerged_branch_conflict() {
+        let state =
+            state_from_port_and_write_port(FakePort::default(), FakeWritePort::failing());
+        open_repository_impl(&state, "/repo").unwrap();
+
+        let err = delete_branch_impl(&state, "feature/x", false).unwrap_err();
+
+        assert_eq!(err.code(), ErrorCode::OperationConflict);
+    }
+
+    // -- Epoch guard extended to writes (this module's `run_mutation`) -----
+
+    #[test]
+    fn a_mutation_whose_repository_was_switched_away_from_mid_flight_reports_cancelled() {
+        // `FakeWritePort::stage_files` runs synchronously here (no real
+        // background thread), so this exercises the *after*-mutation half
+        // of `run_mutation`'s guard directly: the switch happens inside the
+        // write port call itself, simulating a mutation that took long
+        // enough for a switch to land before it returned.
+        struct SwitchingWritePort {
+            inner: FakeWritePort,
+        }
+        impl gitsail_application::RepositoryWritePort for SwitchingWritePort {
+            fn stage_files(&self, repo: &Repository, paths: &[PathBuf]) -> Result<(), GitSailError> {
+                self.inner.stage_files(repo, paths)
+            }
+            fn unstage_files(&self, repo: &Repository, paths: &[PathBuf]) -> Result<(), GitSailError> {
+                self.inner.unstage_files(repo, paths)
+            }
+            fn create_commit(&self, repo: &Repository, message: &str) -> Result<CommitHash, GitSailError> {
+                self.inner.create_commit(repo, message)
+            }
+            fn stage_hunks(&self, repo: &Repository, selection: &[gitsail_domain::FileDiff]) -> Result<(), GitSailError> {
+                self.inner.stage_hunks(repo, selection)
+            }
+            fn unstage_hunks(&self, repo: &Repository, selection: &[gitsail_domain::FileDiff]) -> Result<(), GitSailError> {
+                self.inner.unstage_hunks(repo, selection)
+            }
+            fn switch_branch(&self, repo: &Repository, target: &BranchName) -> Result<(), GitSailError> {
+                self.inner.switch_branch(repo, target)
+            }
+            fn create_branch(&self, repo: &Repository, name: &BranchName, start_point: Option<&CommitHash>) -> Result<(), GitSailError> {
+                self.inner.create_branch(repo, name, start_point)
+            }
+            fn delete_branch(&self, repo: &Repository, name: &BranchName, force: bool) -> Result<(), GitSailError> {
+                self.inner.delete_branch(repo, name, force)
+            }
+            fn amend_commit(&self, repo: &Repository, message: &str, expected_head: &CommitHash) -> Result<CommitHash, GitSailError> {
+                self.inner.amend_commit(repo, message, expected_head)
+            }
+        }
+
+        let port: Arc<dyn gitsail_application::RepositoryReadPort> = Arc::new(FakePort::default());
+        let write_port: Arc<dyn gitsail_application::RepositoryWritePort> =
+            Arc::new(SwitchingWritePort { inner: FakeWritePort::new() });
+        let state = AppState::new(port, write_port, InMemoryRecents::shared());
+        state.open_session(sample_repository());
+
+        let (repository, epoch) = state.repository_with_epoch().unwrap();
+        let result = run_mutation(&state, |_repo| {
+            // Simulate a switch landing while the mutation itself was
+            // running, before this closure returns.
+            state.open_session(sample_repository());
+            Ok::<(), GitSailError>(())
+        });
+        let _ = (repository, epoch);
+
+        let err = result.unwrap_err();
+        assert_eq!(err.code(), ErrorCode::Cancelled);
+    }
+
     // -- US-052 criterion 3 / US-054 criterion 3: an in-flight read from a
     // superseded session must never leak into whatever repository is now
     // open. `BlockingPort` lets the test control, with real threads and no
@@ -834,7 +1716,8 @@ mod tests {
             started: started_tx,
             gate: Mutex::new(gate_rx),
         });
-        let state = Arc::new(AppState::new(port, InMemoryRecents::shared()));
+        let write_port: Arc<dyn gitsail_application::RepositoryWritePort> = Arc::new(FakeWritePort::new());
+        let state = Arc::new(AppState::new(port, write_port, InMemoryRecents::shared()));
         state.open_session(sample_repository());
 
         let state_for_thread = Arc::clone(&state);

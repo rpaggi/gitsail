@@ -12,10 +12,10 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use gitsail_application::{CommitDiff, PatchExport, RecentRepositoryEntry};
+use gitsail_application::{AmendPreview, CommitDiff, PatchExport, RecentRepositoryEntry};
 use gitsail_domain::{
-    Blame, BlameLine, BlameOrigin, Branch, BranchKind, ChangeType, Commit, Decoration, Diff,
-    DiffHunk, DiffLine, DiffLineOrigin, FileChange, FileContentAtRevision, FileContentKind,
+    Blame, BlameLine, BlameOrigin, Branch, BranchKind, ChangeType, Commit, CommitHash, Decoration,
+    Diff, DiffHunk, DiffLine, DiffLineOrigin, FileChange, FileContentAtRevision, FileContentKind,
     FileDiff, FileStatusCode, GitTimestamp, GraphEdge, GraphRow, HeadState, LineHistory,
     LineHistoryEntry, LineRange, Repository, RepositoryStatus, Signature,
 };
@@ -31,6 +31,15 @@ use gitsail_domain::{
 /// lossless representation for non-UTF-8 paths.
 fn path_to_string(path: &Path) -> String {
     path.to_string_lossy().into_owned()
+}
+
+/// The reverse of [`path_to_string`]: builds a [`std::path::PathBuf`] from
+/// the wire representation. Used only where a DTO travels *back* into
+/// domain shape (US-058/US-191's hunk-selection payload) — every other DTO
+/// in this module is one-directional (domain -> wire only), per this
+/// module's own doc comment.
+fn string_to_path(value: &str) -> std::path::PathBuf {
+    std::path::PathBuf::from(value)
 }
 
 // ---------------------------------------------------------------------
@@ -522,6 +531,78 @@ impl From<&Diff> for DiffDto {
     }
 }
 
+// -- Reverse direction: hunk-selection payloads (US-058/T-191) ----------
+//
+// Every DTO above only ever travels domain -> wire. A hunk-level
+// stage/unstage selection is the one payload that must travel the other
+// way (the frontend echoes back exactly the hunks it read from a prior
+// `DiffDto`, trimmed to the ones the person selected) into
+// `RepositoryWritePort::stage_hunks`/`unstage_hunks`, which takes
+// `&[FileDiff]` — domain shape, not DTOs. These conversions are
+// infallible: every DTO variant maps onto exactly one domain variant, so
+// there is no "wire value with no domain meaning" to reject.
+
+impl From<DiffLineOriginDto> for DiffLineOrigin {
+    fn from(value: DiffLineOriginDto) -> Self {
+        match value {
+            DiffLineOriginDto::Context => Self::Context,
+            DiffLineOriginDto::Addition => Self::Addition,
+            DiffLineOriginDto::Deletion => Self::Deletion,
+        }
+    }
+}
+
+impl From<ChangeTypeDto> for ChangeType {
+    fn from(value: ChangeTypeDto) -> Self {
+        match value {
+            ChangeTypeDto::Added => Self::Added,
+            ChangeTypeDto::Modified => Self::Modified,
+            ChangeTypeDto::Deleted => Self::Deleted,
+            ChangeTypeDto::Renamed => Self::Renamed,
+            ChangeTypeDto::Copied => Self::Copied,
+            ChangeTypeDto::TypeChanged => Self::TypeChanged,
+            ChangeTypeDto::Unmerged => Self::Unmerged,
+            ChangeTypeDto::Untracked => Self::Untracked,
+            ChangeTypeDto::Ignored => Self::Ignored,
+        }
+    }
+}
+
+impl From<&DiffLineDto> for DiffLine {
+    fn from(line: &DiffLineDto) -> Self {
+        Self {
+            origin: line.origin.into(),
+            content: line.content.clone(),
+            has_trailing_newline: line.has_trailing_newline,
+        }
+    }
+}
+
+impl From<&DiffHunkDto> for DiffHunk {
+    fn from(hunk: &DiffHunkDto) -> Self {
+        Self {
+            old_start: hunk.old_start,
+            old_lines: hunk.old_lines,
+            new_start: hunk.new_start,
+            new_lines: hunk.new_lines,
+            lines: hunk.lines.iter().map(DiffLine::from).collect(),
+        }
+    }
+}
+
+impl From<&FileDiffDto> for FileDiff {
+    fn from(file: &FileDiffDto) -> Self {
+        Self {
+            path: string_to_path(&file.path),
+            previous_path: file.previous_path.as_deref().map(string_to_path),
+            change_type: file.change_type.into(),
+            is_binary: file.is_binary,
+            truncated: file.truncated,
+            hunks: file.hunks.iter().map(DiffHunk::from).collect(),
+        }
+    }
+}
+
 // ---------------------------------------------------------------------
 // Patch export (US-029/T-162). Mirrors
 // `gitsail_application::patch::PatchExport` — the rendering and scope
@@ -739,6 +820,54 @@ impl From<&FileContentAtRevision> for FileContentDto {
             },
             FileContentKind::Binary => Self::Binary { path, revision },
             FileContentKind::Missing => Self::Missing { path, revision },
+        }
+    }
+}
+
+// ---------------------------------------------------------------------
+// Commit/amend results (US-058/US-059). A single new commit hash, shared
+// by `create_commit` and `amend_commit` — both mutate `HEAD` and the only
+// thing either needs to report on success is the resulting commit's
+// identity; the frontend already re-fetches status/graph itself
+// afterward rather than this DTO trying to describe the mutation's full
+// effect.
+// ---------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommitResultDto {
+    pub hash: String,
+}
+
+impl From<&CommitHash> for CommitResultDto {
+    fn from(hash: &CommitHash) -> Self {
+        Self {
+            hash: hash.as_str().to_string(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------
+// Amend preview (US-059 criterion 1). Mirrors
+// `gitsail_application::AmendPreview`: `HEAD`'s exact commit (for its
+// current message/identity) and the staged diff that would be folded in.
+// `head.hash` is what the frontend must echo back as `amend_commit`'s
+// `expectedHead` — the same value naturally already sits in `head` here,
+// so no separate field duplicates it.
+// ---------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AmendPreviewDto {
+    pub head: CommitDto,
+    pub staged_diff: DiffDto,
+}
+
+impl From<&AmendPreview> for AmendPreviewDto {
+    fn from(preview: &AmendPreview) -> Self {
+        Self {
+            head: CommitDto::from(&preview.head),
+            staged_diff: DiffDto::from(&preview.staged_diff),
         }
     }
 }
@@ -982,5 +1111,90 @@ mod tests {
         assert!(binary_json.get("content").is_none());
         assert_eq!(missing_json["kind"], "missing");
         assert!(missing_json.get("content").is_none());
+    }
+
+    #[test]
+    fn commit_result_dto_serializes_the_hash_field() {
+        let hash = CommitHash::new("a".repeat(40)).unwrap();
+
+        let dto = CommitResultDto::from(&hash);
+        let json = serde_json::to_value(&dto).unwrap();
+
+        assert_eq!(json["hash"], "a".repeat(40));
+    }
+
+    #[test]
+    fn amend_preview_dto_nests_the_head_commit_and_the_staged_diff() {
+        let hash = CommitHash::new("b".repeat(40)).unwrap();
+        let preview = AmendPreview {
+            head: Commit {
+                short_hash: hash.to_short(8),
+                hash: hash.clone(),
+                parents: vec![],
+                author: Signature::new("Ada", "ada@example.com"),
+                committer: Signature::new("Ada", "ada@example.com"),
+                author_date: GitTimestamp::new(0, 0),
+                commit_date: GitTimestamp::new(0, 0),
+                subject: "original message".to_string(),
+                body: String::new(),
+                decorations: vec![],
+            },
+            staged_diff: Diff {
+                files: vec![FileDiff {
+                    path: PathBuf::from("a.txt"),
+                    previous_path: None,
+                    change_type: ChangeType::Modified,
+                    is_binary: false,
+                    truncated: false,
+                    hunks: vec![],
+                }],
+            },
+        };
+
+        let dto = AmendPreviewDto::from(&preview);
+        let json = serde_json::to_value(&dto).unwrap();
+
+        assert_eq!(json["head"]["subject"], "original message");
+        assert_eq!(json["head"]["hash"], "b".repeat(40));
+        assert_eq!(json["stagedDiff"]["files"][0]["path"], "a.txt");
+    }
+
+    #[test]
+    fn file_diff_dto_round_trips_through_the_domain_type_for_a_hunk_selection() {
+        let original = FileDiff {
+            path: PathBuf::from("src/lib.rs"),
+            previous_path: Some(PathBuf::from("src/old.rs")),
+            change_type: ChangeType::Renamed,
+            is_binary: false,
+            truncated: false,
+            hunks: vec![DiffHunk {
+                old_start: 1,
+                old_lines: 2,
+                new_start: 1,
+                new_lines: 3,
+                lines: vec![
+                    DiffLine {
+                        origin: DiffLineOrigin::Context,
+                        content: "unchanged".to_string(),
+                        has_trailing_newline: true,
+                    },
+                    DiffLine {
+                        origin: DiffLineOrigin::Addition,
+                        content: "new line".to_string(),
+                        has_trailing_newline: true,
+                    },
+                    DiffLine {
+                        origin: DiffLineOrigin::Deletion,
+                        content: "old line".to_string(),
+                        has_trailing_newline: false,
+                    },
+                ],
+            }],
+        };
+
+        let dto = FileDiffDto::from(&original);
+        let round_tripped = FileDiff::from(&dto);
+
+        assert_eq!(round_tripped, original, "a hunk-selection DTO must survive the trip back into domain shape unchanged");
     }
 }

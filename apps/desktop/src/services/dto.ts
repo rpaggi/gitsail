@@ -144,3 +144,74 @@ export interface PatchExportDto {
   skippedBinaryFiles: string[];
   skippedTruncatedFiles: string[];
 }
+
+// -- Branches (EPIC-12/T-189, T-193 local-branch subset) ----------------
+
+export type BranchKindDto = { kind: "local" } | { kind: "remote"; remote: string };
+
+export interface BranchDto {
+  name: string;
+  kind: BranchKindDto;
+  target: string;
+  upstream: string | null;
+  ahead: number;
+  behind: number;
+  isCurrent: boolean;
+}
+
+// -- Diffs (US-057/US-058): mirrors `gitsail_protocol::dto`'s diff
+// section. `FileDiffDto` travels both ways — read from `get_diff`,
+// trimmed down and echoed back to `stage_hunks`/`unstage_hunks` for a
+// hunk-level selection (US-058 criterion 1).
+
+export type DiffLineOriginDto = "context" | "addition" | "deletion";
+
+export interface DiffLineDto {
+  origin: DiffLineOriginDto;
+  content: string;
+  hasTrailingNewline: boolean;
+}
+
+export interface DiffHunkDto {
+  oldStart: number;
+  oldLines: number;
+  newStart: number;
+  newLines: number;
+  lines: DiffLineDto[];
+}
+
+export interface FileDiffDto {
+  path: string;
+  previousPath: string | null;
+  changeType: ChangeTypeDto;
+  isBinary: boolean;
+  truncated: boolean;
+  hunks: DiffHunkDto[];
+}
+
+export interface DiffDto {
+  files: FileDiffDto[];
+}
+
+// -- Commit/amend results (US-058/US-059) --------------------------------
+
+export interface CommitResultDto {
+  hash: string;
+}
+
+export interface AmendPreviewDto {
+  head: CommitDto;
+  stagedDiff: DiffDto;
+}
+
+// -- Startup handoff (EPIC-15 gap closed by this epic; US-056) ----------
+//
+// Mirrors `gitsail_desktop_lib::state::StartupIntent` — the one DTO in
+// this file whose Rust source of truth lives in the Desktop crate itself
+// rather than `gitsail-protocol`, since it is a Desktop-process-only
+// concept (argv), not a cross-surface protocol value.
+
+export interface StartupIntentDto {
+  repoPath: string | null;
+  commitHash: string | null;
+}

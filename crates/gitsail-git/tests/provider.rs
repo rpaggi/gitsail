@@ -795,6 +795,15 @@ fn head_commit_hash(dir: &Path) -> CommitHash {
     CommitHash::new(hash).unwrap()
 }
 
+fn head_commit_message(dir: &Path) -> String {
+    let output = Command::new("git")
+        .args(["log", "-1", "--format=%s"])
+        .current_dir(dir)
+        .output()
+        .unwrap();
+    String::from_utf8(output.stdout).unwrap().trim().to_string()
+}
+
 // ---------------------------------------------------------------------
 // Diff: modified file and binary file.
 // ---------------------------------------------------------------------
@@ -2544,6 +2553,81 @@ fn create_commit_on_hook_failure_preserves_the_staged_index() {
 
     let status = provider.status(&repo).unwrap();
     assert_eq!(status.files[0].index_status, FileStatusCode::Added, "the staged work must survive a failed commit");
+}
+
+// ---------------------------------------------------------------------
+// Amend HEAD (US-059).
+// ---------------------------------------------------------------------
+
+#[test]
+fn amend_commit_replaces_head_message_and_folds_in_staged_changes() {
+    let repo_dir = init_repo("amend-success");
+    write_file(repo_dir.path(), "a.txt", "hello\n");
+    commit_all(repo_dir.path(), "first commit");
+    let original_head = head_commit_hash(repo_dir.path());
+
+    let provider = provider();
+    let repo = provider.discover(repo_dir.path()).unwrap();
+    write_file(repo_dir.path(), "b.txt", "extra\n");
+    provider.stage_files(&repo, &[PathBuf::from("b.txt")]).unwrap();
+
+    let new_hash = provider
+        .amend_commit(&repo, "amended message", &original_head)
+        .expect("amend should succeed when HEAD still matches expected_head");
+
+    assert_ne!(new_hash, original_head, "amend must produce a new commit object");
+    assert_eq!(head_commit_hash(repo_dir.path()), new_hash);
+    assert_eq!(head_commit_message(repo_dir.path()), "amended message");
+    let status = provider.status(&repo).unwrap();
+    assert!(status.is_clean(), "the staged file must be folded into the amended commit");
+}
+
+#[test]
+fn amend_commit_refuses_when_head_moved_since_the_expected_hash() {
+    let repo_dir = init_repo("amend-stale-head");
+    write_file(repo_dir.path(), "a.txt", "hello\n");
+    commit_all(repo_dir.path(), "first commit");
+    let stale_head = head_commit_hash(repo_dir.path());
+
+    // HEAD advances past `stale_head` before the amend is confirmed —
+    // simulating another process (or another GitSail window) committing in
+    // between the preview and the confirmation.
+    write_file(repo_dir.path(), "b.txt", "concurrent\n");
+    commit_all(repo_dir.path(), "a concurrent commit");
+    let real_head = head_commit_hash(repo_dir.path());
+
+    let provider = provider();
+    let repo = provider.discover(repo_dir.path()).unwrap();
+
+    let err = provider
+        .amend_commit(&repo, "should not be applied", &stale_head)
+        .expect_err("amend must refuse a stale expected_head rather than rewriting the wrong commit");
+
+    assert_eq!(err.code(), ErrorCode::OperationConflict);
+    assert_eq!(
+        head_commit_hash(repo_dir.path()),
+        real_head,
+        "a refused amend must never touch HEAD"
+    );
+    assert_eq!(head_commit_message(repo_dir.path()), "a concurrent commit");
+}
+
+#[test]
+fn amend_commit_rejects_an_empty_message_without_touching_head() {
+    let repo_dir = init_repo("amend-empty-message");
+    write_file(repo_dir.path(), "a.txt", "hello\n");
+    commit_all(repo_dir.path(), "first commit");
+    let head = head_commit_hash(repo_dir.path());
+
+    let provider = provider();
+    let repo = provider.discover(repo_dir.path()).unwrap();
+
+    let err = provider
+        .amend_commit(&repo, "   ", &head)
+        .expect_err("an empty amend message must be rejected");
+
+    assert_eq!(err.code(), ErrorCode::InvalidRepositoryState);
+    assert_eq!(head_commit_hash(repo_dir.path()), head);
 }
 
 // ---------------------------------------------------------------------

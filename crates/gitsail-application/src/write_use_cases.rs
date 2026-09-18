@@ -127,6 +127,27 @@ impl DeleteBranch {
     }
 }
 
+/// Amends `HEAD` (US-059). See [`RepositoryWritePort::amend_commit`] for the
+/// `expected_head` revalidation contract this delegates to unchanged.
+pub struct AmendCommit {
+    port: Arc<dyn RepositoryWritePort>,
+}
+
+impl AmendCommit {
+    pub fn new(port: Arc<dyn RepositoryWritePort>) -> Self {
+        Self { port }
+    }
+
+    pub fn execute(
+        &self,
+        repo: &Repository,
+        message: &str,
+        expected_head: &CommitHash,
+    ) -> Result<CommitHash, GitSailError> {
+        self.port.amend_commit(repo, message, expected_head)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -149,6 +170,8 @@ mod tests {
         received_switch_target: Mutex<Option<BranchName>>,
         received_create_branch: Mutex<Option<(BranchName, Option<CommitHash>)>>,
         received_delete_branch: Mutex<Option<(BranchName, bool)>>,
+        received_amend: Mutex<Option<(String, CommitHash)>>,
+        amended_hash: CommitHash,
     }
 
     impl FakeWritePort {
@@ -164,6 +187,8 @@ mod tests {
                 received_switch_target: Mutex::new(None),
                 received_create_branch: Mutex::new(None),
                 received_delete_branch: Mutex::new(None),
+                received_amend: Mutex::new(None),
+                amended_hash: CommitHash::new("cafef00dcafef00dcafef00dcafef00dcafef00").unwrap(),
             }
         }
 
@@ -273,6 +298,23 @@ mod tests {
                 ));
             }
             Ok(())
+        }
+
+        fn amend_commit(
+            &self,
+            _repo: &Repository,
+            message: &str,
+            expected_head: &CommitHash,
+        ) -> Result<CommitHash, GitSailError> {
+            *self.received_amend.lock().unwrap() =
+                Some((message.to_string(), expected_head.clone()));
+            if self.fail {
+                return Err(GitSailError::new(
+                    ErrorCode::OperationConflict,
+                    "HEAD changed since the amend was previewed",
+                ));
+            }
+            Ok(self.amended_hash.clone())
         }
     }
 
@@ -460,6 +502,38 @@ mod tests {
 
         let err = use_case
             .execute(&sample_repository(), &BranchName::new("feature").unwrap(), false)
+            .unwrap_err();
+
+        assert_eq!(err.code(), ErrorCode::OperationConflict);
+    }
+
+    #[test]
+    fn amend_commit_delegates_to_port_with_message_and_expected_head() {
+        let port = Arc::new(FakeWritePort::new());
+        let use_case = AmendCommit::new(port.clone());
+        let expected_head =
+            CommitHash::new("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef").unwrap();
+
+        let hash = use_case
+            .execute(&sample_repository(), "amended message", &expected_head)
+            .unwrap();
+
+        assert_eq!(hash, port.amended_hash);
+        assert_eq!(
+            *port.received_amend.lock().unwrap(),
+            Some(("amended message".to_string(), expected_head))
+        );
+    }
+
+    #[test]
+    fn amend_commit_propagates_a_conflict_when_head_moved_without_a_false_success() {
+        let port = Arc::new(FakeWritePort::failing());
+        let use_case = AmendCommit::new(port);
+        let expected_head =
+            CommitHash::new("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef").unwrap();
+
+        let err = use_case
+            .execute(&sample_repository(), "amended message", &expected_head)
             .unwrap_err();
 
         assert_eq!(err.code(), ErrorCode::OperationConflict);

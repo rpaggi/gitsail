@@ -87,4 +87,22 @@ pub trait RepositoryWritePort: Send + Sync {
         name: &BranchName,
         force: bool,
     ) -> Result<(), GitSailError>;
+
+    /// Replaces `HEAD`'s commit with a new one carrying `message` and
+    /// whatever is currently staged (US-059). `expected_head` is the commit
+    /// hash the caller last observed as `HEAD` (typically from a prior
+    /// preview read) — this call revalidates it is still `HEAD` immediately
+    /// before amending and refuses with [`gitsail_domain::ErrorCode::OperationConflict`]
+    /// otherwise (US-059 criterion 3), the same "revalidate right before
+    /// mutating" discipline `AppState`'s session epoch applies on the
+    /// Desktop side. This is what keeps amend from silently rewriting a
+    /// *different* commit than the one the person previewed, e.g. because
+    /// another process committed in between. Returns the new commit's hash
+    /// on success.
+    fn amend_commit(
+        &self,
+        repo: &Repository,
+        message: &str,
+        expected_head: &CommitHash,
+    ) -> Result<CommitHash, GitSailError>;
 }

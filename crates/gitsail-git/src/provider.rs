@@ -743,6 +743,53 @@ impl RepositoryWritePort for GitCliProvider {
             .map_err(classify_delete_branch_failure)?;
         Ok(())
     }
+
+    fn amend_commit(
+        &self,
+        repo: &Repository,
+        message: &str,
+        expected_head: &CommitHash,
+    ) -> Result<CommitHash, GitSailError> {
+        require_worktree(repo, "amend")?;
+        if message.trim().is_empty() {
+            return Err(GitSailError::new(
+                ErrorCode::InvalidRepositoryState,
+                "commit message must not be empty",
+            )
+            .with_remediation("provide a non-empty commit message"));
+        }
+        // Revalidated immediately before the mutation, mirroring
+        // `create_commit`'s pre-flight `status()` check just above: a
+        // confirmation given against an older `HEAD` (from a preview read)
+        // must never authorize amending whatever commit happens to be
+        // `HEAD` *now* (US-059 criterion 3).
+        let current_head = RepositoryReadPort::resolve_revision(self, repo, "HEAD")?;
+        if current_head != *expected_head {
+            return Err(GitSailError::new(
+                ErrorCode::OperationConflict,
+                "HEAD changed since the amend was previewed",
+            )
+            .with_remediation(
+                "review the new HEAD commit and retry the amend if it is still what you intend to change",
+            ));
+        }
+
+        let args = vec![
+            "commit".to_string(),
+            "--amend".to_string(),
+            "-m".to_string(),
+            message.to_string(),
+        ];
+        match self.run(args, &repo.root_path) {
+            Ok(_) => {
+                let hash_output =
+                    self.run(vec!["rev-parse".to_string(), "HEAD".to_string()], &repo.root_path)?;
+                let hash = Self::stdout_string(&hash_output)?.trim().to_string();
+                CommitHash::new(hash)
+            }
+            Err(err) => Err(classify_commit_failure(err)),
+        }
+    }
 }
 
 /// Direction in which a reconstructed hunk patch is applied to the index:
