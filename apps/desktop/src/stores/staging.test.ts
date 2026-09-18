@@ -141,6 +141,64 @@ describe("staging store", () => {
     expect(operation.status).toBe("succeeded");
   });
 
+  it(
+    "T-255/US-122 criterion 2: the full critical flow — open the repository, see its status, " +
+      "stage the unstaged/untracked files, and commit, in one chained sequence",
+    async () => {
+      await openRepoWithStatus();
+      const staging = useStagingStore();
+
+      // 1. Status just after opening: one file already staged, two not yet.
+      expect(staging.stagedFiles.map((f) => f.path)).toEqual(["staged.txt"]);
+      expect(staging.unstagedFiles.map((f) => f.path)).toEqual(["unstaged.txt", "new.txt"]);
+
+      // 2. Stage the remaining two files (Safe risk — runs immediately).
+      // The refreshed status reflects a real `git status` after staging:
+      // every entry now has an unmodified worktree side and a non-empty
+      // index side (the untracked file becomes "added").
+      const allStaged: RepositoryStatusDto = {
+        branch: "main",
+        headState: { state: "attached", branch: "main" },
+        isClean: false,
+        files: [
+          { path: "staged.txt", previousPath: null, changeType: "modified", indexStatus: "modified", worktreeStatus: "unmodified" },
+          { path: "unstaged.txt", previousPath: null, changeType: "modified", indexStatus: "modified", worktreeStatus: "unmodified" },
+          { path: "new.txt", previousPath: null, changeType: "added", indexStatus: "added", worktreeStatus: "unmodified" },
+        ],
+      };
+      const received: string[] = [];
+      mockIPC((cmd) => {
+        received.push(cmd);
+        if (cmd === "get_repository_status") return allStaged;
+        return null;
+      });
+      await staging.stageFiles(["unstaged.txt", "new.txt"]);
+      expect(received).toContain("stage_paths");
+      expect(staging.unstagedFiles).toEqual([]);
+      expect(staging.stagedFiles.map((f) => f.path).sort()).toEqual(["new.txt", "staged.txt", "unstaged.txt"]);
+
+      // 3. Commit the now fully staged tree (Moderate risk — waits for
+      // confirmation) and confirm it.
+      staging.message = "stage everything and commit";
+      await staging.requestCommit();
+      const operation = useOperationStore();
+      expect(operation.status).toBe("confirming");
+
+      mockIPC((cmd) => {
+        if (cmd === "create_commit") return { hash: "c".repeat(40) };
+        if (cmd === "get_repository_status") return { ...statusWithFiles(), isClean: true, files: [] };
+        return null;
+      });
+      await operation.confirm();
+
+      expect(operation.status).toBe("succeeded");
+      expect(staging.lastCommitHash).toBe("c".repeat(40));
+      expect(staging.message).toBe("");
+      expect(staging.stagedFiles).toEqual([]);
+      expect(staging.unstagedFiles).toEqual([]);
+    },
+  );
+
   it("a failed commit preserves the typed message and the current selection", async () => {
     await openRepoWithStatus();
     mockIPC((cmd) => {

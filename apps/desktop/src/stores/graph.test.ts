@@ -65,6 +65,23 @@ describe("commit graph store", () => {
     expect(store.lastError).toBeNull();
   });
 
+  it(
+    "T-255/US-122 criterion 3 (\"repo vazio\"): loadFirstPage against a freshly initialized " +
+      "repository with no commits yet returns an empty page, not an error",
+    async () => {
+      mockIPC(() => ({ rows: [], laneCount: 0, hasMore: false, nextCursor: null }));
+
+      const store = useCommitGraphStore();
+      await store.loadFirstPage();
+
+      expect(store.rows).toEqual([]);
+      expect(store.hasMore).toBe(false);
+      expect(store.nextCursor).toBeNull();
+      expect(store.isLoading).toBe(false);
+      expect(store.lastError).toBeNull();
+    },
+  );
+
   it("loadMore appends to (never replaces) the already-loaded rows, reset:false", async () => {
     let callCount = 0;
     mockIPC((_cmd, args) => {

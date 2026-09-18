@@ -113,6 +113,33 @@ describe("search store", () => {
     expect(graph.selectedHash).toBe("d".repeat(40));
   });
 
+  it(
+    "T-255/US-122 criterion 3 (\"conteúdo malicioso\"): a query and matching branch names " +
+      "containing control characters, ANSI escapes, or an extremely long run of text neither " +
+      "crash the search nor get silently dropped",
+    async () => {
+      const hostileSubject = "evil[31mred " + "x".repeat(5000);
+      const hostileBranch = "feature/[31m-" + "y".repeat(2000);
+      mockIPC((cmd) => {
+        if (cmd === "search_commits") return [commit("a".repeat(40), hostileSubject)];
+        if (cmd === "list_branches") return [branch(hostileBranch), branch("main")];
+        return null;
+      });
+      const store = useSearchStore();
+
+      await store.search("[31m");
+
+      expect(store.lastError).toBeNull();
+      expect(store.commitResults).toHaveLength(1);
+      expect(store.commitResults[0].subject).toBe(hostileSubject);
+      // `branchResults` is a plain case-insensitive substring filter
+      // (`.includes`), never a regex — a query containing regex
+      // metacharacters (`[`, `]`) must still match literally rather than
+      // being interpreted as a pattern or throwing.
+      expect(store.branchResults.map((b) => b.name)).toEqual([hostileBranch]);
+    },
+  );
+
   it("clear resets query and every result bucket", async () => {
     mockIPC((cmd) => {
       if (cmd === "search_commits") return [commit("a".repeat(40), "x")];

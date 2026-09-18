@@ -135,6 +135,66 @@ describe("merge store", () => {
     expect(useOperationStore().status).toBe("succeeded");
   });
 
+  it(
+    "T-255/US-122 criterion 2: the full critical flow — a conflicting merge resolves and " +
+      "continues to a clean state, in one chained sequence (detect conflict -> markResolved -> " +
+      "requestContinue -> confirm)",
+    async () => {
+      // Three distinct repository states this sequence walks through, in
+      // order — a conflicted merge is still `kind: "merge"` (never `"none"`)
+      // once every file is resolved; only an explicit `continue_operation`
+      // actually clears it (T-233/US-081's own guarantee, reused end to end
+      // here rather than re-asserted in isolation).
+      let resolved = false;
+      let continued = false;
+      const conflictOutcome: MergeResultDto = {
+        outcome: "conflict",
+        conflictedFiles: [{ path: "f.txt", stage: "bothModified" }],
+      };
+      const received: string[] = [];
+      mockIPC((cmd) => {
+        received.push(cmd);
+        if (cmd === "merge") return conflictOutcome;
+        if (cmd === "get_repository_status") return statusResponse();
+        if (cmd === "detect_in_progress_operation") {
+          if (continued) return { kind: "none" } satisfies InProgressOperationDto;
+          return pendingMerge(!resolved);
+        }
+        if (cmd === "mark_conflict_resolved") {
+          resolved = true;
+          return null;
+        }
+        if (cmd === "continue_operation") {
+          continued = true;
+          return null;
+        }
+        throw new Error(`unexpected command ${cmd}`);
+      });
+      const store = useMergeStore();
+
+      // 1. A merge is requested and confirmed — it conflicts.
+      await store.requestMerge("feature/x");
+      await useOperationStore().confirm();
+      expect(store.lastMergeResult).toEqual(conflictOutcome);
+      expect(store.hasConflicts).toBe(true);
+
+      // 2. The conflict is resolved (Safe risk — no confirmation needed).
+      await store.markResolved("f.txt");
+      expect(received).toContain("mark_conflict_resolved");
+      expect(store.hasConflicts).toBe(false);
+
+      // 3. Continuing the merge is confirmed and completes it.
+      await store.requestContinue();
+      const operation = useOperationStore();
+      expect(operation.status).toBe("confirming");
+      await operation.confirm();
+
+      expect(received).toContain("continue_operation");
+      expect(operation.status).toBe("succeeded");
+      expect(store.inProgressOperation).toEqual({ kind: "none" });
+    },
+  );
+
   it("requestCherryPick is Moderate risk, names the exact commit, and reports Applied distinctly", async () => {
     const received: Record<string, unknown>[] = [];
     const outcome: CherryPickResultDto = { outcome: "applied", hash: "b".repeat(40) };

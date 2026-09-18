@@ -209,6 +209,48 @@ fn merging_a_reference_creates_a_merge_commit_via_the_tui_flow() {
     assert!(app.in_progress_operation().is_none());
 }
 
+/// T-255/US-122 criterion 3 ("cancelamento"): the same guarantee
+/// `src/app.rs::dismissing_a_pending_destructive_reset_confirmation_dispatches_nothing`
+/// already covers for a `Reset` confirmation, exercised end to end here for
+/// a real merge against a real repository — declining the confirmation
+/// prompt (`Esc`/[`Action::Dismiss`]) must dispatch nothing and leave HEAD
+/// exactly where it was (Destructive Operations & Confirmation Guardrails
+/// wiki rule 5: "Cancelling before confirmation leaves the repository
+/// completely untouched").
+#[test]
+fn declining_a_pending_merge_confirmation_dispatches_nothing_and_leaves_head_untouched() {
+    let dir = TempDir::new("merge-decline-confirmation");
+    setup_non_conflicting_divergence(dir.path());
+    let head_before = current_head(dir.path());
+
+    let (mut app, _commands) = App::new(dir.path().to_path_buf(), read_port(), false);
+    open_and_load(&mut app, dir.path());
+
+    select_branch(&mut app, "feature");
+    app.update(Action::RequestMerge);
+    assert!(matches!(
+        app.operation(),
+        OperationState::Confirming(OperationKind::Merge { target }) if target == "feature"
+    ));
+
+    let commands = app.update(Action::Dismiss);
+    assert!(
+        commands.is_empty(),
+        "declining a merge confirmation must dispatch nothing: {commands:?}"
+    );
+    assert!(
+        app.operation().is_idle(),
+        "declining a confirmation must cancel it, never silently confirm it"
+    );
+    assert_eq!(
+        current_head(dir.path()),
+        head_before,
+        "HEAD must be completely untouched after cancelling"
+    );
+    assert!(app.last_merge_result().is_none());
+    assert!(app.in_progress_operation().is_none());
+}
+
 #[test]
 fn merging_a_conflicting_reference_opens_a_conflicts_overlay_that_resolves_and_continues() {
     let dir = TempDir::new("merge-conflict-resolve");

@@ -240,6 +240,32 @@ describe("HistoryController: blame decorations (T-205/US-072)", () => {
     expect(host.decorationCalls.at(-1)?.entries).toEqual([]);
   });
 
+  it("T-255/US-122 criterion 3 (\"repo vazio\"): blaming a file in a repository with no commits yet (unborn HEAD) clears decorations without throwing", async () => {
+    const host = new FakeHistoryHost();
+    host.configValues = { "blame.delayMs": 0 };
+    const client = makeClient(async () => ({
+      status: "error" as const,
+      schemaVersion: 1,
+      requestId: "req-1",
+      error: { code: "invalid_repository_state", message: "HEAD is unborn — the repository has no commits yet" },
+    }));
+
+    const controller = new HistoryController(host);
+    controller.activate();
+    controller.onRepositoryContextChanged(client, REPO_ROOT);
+    host.changeSelection(editorFor(`${REPO_ROOT}/a.ts`));
+
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(0);
+
+    // A blame failure — domain-level (unborn HEAD) here, client-level
+    // elsewhere — is never surfaced as a per-line error toast (it would be
+    // far too noisy on every cursor move); it silently clears decorations,
+    // exactly like the "disabled" case above.
+    expect(host.decorationCalls.at(-1)?.entries).toEqual([]);
+    expect(host.errorMessages).toEqual([]);
+  });
+
   it("never invents an author for an uncommitted line, and appends a disk-vs-buffer note for a dirty document", async () => {
     const host = new FakeHistoryHost();
     host.configValues = { "blame.delayMs": 0 };
@@ -489,6 +515,66 @@ describe("HistoryController: file history (T-207/US-074)", () => {
     expect(host.diffCalls).toHaveLength(1);
     expect(host.diffCalls[0].left).toContain("b".repeat(40));
     expect(host.diffCalls[0].right).toContain(commitHash);
+  });
+
+  it("T-255/US-122 criterion 3 (\"falha\"): a CLI-reported failure surfaces a clear error message instead of crashing or showing a bare empty list", async () => {
+    const host = new FakeHistoryHost();
+    const client = makeClient(async () => ({
+      status: "error" as const,
+      schemaVersion: 1,
+      requestId: "req-1",
+      error: { code: "internal", message: "git log failed unexpectedly" },
+    }));
+    const controller = new HistoryController(host);
+    controller.activate();
+    controller.onRepositoryContextChanged(client, REPO_ROOT);
+    host.activeTextEditor = editorFor(`${REPO_ROOT}/a.ts`);
+
+    await host.triggerCommand(COMMANDS.showFileHistory);
+
+    expect(host.errorMessages).toHaveLength(1);
+    expect(host.errorMessages[0]).toContain("git log failed unexpectedly");
+  });
+
+  it("T-255/US-122 criterion 3 (\"cancelamento\"): dismissing the quick pick (Escape) after real history items are shown does nothing — no diff opens, nothing throws", async () => {
+    const host = new FakeHistoryHost();
+    const commitHash = "a".repeat(40);
+    const client = makeClient(async (args) => {
+      if (args[0] === "log") {
+        return envelope({
+          items: [
+            {
+              hash: commitHash,
+              shortHash: "aaaaaaaa",
+              parents: [],
+              author: { name: "Ada", email: "a@x.com" },
+              committer: { name: "Ada", email: "a@x.com" },
+              authorDate: { secondsSinceEpoch: 0, utcOffsetMinutes: 0 },
+              commitDate: { secondsSinceEpoch: 0, utcOffsetMinutes: 0 },
+              subject: "subject",
+              body: "",
+              decorations: [],
+              isMerge: false,
+              isRoot: false,
+            },
+          ],
+          hasMore: false,
+        });
+      }
+      return envelope({});
+    });
+    const controller = new HistoryController(host);
+    controller.activate();
+    controller.onRepositoryContextChanged(client, REPO_ROOT);
+    host.activeTextEditor = editorFor(`${REPO_ROOT}/a.ts`);
+    // A real, non-empty pick list this time (unlike the "no history" test
+    // above) — the user presses Escape without choosing anything.
+    host.showQuickPick = async () => undefined;
+
+    await expect(host.triggerCommand(COMMANDS.showFileHistory)).resolves.not.toThrow();
+
+    expect(host.diffCalls).toEqual([]);
+    expect(host.errorMessages).toEqual([]);
   });
 });
 

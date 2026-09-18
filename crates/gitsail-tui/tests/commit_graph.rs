@@ -254,3 +254,34 @@ fn appending_a_second_page_resolves_the_first_pages_continuation_and_preserves_i
         "commit metadata must stay index-aligned with the graph rows across pages"
     );
 }
+
+/// T-255/US-122 criterion 3 ("conteúdo malicioso"): `tests/status_and_diff.rs`
+/// already covers a raw escape byte in a *file name*, but nothing exercised
+/// a hostile *commit subject* reaching the Graph panel — repository content
+/// an attacker fully controls (unlike a file name, a commit subject never
+/// needs to be a valid path, so nothing about creating one is unusual). A
+/// terminal control byte in a commit message is plain UTF-8 (unlike a raw
+/// non-UTF-8 file name), so this can go through `support::git` directly.
+#[test]
+fn a_malicious_commit_subject_is_sanitized_before_rendering_in_the_graph_panel() {
+    let dir = TempDir::new("graph-malicious-subject");
+    init_repo_with_initial_commit(dir.path());
+    std::fs::write(dir.path().join("a.txt"), "content\n").unwrap();
+    git(dir.path(), &["add", "a.txt"]);
+    let malicious_subject = "evil\u{1b}[31mred\u{7}alert subject";
+    git(dir.path(), &["commit", "--quiet", "-m", malicious_subject]);
+
+    let (mut app, _commands) = App::new(dir.path().to_path_buf(), read_port(), false);
+    let graph_command = open_and_capture_graph_command(&mut app, dir.path());
+    run_graph_command(&mut app, graph_command);
+
+    let text = render(&app);
+    assert!(
+        !text.contains('\u{1b}') && !text.contains('\u{7}'),
+        "a raw escape/bell byte from a repository-controlled commit subject must never reach the terminal:\n{text:?}"
+    );
+    assert!(
+        text.contains("red") && text.contains("alert subject"),
+        "the rest of the (sanitized) commit subject must still be visible:\n{text}"
+    );
+}

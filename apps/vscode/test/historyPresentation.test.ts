@@ -59,6 +59,37 @@ describe("buildFileHistoryQuickPickItems (US-074 criteria 1 and 3)", () => {
     });
     expect(buildFileHistoryQuickPickItems(outcome)[0].label).not.toContain("Longer explanation");
   });
+
+  it("T-255/US-122 criterion 3 (\"conteúdo malicioso\"): a hostile commit subject (control characters, an embedded carriage return, VS Code codicon-like syntax, an extremely long run of text) never throws and is never silently dropped — no sanitization happens at this layer (VS Code's own QuickPick renders labels as plain text, not Markdown/HTML)", () => {
+    const hostile = `evil[31mred $(trash) \r trailing ${"x".repeat(5000)}`;
+    const outcome = describeFileHistoryOutcome({
+      items: [commit({ subject: hostile, hash: "b".repeat(40), shortHash: "bbbbbbbb" })],
+      hasMore: false,
+    });
+
+    const items = buildFileHistoryQuickPickItems(outcome);
+
+    expect(items).toHaveLength(1);
+    expect(items[0].id).toBe("b".repeat(40));
+    // No `\n` is present, so `firstLineOf` is a no-op here — the full
+    // hostile string is carried through verbatim, never truncated,
+    // dropped, or replaced with a placeholder.
+    expect(items[0].label).toContain(hostile);
+  });
+
+  it("truncates a multi-line commit subject to its first line even when the rest is itself an attempt to spoof additional rows", () => {
+    const spoofedRows = "Real change\naaaaaaaa  Fake later commit\nbbbbbbbb  Another fake row";
+    const outcome = describeFileHistoryOutcome({
+      items: [commit({ subject: spoofedRows })],
+      hasMore: false,
+    });
+
+    const label = buildFileHistoryQuickPickItems(outcome)[0].label;
+
+    expect(label).toContain("Real change");
+    expect(label).not.toContain("Fake later commit");
+    expect(label).not.toContain("Another fake row");
+  });
 });
 
 describe("buildLineHistoryQuickPickItems (US-075 criterion 2)", () => {

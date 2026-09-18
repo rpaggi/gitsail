@@ -297,4 +297,44 @@ describe("repository session store", () => {
       expect(merge.inProgressOperation.kind).toBe("merge");
     },
   );
+
+  // -- T-255/US-122 criterion 3: empty repository --------------------------
+
+  it(
+    "opening a freshly initialized repository with no commits yet reaches an unborn/clean " +
+      "state without being treated as an error",
+    async () => {
+      mockIPC((cmd) => {
+        if (cmd === "open_repository")
+          return {
+            id: "/empty-repo",
+            rootPath: "/empty-repo",
+            worktreePath: "/empty-repo",
+            isBare: false,
+            headState: { state: "unborn" },
+            currentBranch: null,
+          } satisfies RepositoryDto;
+        if (cmd === "get_repository_status")
+          return {
+            branch: null,
+            headState: { state: "unborn" },
+            files: [],
+            isClean: true,
+          } satisfies RepositoryStatusDto;
+        if (cmd === "detect_in_progress_operation") return { kind: "none" } satisfies InProgressOperationDto;
+        throw new Error(`unexpected command ${cmd}`);
+      });
+
+      const store = useRepositorySessionStore();
+      const result = await store.openRepository("/empty-repo");
+
+      expect(result).toEqual({ status: "opened" });
+      expect(store.repository?.headState).toEqual({ state: "unborn" });
+      expect(store.repository?.currentBranch).toBeNull();
+      expect(store.status?.headState).toEqual({ state: "unborn" });
+      expect(store.status?.isClean).toBe(true);
+      expect(store.status?.files).toEqual([]);
+      expect(store.lastError).toBeNull();
+    },
+  );
 });
