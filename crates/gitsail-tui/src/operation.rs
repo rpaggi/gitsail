@@ -26,6 +26,7 @@
 //! `gitsail_application::write_ports`' own doc comment for the same
 //! conscious scope cut).
 
+use gitsail_application::ResetMode;
 use gitsail_domain::GitSailError;
 
 /// Risk tier for a mutating operation (SAD §20).
@@ -104,6 +105,28 @@ pub enum OperationKind {
     /// `rebase_plan` field, not here, exactly like `ApplyPatch`'s patch text
     /// lives in `pending_patch_text`.
     ExecuteRebasePlan { onto: String, commit_count: usize },
+    /// T-238/US-086: `RepositoryWritePort::cherry_pick`. `is_merge` records
+    /// whether the target commit is a merge commit — when `true`, this
+    /// workspace's fixed first-parent policy applies (see
+    /// `gitsail_application::MergeParentPolicy`), and the confirmation
+    /// prompt names that explicitly rather than leaving it implicit (US-086
+    /// criterion 2: never silently guessed).
+    CherryPick { commit: String, is_merge: bool },
+    /// T-239/US-087: `RepositoryWritePort::revert`. Mirrors
+    /// [`Self::CherryPick`] exactly.
+    Revert { commit: String, is_merge: bool },
+    /// T-240/US-088: `RepositoryWritePort::reset`. Carries the target,
+    /// exact mode, the `HEAD` this was confirmed against (revalidated
+    /// immediately before the reset actually runs — US-088 criterion 3),
+    /// and — always computed, but only ever shown for `Hard` — the concrete
+    /// count of uncommitted changes that would be permanently discarded
+    /// (US-088 criterion 2: never a generic warning).
+    Reset {
+        target: String,
+        mode: ResetMode,
+        expected_head: String,
+        predicted_loss_files: usize,
+    },
 }
 
 impl OperationKind {
@@ -172,6 +195,23 @@ impl OperationKind {
             // `OperationKind::Rebase`'s own rationale, which applies
             // identically here.
             OperationKind::ExecuteRebasePlan { .. } => OperationRisk::Moderate,
+            // Mirrors `gitsail_application::MutationKind::CherryPick`/
+            // `Revert`: a confirmed, deliberate mutation whose conflict/
+            // empty outcomes are never silently lost work either (both land
+            // in a distinct, recoverable outcome, exactly like `Merge`/
+            // `Rebase`).
+            OperationKind::CherryPick { .. } => OperationRisk::Moderate,
+            OperationKind::Revert { .. } => OperationRisk::Moderate,
+            // Mirrors `gitsail_application::MutationKind::Reset`'s own
+            // classification exactly: `Soft`/`Mixed` only ever move
+            // `HEAD`/the index (working tree always preserved), while
+            // `Hard` additionally discards the working tree's own
+            // uncommitted changes outright — SAD §20's own named
+            // `Destructive` example ("reset --hard").
+            OperationKind::Reset { mode, .. } => match mode {
+                ResetMode::Soft | ResetMode::Mixed => OperationRisk::Moderate,
+                ResetMode::Hard => OperationRisk::Destructive,
+            },
         }
     }
 
@@ -212,6 +252,37 @@ impl OperationKind {
                 "rebasing {commit_count} commit{} onto '{onto}' (interactive plan)",
                 if *commit_count == 1 { "" } else { "s" }
             ),
+            OperationKind::CherryPick { commit, is_merge } => {
+                if *is_merge {
+                    format!("cherry-picking merge commit '{commit}' (using its first parent)")
+                } else {
+                    format!("cherry-picking commit '{commit}' onto the current branch")
+                }
+            }
+            OperationKind::Revert { commit, is_merge } => {
+                if *is_merge {
+                    format!("reverting merge commit '{commit}' (using its first parent)")
+                } else {
+                    format!("reverting commit '{commit}'")
+                }
+            }
+            OperationKind::Reset {
+                target,
+                mode,
+                predicted_loss_files,
+                ..
+            } => match mode {
+                ResetMode::Soft => format!(
+                    "resetting to '{target}' (soft — HEAD moves; index and working tree are preserved, becoming staged changes)"
+                ),
+                ResetMode::Mixed => format!(
+                    "resetting to '{target}' (mixed — HEAD and index move; working tree is preserved, becoming unstaged changes)"
+                ),
+                ResetMode::Hard => format!(
+                    "resetting to '{target}' (HARD — HEAD, index and working tree all move; {predicted_loss_files} uncommitted change{} will be permanently discarded)",
+                    if *predicted_loss_files == 1 { "" } else { "s" }
+                ),
+            },
         }
     }
 }
@@ -425,6 +496,70 @@ mod tests {
             commit_count: 3,
         };
         assert!(plural.target_label().contains("3 commits"));
+    }
+
+    /// T-238/T-239: `CherryPick`/`Revert` classify `Moderate`, and their
+    /// labels name the exact commit and, for a merge commit, the first-
+    /// parent policy explicitly rather than leaving it implicit.
+    #[test]
+    fn cherry_pick_and_revert_classify_moderate_and_name_merge_policy_explicitly() {
+        let cherry_pick = OperationKind::CherryPick {
+            commit: "abc1234".into(),
+            is_merge: false,
+        };
+        assert_eq!(cherry_pick.risk(), OperationRisk::Moderate);
+        assert!(cherry_pick.target_label().contains("abc1234"));
+        assert!(!cherry_pick.target_label().contains("first parent"));
+
+        let cherry_pick_merge = OperationKind::CherryPick {
+            commit: "def5678".into(),
+            is_merge: true,
+        };
+        assert!(cherry_pick_merge.target_label().contains("first parent"));
+
+        let revert = OperationKind::Revert {
+            commit: "abc1234".into(),
+            is_merge: false,
+        };
+        assert_eq!(revert.risk(), OperationRisk::Moderate);
+        assert!(revert.target_label().contains("abc1234"));
+    }
+
+    /// T-240/US-088: `Reset` classifies `Moderate` for soft/mixed and
+    /// `Destructive` for hard, and only the hard label names the concrete
+    /// predicted loss (never a generic warning).
+    #[test]
+    fn reset_classifies_per_mode_and_only_hard_names_the_predicted_loss() {
+        let soft = OperationKind::Reset {
+            target: "HEAD~1".into(),
+            mode: ResetMode::Soft,
+            expected_head: "deadbeef".into(),
+            predicted_loss_files: 0,
+        };
+        assert_eq!(soft.risk(), OperationRisk::Moderate);
+        assert!(soft.target_label().contains("HEAD~1"));
+        assert!(soft.target_label().contains("staged"));
+
+        let mixed = OperationKind::Reset {
+            target: "HEAD~1".into(),
+            mode: ResetMode::Mixed,
+            expected_head: "deadbeef".into(),
+            predicted_loss_files: 0,
+        };
+        assert_eq!(mixed.risk(), OperationRisk::Moderate);
+        assert!(mixed.target_label().contains("unstaged"));
+
+        let hard = OperationKind::Reset {
+            target: "HEAD~1".into(),
+            mode: ResetMode::Hard,
+            expected_head: "deadbeef".into(),
+            predicted_loss_files: 3,
+        };
+        assert_eq!(hard.risk(), OperationRisk::Destructive);
+        let label = hard.target_label();
+        assert!(label.contains("HARD"));
+        assert!(label.contains("3 uncommitted changes"));
+        assert!(label.contains("permanently discarded"));
     }
 
     #[test]

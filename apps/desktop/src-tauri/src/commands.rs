@@ -19,12 +19,13 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use gitsail_application::{
-    AbortOperation, AmendCommit, ApplyPatch, CommitQuery, ContinueOperation, CreateBranch,
-    CreateCommit, DeleteBranch, DetectInProgressOperation, DiffRequest, ExecuteRebasePlan, Fetch,
-    ForgetRecentRepository, GetCommit, GetCommitHistory, GetConflictSides, GetDiff, ListBranches,
-    ListRecentRepositories, MarkConflictResolved, Merge, OpenRepository, PlanRebase, PreviewAmend,
-    PreviewPatchApplication, Pull, Push, Rebase, RebasePlan, RecordRecentRepository, RefreshReason,
-    RenameBranch, SkipOperation, StageFiles, StageHunks, SwitchBranch, TakeConflictSide,
+    AbortOperation, AmendCommit, ApplyPatch, CherryPick, CommitQuery, ContinueOperation,
+    CreateBranch, CreateCommit, DeleteBranch, DetectInProgressOperation, DiffRequest,
+    ExecuteRebasePlan, Fetch, ForgetRecentRepository, GetCommit, GetCommitHistory,
+    GetConflictSides, GetDiff, ListBranches, ListRecentRepositories, MarkConflictResolved, Merge,
+    MergeParentPolicy, OpenRepository, PlanRebase, PreviewAmend, PreviewPatchApplication, Pull,
+    Push, Rebase, RebasePlan, RecordRecentRepository, RefreshReason, RenameBranch, Reset,
+    ResetMode, Revert, SkipOperation, StageFiles, StageHunks, SwitchBranch, TakeConflictSide,
     UnstageFiles, UnstageHunks,
 };
 use gitsail_domain::{
@@ -32,11 +33,12 @@ use gitsail_domain::{
     FileDiff, GitSailError, GraphCommit, Remote, Repository,
 };
 use gitsail_protocol::{
-    AmendPreviewDto, ApplyPatchResultDto, BranchDto, CommitDto, CommitGraphPageDto,
-    CommitGraphRowDto, CommitResultDto, ConflictSidesDto, DiffDto, ErrorPayload, FileDiffDto,
-    InProgressOperationDto, MergeResultDto, PatchExportDto, PatchPreviewDto, PullOutcomeDto,
-    PullResultDto, RebasePlanDto, RebaseResultDto, RecentRepositoryDto, RemoteDto, RepositoryDto,
-    RepositoryStatusDto, SyncTargetDto,
+    AmendPreviewDto, ApplyPatchResultDto, BranchDto, CherryPickResultDto, CommitDto,
+    CommitGraphPageDto, CommitGraphRowDto, CommitResultDto, ConflictSidesDto, DiffDto,
+    ErrorPayload, FileDiffDto, InProgressOperationDto, MergeResultDto, PatchExportDto,
+    PatchPreviewDto, PullOutcomeDto, PullResultDto, RebasePlanDto, RebaseResultDto,
+    RecentRepositoryDto, RemoteDto, RepositoryDto, RepositoryStatusDto, RevertResultDto,
+    SyncTargetDto,
 };
 
 use crate::state::{AppState, StartupIntent};
@@ -1042,6 +1044,133 @@ pub fn skip_operation(state: tauri::State<AppState>) -> Result<(), ErrorPayload>
 fn skip_operation_impl(state: &AppState) -> Result<(), GitSailError> {
     run_mutation(state, |repository| {
         SkipOperation::new(state.write_port()).execute(repository)
+    })
+}
+
+// -- EPIC-17/T-238..T-240: cherry-pick, revert, reset --------------------
+//
+// Mirrors the merge/rebase wiring above one-to-one (T-238/US-086; T-239/
+// US-087; T-240/US-088): `cherry_pick`/`revert` refuse up front when
+// another operation is already pending, and report applying/conflict/empty
+// (cherry-pick) or applying/conflict (revert) as distinct, explicit DTO
+// outcomes — never a generic success/failure. `reset` revalidates
+// `expected_head` immediately before running (US-088 criterion 3), the same
+// [`amend_commit`]'s own `expected_head` contract.
+
+/// Parses the frontend's merge-parent policy string ("firstParent", or
+/// absent) into [`MergeParentPolicy`] (T-238/US-086 criterion 2; T-239/
+/// US-087 criterion 3). `None` means "this commit is not a merge, or none
+/// was chosen" — [`RepositoryWritePort::cherry_pick`]/`revert` themselves
+/// refuse a merge commit with no policy rather than this function ever
+/// guessing one.
+fn parse_merge_parent_policy(merge_parent: Option<&str>) -> Result<Option<MergeParentPolicy>, GitSailError> {
+    match merge_parent {
+        None => Ok(None),
+        Some("firstParent") => Ok(Some(MergeParentPolicy::FirstParent)),
+        Some(other) => Err(GitSailError::new(
+            ErrorCode::InvalidRepositoryState,
+            format!("unknown merge parent policy '{other}'"),
+        )
+        .with_remediation("pass 'firstParent' or omit this field entirely")),
+    }
+}
+
+/// Applies `commit`'s change onto the current branch (T-238/US-086).
+/// `merge_parent` must be `"firstParent"` when `commit` is a merge commit
+/// (US-086 criterion 2) — omitted/`null` against a merge commit is refused
+/// by `RepositoryWritePort::cherry_pick` itself, never guessed here.
+#[tauri::command]
+pub fn cherry_pick(
+    commit: String,
+    merge_parent: Option<String>,
+    state: tauri::State<AppState>,
+) -> Result<CherryPickResultDto, ErrorPayload> {
+    cherry_pick_impl(&state, &commit, merge_parent.as_deref())
+        .map_err(|err| ErrorPayload::from(&err))
+}
+
+fn cherry_pick_impl(
+    state: &AppState,
+    commit: &str,
+    merge_parent: Option<&str>,
+) -> Result<CherryPickResultDto, GitSailError> {
+    let commit = CommitHash::new(commit)?;
+    let policy = parse_merge_parent_policy(merge_parent)?;
+    let result = run_mutation(state, |repository| {
+        CherryPick::new(state.write_port()).execute(repository, &commit, policy)
+    })?;
+    Ok(CherryPickResultDto::from(&result))
+}
+
+/// Creates a new commit undoing `commit`'s change (T-239/US-087) — never
+/// rewrites or moves any existing reference (History Editing Rules #8).
+/// `merge_parent` mirrors [`cherry_pick`]'s own contract for a merge commit.
+#[tauri::command]
+pub fn revert(
+    commit: String,
+    merge_parent: Option<String>,
+    state: tauri::State<AppState>,
+) -> Result<RevertResultDto, ErrorPayload> {
+    revert_impl(&state, &commit, merge_parent.as_deref()).map_err(|err| ErrorPayload::from(&err))
+}
+
+fn revert_impl(
+    state: &AppState,
+    commit: &str,
+    merge_parent: Option<&str>,
+) -> Result<RevertResultDto, GitSailError> {
+    let commit = CommitHash::new(commit)?;
+    let policy = parse_merge_parent_policy(merge_parent)?;
+    let result = run_mutation(state, |repository| {
+        Revert::new(state.write_port()).execute(repository, &commit, policy)
+    })?;
+    Ok(RevertResultDto::from(&result))
+}
+
+/// Parses the frontend's reset-mode string into [`ResetMode`] (T-240/
+/// US-088 criterion 1).
+fn parse_reset_mode(mode: &str) -> Result<ResetMode, GitSailError> {
+    match mode {
+        "soft" => Ok(ResetMode::Soft),
+        "mixed" => Ok(ResetMode::Mixed),
+        "hard" => Ok(ResetMode::Hard),
+        other => Err(GitSailError::new(
+            ErrorCode::InvalidRepositoryState,
+            format!("unknown reset mode '{other}'"),
+        )
+        .with_remediation("pass exactly 'soft', 'mixed', or 'hard'")),
+    }
+}
+
+/// Moves `HEAD` (and, per `mode`, the index/working tree) to
+/// `target_revision` (T-240/US-088). `expected_head` must be the exact hash
+/// the frontend last observed as `HEAD` when the reset was previewed/
+/// confirmed — `RepositoryWritePort::reset` revalidates it is still `HEAD`
+/// immediately before resetting and refuses with a classified
+/// `OperationConflict` otherwise (US-088 criterion 3), mirroring
+/// [`amend_commit`]'s own `expected_head` contract exactly. A concurrent
+/// repository switch is additionally caught by [`run_mutation`]'s own
+/// epoch guard.
+#[tauri::command]
+pub fn reset(
+    target_revision: String,
+    mode: String,
+    expected_head: String,
+    state: tauri::State<AppState>,
+) -> Result<(), ErrorPayload> {
+    reset_impl(&state, &target_revision, &mode, &expected_head).map_err(|err| ErrorPayload::from(&err))
+}
+
+fn reset_impl(
+    state: &AppState,
+    target_revision: &str,
+    mode: &str,
+    expected_head: &str,
+) -> Result<(), GitSailError> {
+    let mode = parse_reset_mode(mode)?;
+    let expected_head = CommitHash::new(expected_head)?;
+    run_mutation(state, |repository| {
+        Reset::new(state.write_port()).execute(repository, target_revision, mode, &expected_head)
     })
 }
 
@@ -3577,6 +3706,129 @@ mod tests {
             assert!(err
                 .to_string()
                 .contains("now resolves to a different commit"));
+        }
+
+        // -- EPIC-17/T-238..T-240: cherry-pick, revert, reset ------------
+
+        #[test]
+        fn cherry_pick_applies_a_commit_via_the_command() {
+            let dir = init_repo("cherry-pick-apply");
+            std::fs::write(dir.path().join("base.txt"), "base\n").unwrap();
+            git(dir.path(), &["add", "-A"]);
+            git(dir.path(), &["commit", "--quiet", "-m", "base"]);
+            git(dir.path(), &["checkout", "-q", "-b", "feature"]);
+            std::fs::write(dir.path().join("feature.txt"), "feature\n").unwrap();
+            git(dir.path(), &["add", "-A"]);
+            git(dir.path(), &["commit", "--quiet", "-m", "feature change"]);
+            let feature_commit = head(dir.path());
+            git(dir.path(), &["checkout", "-q", "main"]);
+
+            let state = real_app_state();
+            open_repository_impl(&state, dir.path().to_str().unwrap()).unwrap();
+
+            let result = cherry_pick_impl(&state, &feature_commit, None).unwrap();
+
+            match result {
+                CherryPickResultDto::Applied { hash } => assert_eq!(hash, head(dir.path())),
+                other => panic!("expected Applied, got {other:?}"),
+            }
+            assert!(dir.path().join("feature.txt").exists());
+        }
+
+        #[test]
+        fn cherry_pick_reports_a_conflict_and_refuses_a_merge_commit_without_a_policy() {
+            let dir = init_repo("cherry-pick-conflict");
+            setup_conflicting_divergence(dir.path());
+
+            let state = real_app_state();
+            open_repository_impl(&state, dir.path().to_str().unwrap()).unwrap();
+            let feature_commit = {
+                let output = ProcessCommand::new("git")
+                    .args(["rev-parse", "feature"])
+                    .current_dir(dir.path())
+                    .output()
+                    .unwrap();
+                String::from_utf8(output.stdout).unwrap().trim().to_string()
+            };
+
+            let result = cherry_pick_impl(&state, &feature_commit, None).unwrap();
+            assert!(matches!(result, CherryPickResultDto::Conflict { .. }));
+            assert!(matches!(
+                detect_in_progress_operation_impl(&state).unwrap(),
+                InProgressOperationDto::CherryPick { .. }
+            ));
+            abort_operation_impl(&state).unwrap();
+
+            // A merge commit requires an explicit policy — this bare-string
+            // command boundary refuses an unrecognized one just as clearly
+            // as a missing one refuses a merge commit at the Core layer.
+            let err = cherry_pick_impl(&state, &feature_commit, Some("bogus")).unwrap_err();
+            assert_eq!(err.code(), ErrorCode::InvalidRepositoryState);
+        }
+
+        #[test]
+        fn revert_creates_a_new_commit_undoing_the_change() {
+            let dir = init_repo("revert-apply");
+            std::fs::write(dir.path().join("f.txt"), "line1\n").unwrap();
+            git(dir.path(), &["add", "-A"]);
+            git(dir.path(), &["commit", "--quiet", "-m", "base"]);
+            std::fs::write(dir.path().join("f.txt"), "line1\nline2\n").unwrap();
+            git(dir.path(), &["add", "-A"]);
+            git(dir.path(), &["commit", "--quiet", "-m", "add line2"]);
+            let added = head(dir.path());
+
+            let state = real_app_state();
+            open_repository_impl(&state, dir.path().to_str().unwrap()).unwrap();
+
+            let result = revert_impl(&state, &added, None).unwrap();
+
+            match result {
+                RevertResultDto::Applied { hash } => {
+                    assert_eq!(hash, head(dir.path()));
+                    assert_ne!(hash, added);
+                }
+                other => panic!("expected Applied, got {other:?}"),
+            }
+            assert_eq!(
+                std::fs::read_to_string(dir.path().join("f.txt")).unwrap(),
+                "line1\n"
+            );
+        }
+
+        #[test]
+        fn reset_hard_moves_head_index_and_working_tree_and_refuses_a_stale_expected_head() {
+            let dir = init_repo("reset-hard");
+            std::fs::write(dir.path().join("f.txt"), "a\n").unwrap();
+            git(dir.path(), &["add", "-A"]);
+            git(dir.path(), &["commit", "--quiet", "-m", "c1"]);
+            let c1 = head(dir.path());
+            std::fs::write(dir.path().join("f.txt"), "a\nb\n").unwrap();
+            git(dir.path(), &["add", "-A"]);
+            git(dir.path(), &["commit", "--quiet", "-m", "c2"]);
+            let c2 = head(dir.path());
+
+            let state = real_app_state();
+            open_repository_impl(&state, dir.path().to_str().unwrap()).unwrap();
+
+            // A stale `expected_head` (not real `HEAD`, `c1`) is refused
+            // before anything runs.
+            let err = reset_impl(&state, &c1, "hard", &c1).unwrap_err();
+            assert_eq!(err.code(), ErrorCode::OperationConflict);
+            assert_eq!(head(dir.path()), c2, "a refused reset must not move HEAD");
+
+            reset_impl(&state, &c1, "hard", &c2).unwrap();
+
+            assert_eq!(head(dir.path()), c1);
+            assert_eq!(
+                std::fs::read_to_string(dir.path().join("f.txt")).unwrap(),
+                "a\n"
+            );
+            let status = ProcessCommand::new("git")
+                .args(["status", "--porcelain"])
+                .current_dir(dir.path())
+                .output()
+                .unwrap();
+            assert!(String::from_utf8(status.stdout).unwrap().trim().is_empty());
         }
     }
 }

@@ -217,6 +217,26 @@ pub enum MutationKind {
         onto: String,
         commit_count: usize,
     },
+    /// EPIC-17/T-238 (US-086): `RepositoryWritePort::cherry_pick`. Carries
+    /// the commit's short hash so a confirmation prompt names it explicitly,
+    /// never a generic "cherry-pick a commit".
+    CherryPick {
+        commit: String,
+    },
+    /// EPIC-17/T-239 (US-087): `RepositoryWritePort::revert`. Carries the
+    /// commit's short hash, mirroring [`Self::CherryPick`]'s own rationale.
+    Revert {
+        commit: String,
+    },
+    /// EPIC-17/T-240 (US-088): `RepositoryWritePort::reset`. Carries the
+    /// target revision and the exact mode so a confirmation prompt always
+    /// names both (US-088 criterion 1) — see
+    /// [`crate::write_ports::ResetMode`] for what each mode does to
+    /// `HEAD`/the index/the working tree.
+    Reset {
+        target: String,
+        mode: crate::write_ports::ResetMode,
+    },
 }
 
 impl MutationKind {
@@ -384,6 +404,35 @@ impl MutationKind {
             // identically here (same recoverability via continue/skip/abort
             // mid-flight, and via `ORIG_HEAD`/reflog once finished).
             MutationKind::ExecuteRebasePlan { .. } => RiskLevel::Moderate,
+            // A cherry-pick applies one already-reviewed commit's change as
+            // a brand-new commit on the current branch — the same
+            // "mutates, but a confirmed, non-conflicting result is the
+            // ordinary, expected case" character `Merge`/`Rebase` already
+            // have (T-238/US-086 task scope note). A conflict or an "already
+            // applied" result is never silently lost work either — both
+            // land in a distinct `CherryPickResult` variant, fully
+            // recoverable via continue/skip/abort.
+            MutationKind::CherryPick { .. } => RiskLevel::Moderate,
+            // Mirrors `CherryPick` exactly (T-239/US-087 task scope note): a
+            // revert only ever adds a new commit undoing another one's
+            // change, never rewrites or moves an existing reference
+            // (History Editing Rules #8), so it carries the same
+            // "confirmed, deliberate, recoverable" character.
+            MutationKind::Revert { .. } => RiskLevel::Moderate,
+            // T-240/US-088's own explicit classification: `Soft`/`Mixed`
+            // only ever move `HEAD` (and, for `Mixed`, the index) — the
+            // working tree is always preserved, and whatever moved is still
+            // fully recoverable as staged/unstaged changes, the same
+            // character `SwitchBranch`/`CreateCommit` already have. `Hard`
+            // additionally overwrites the working tree to match the target
+            // exactly, discarding any uncommitted change outright — SAD
+            // §20's own named `Destructive` example ("reset --hard").
+            MutationKind::Reset { mode, .. } => match mode {
+                crate::write_ports::ResetMode::Soft | crate::write_ports::ResetMode::Mixed => {
+                    RiskLevel::Moderate
+                }
+                crate::write_ports::ResetMode::Hard => RiskLevel::Destructive,
+            },
         }
     }
 
@@ -448,6 +497,13 @@ impl MutationKind {
                 "rebasing {commit_count} commit{} onto '{onto}'",
                 if *commit_count == 1 { "" } else { "s" }
             ),
+            MutationKind::CherryPick { commit } => {
+                format!("cherry-picking commit '{commit}' onto the current branch")
+            }
+            MutationKind::Revert { commit } => format!("reverting commit '{commit}'"),
+            MutationKind::Reset { target, mode } => {
+                format!("resetting to '{target}' ({mode} reset)")
+            }
         }
     }
 }
@@ -829,6 +885,50 @@ mod tests {
 
         let err = result.expect_err("a stale precondition must never authorize execution");
         assert_eq!(err.code(), ErrorCode::OperationConflict);
+    }
+
+    /// T-238/T-239/T-240: `CherryPick`/`Revert` classify `Moderate`,
+    /// `Reset`'s soft/mixed classify `Moderate` while hard classifies
+    /// `Destructive` (SAD §20's own named "reset --hard" example), and every
+    /// label names the exact commit/target/mode rather than a generic
+    /// "cherry-pick"/"revert"/"reset".
+    #[test]
+    fn cherry_pick_revert_and_reset_classify_per_sad_section_20() {
+        let cherry_pick = MutationKind::CherryPick {
+            commit: "abc1234".into(),
+        };
+        assert_eq!(cherry_pick.risk(), RiskLevel::Moderate);
+        assert!(!cherry_pick.risk().requires_reinforced_confirmation());
+        assert!(cherry_pick.target_label().contains("abc1234"));
+
+        let revert = MutationKind::Revert {
+            commit: "def5678".into(),
+        };
+        assert_eq!(revert.risk(), RiskLevel::Moderate);
+        assert!(revert.target_label().contains("def5678"));
+
+        let soft = MutationKind::Reset {
+            target: "HEAD~1".into(),
+            mode: crate::write_ports::ResetMode::Soft,
+        };
+        assert_eq!(soft.risk(), RiskLevel::Moderate);
+        assert!(!soft.risk().requires_reinforced_confirmation());
+        assert!(soft.target_label().contains("HEAD~1"));
+        assert!(soft.target_label().contains("soft"));
+
+        let mixed = MutationKind::Reset {
+            target: "HEAD~1".into(),
+            mode: crate::write_ports::ResetMode::Mixed,
+        };
+        assert_eq!(mixed.risk(), RiskLevel::Moderate);
+
+        let hard = MutationKind::Reset {
+            target: "HEAD~1".into(),
+            mode: crate::write_ports::ResetMode::Hard,
+        };
+        assert_eq!(hard.risk(), RiskLevel::Destructive);
+        assert!(hard.risk().requires_reinforced_confirmation());
+        assert!(hard.target_label().contains("hard"));
     }
 
     #[test]

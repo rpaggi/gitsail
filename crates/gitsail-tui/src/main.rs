@@ -185,6 +185,8 @@ fn run(
                 app.on_rebase_plan_loaded(result);
                 Vec::new()
             }
+            Message::CherryPickFinished(result) => app.on_cherry_pick_finished(result),
+            Message::RevertFinished(result) => app.on_revert_finished(result),
         };
         worker::dispatch(commands, &read_port, &write_port, &tx);
 

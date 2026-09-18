@@ -16,9 +16,9 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use gitsail_application::{
-    export_patch, ApplyPatchResult, BlameRequest, CommitQuery, DiffRequest, MergeResult, Page,
-    PatchPreview, PullOutcome, RebaseAction, RebasePlan, RebaseResult, RefreshReason,
-    RepositoryReadPort, RepositorySession,
+    export_patch, ApplyPatchResult, BlameRequest, CherryPickResult, CommitQuery, DiffRequest,
+    MergeParentPolicy, MergeResult, Page, PatchPreview, PullOutcome, RebaseAction, RebasePlan,
+    RebaseResult, RefreshReason, RepositoryReadPort, RepositorySession, ResetMode, RevertResult,
 };
 use gitsail_domain::{
     Blame, Branch, BranchKind, BranchName, Commit, CommitGraph, CommitHash, ConflictSide,
@@ -415,6 +415,34 @@ pub struct App {
     /// and a stale-plan refusal from the Core still surfaces through the
     /// ordinary `OperationState::Failed` path, never through this field.
     rebase_plan_error: Option<GitSailError>,
+
+    // -- T-238/T-239/US-086/US-087: cherry-pick, revert -------------------
+    /// The outcome of the last successful [`Action::RequestCherryPick`]
+    /// (T-238/US-086 criterion 3: applying, a conflict, and an empty
+    /// "already applied" result are always three distinct, explicit
+    /// outcomes) — mirrors [`Self::last_merge_result`]'s own "transient
+    /// banner" convention.
+    last_cherry_pick_result: Option<CherryPickResult>,
+    /// The outcome of the last successful [`Action::RequestRevert`] (T-239/
+    /// US-087 criterion 2), mirroring [`Self::last_cherry_pick_result`].
+    last_revert_result: Option<RevertResult>,
+
+    // -- T-240/US-088: reset -----------------------------------------------
+    /// Whether the reset-mode chooser overlay (`z`, Graph panel only) is
+    /// open — lets a person pick soft/mixed/hard before anything is
+    /// confirmed (US-088 criterion 1: each mode's distinct effect is shown
+    /// up front). Mirrors [`Self::rebase_plan_open`]'s own "stays open
+    /// through confirmation" convention.
+    reset_mode_open: bool,
+    /// Which [`ResetMode`] is highlighted in the chooser, as an index into
+    /// `[Soft, Mixed, Hard]` (in that fixed order — least to most
+    /// destructive).
+    reset_mode_cursor: usize,
+    /// The commit the chooser was opened against (the Graph panel's
+    /// highlighted commit at the moment `z` was pressed) — captured once so
+    /// the target stays stable while the chooser is open, even if the Graph
+    /// cursor itself moves under an unrelated key.
+    reset_target: Option<Commit>,
 }
 
 impl App {
@@ -515,6 +543,11 @@ impl App {
             rebase_plan_cursor: 0,
             rebase_plan_reword_input: None,
             rebase_plan_error: None,
+            last_cherry_pick_result: None,
+            last_revert_result: None,
+            reset_mode_open: false,
+            reset_mode_cursor: 0,
+            reset_target: None,
         };
         (app, vec![Command::OpenRepository(repo_path)])
     }
@@ -586,6 +619,43 @@ impl App {
 
     pub fn last_rebase_result(&self) -> Option<&RebaseResult> {
         self.last_rebase_result.as_ref()
+    }
+
+    pub fn last_cherry_pick_result(&self) -> Option<&CherryPickResult> {
+        self.last_cherry_pick_result.as_ref()
+    }
+
+    pub fn last_revert_result(&self) -> Option<&RevertResult> {
+        self.last_revert_result.as_ref()
+    }
+
+    /// Whether the reset-mode chooser overlay (`z`, T-240/US-088) is open.
+    pub fn reset_mode_open(&self) -> bool {
+        self.reset_mode_open
+    }
+
+    /// The chooser's highlighted mode, as an index into `[Soft, Mixed,
+    /// Hard]`.
+    pub fn reset_mode_cursor(&self) -> usize {
+        self.reset_mode_cursor
+    }
+
+    /// The commit the reset-mode chooser was opened against.
+    pub fn reset_target(&self) -> Option<&Commit> {
+        self.reset_target.as_ref()
+    }
+
+    /// The concrete count of uncommitted changes a `Hard` reset would
+    /// permanently discard right now (US-088 criterion 2) — every currently
+    /// staged or unstaged change, from the same already-loaded status this
+    /// crate's status/diff panels already show, never a second read and
+    /// never a generic "some changes" estimate. Shown live in the
+    /// reset-mode chooser (before any mode is even picked) and carried
+    /// verbatim into [`crate::operation::OperationKind::Reset`] the moment
+    /// `Hard` is confirmed, so the confirmation prompt's number is always
+    /// exactly what the chooser already showed.
+    pub fn predicted_reset_loss_file_count(&self) -> usize {
+        self.status_entries().len()
     }
 
     /// Whether the interactive rebase plan overlay (`O`, T-236/US-084) is
@@ -889,6 +959,13 @@ impl App {
             // must reach `Self::handle_activate`'s intercept, not this
             // context's own (unrelated) `Enter` meaning.
             InputContext::RebasePlan
+        } else if self.reset_mode_open && self.operation.is_idle() {
+            // Falls through to `Normal` while a `Reset` confirmation is in
+            // flight, mirroring `RebasePlan`/`Conflicts`/`CommitMessage`
+            // above: the second `Enter` that confirms it must reach
+            // `Self::handle_activate`'s intercept, not this context's own
+            // (unrelated) `Enter` meaning.
+            InputContext::ResetMode
         } else if self.commit_message.is_some() && self.operation.is_idle() {
             InputContext::CommitMessage
         } else if self.branch_input.is_some() && self.rename_source.is_some() {
@@ -1100,6 +1177,18 @@ impl App {
                 }
                 Vec::new()
             }
+            Action::RequestCherryPick => {
+                self.request_cherry_pick();
+                Vec::new()
+            }
+            Action::RequestRevert => {
+                self.request_revert();
+                Vec::new()
+            }
+            Action::RequestReset => {
+                self.request_reset();
+                Vec::new()
+            }
         }
     }
 
@@ -1129,6 +1218,10 @@ impl App {
                 self.rebase_plan_cursor =
                     Self::cyclic_cursor(self.rebase_plan_cursor, delta, plan.entries.len());
             }
+            return Vec::new();
+        }
+        if self.reset_mode_open {
+            self.reset_mode_cursor = Self::cyclic_cursor(self.reset_mode_cursor, delta, 3);
             return Vec::new();
         }
         match self.focus {
@@ -1296,6 +1389,10 @@ impl App {
         }
         if self.input_context() == InputContext::RebasePlan {
             self.confirm_rebase_plan();
+            return Vec::new();
+        }
+        if self.input_context() == InputContext::ResetMode {
+            self.confirm_reset_mode();
             return Vec::new();
         }
         if let OperationState::Confirming(kind) = &self.operation {
@@ -1525,6 +1622,12 @@ impl App {
             self.rebase_plan = None;
             self.rebase_plan_cursor = 0;
             self.rebase_plan_error = None;
+        } else if self.reset_mode_open && self.operation.is_idle() {
+            // Same guard/rationale as `rebase_plan_open` above: a
+            // confirmation already in flight is left alone here.
+            self.reset_mode_open = false;
+            self.reset_mode_cursor = 0;
+            self.reset_target = None;
         } else if self.branch_input.is_some() {
             self.branch_input = None;
             self.rename_source = None;
@@ -1873,6 +1976,121 @@ impl App {
         self.rebase_plan_error = None;
         let repo = session.repository().clone();
         vec![Command::PlanRebase(repo, branch.name.as_str().to_string())]
+    }
+
+    /// The commit `HEAD` currently resolves to, derived from already-loaded
+    /// state rather than a fresh read: [`Self::session`]'s own
+    /// `status().head_state` names either the attached branch (whose tip is
+    /// already loaded in [`Self::branches`]) or a detached commit directly.
+    /// `None` only for an unborn `HEAD` (no commits yet) or before the
+    /// first status/branches load completes. Used as the `expected_head`
+    /// [`gitsail_application::write_ports::Precondition`]
+    /// [`Self::confirm_reset_mode`] captures — the same commit a hard
+    /// reset's reinforced confirmation names as "current HEAD" is exactly
+    /// what gets revalidated immediately before the reset actually runs
+    /// (US-088 criterion 3).
+    fn current_head_hash(&self) -> Option<CommitHash> {
+        let status = self.session.as_ref()?.status()?;
+        match &status.head_state {
+            HeadState::Attached { branch } => self
+                .branches
+                .iter()
+                .find(|b| b.kind == BranchKind::Local && &b.name == branch)
+                .map(|b| b.target.clone()),
+            HeadState::Detached { commit } => Some(commit.clone()),
+            HeadState::Unborn => None,
+        }
+    }
+
+    /// Starts confirmation for cherry-picking the highlighted Graph commit
+    /// onto the current branch (`x`, Graph panel only; T-238/US-086
+    /// criterion 1: the exact commit and the current branch as destination
+    /// are both named by the resulting confirmation prompt before anything
+    /// runs). A merge commit is always cherry-picked against its first
+    /// parent (the same first-parent convention this workspace's diff/graph
+    /// already use for a merge commit) — the confirmation prompt names this
+    /// explicitly rather than leaving it implicit (see
+    /// [`crate::operation::OperationKind::CherryPick`]'s own `is_merge`
+    /// field).
+    fn request_cherry_pick(&mut self) {
+        if self.focus != Panel::Graph {
+            return;
+        }
+        let Some(commit) = self.selected_graph_commit().cloned() else {
+            return;
+        };
+        self.last_cherry_pick_result = None;
+        self.operation.begin(OperationKind::CherryPick {
+            commit: commit.hash.as_str().to_string(),
+            is_merge: commit.is_merge(),
+        });
+    }
+
+    /// Starts confirmation for reverting the highlighted Graph commit (`v`,
+    /// Graph panel only), mirroring [`Self::request_cherry_pick`] exactly
+    /// (T-239/US-087 criterion 1).
+    fn request_revert(&mut self) {
+        if self.focus != Panel::Graph {
+            return;
+        }
+        let Some(commit) = self.selected_graph_commit().cloned() else {
+            return;
+        };
+        self.last_revert_result = None;
+        self.operation.begin(OperationKind::Revert {
+            commit: commit.hash.as_str().to_string(),
+            is_merge: commit.is_merge(),
+        });
+    }
+
+    /// Opens the reset-mode chooser overlay for the highlighted Graph commit
+    /// (`z`, Graph panel only; T-240/US-088 criterion 1) — picking a mode
+    /// itself never mutates anything yet, mirroring
+    /// [`Self::request_rebase_plan`]'s own "opening the picker is not itself
+    /// a mutation" rationale.
+    fn request_reset(&mut self) {
+        if self.focus != Panel::Graph {
+            return;
+        }
+        let Some(commit) = self.selected_graph_commit() else {
+            return;
+        };
+        self.reset_target = Some(commit.clone());
+        self.reset_mode_open = true;
+        self.reset_mode_cursor = 0;
+    }
+
+    /// Confirms the reset-mode chooser's highlighted mode, starting
+    /// confirmation for [`OperationKind::Reset`] (US-088 criteria 1, 2): the
+    /// exact target, mode, and — for `Hard` — the concrete count of
+    /// uncommitted changes that would be permanently discarded (computed
+    /// from the already-loaded [`gitsail_application::RepositorySession::status`],
+    /// never a generic warning) are all captured here, before anything is
+    /// confirmed. `expected_head` ([`Self::current_head_hash`]) is what
+    /// `RepositoryWritePort::reset` revalidates immediately before actually
+    /// resetting (US-088 criterion 3): a `HEAD` that moves between this
+    /// moment and the final confirmation is caught there, never executed
+    /// against silently.
+    fn confirm_reset_mode(&mut self) {
+        let Some(commit) = self.reset_target.clone() else {
+            return;
+        };
+        let mode = match self.reset_mode_cursor {
+            0 => ResetMode::Soft,
+            1 => ResetMode::Mixed,
+            _ => ResetMode::Hard,
+        };
+        let Some(expected_head) = self.current_head_hash() else {
+            return;
+        };
+        let predicted_loss_files = self.predicted_reset_loss_file_count();
+        self.reset_mode_open = false;
+        self.operation.begin(OperationKind::Reset {
+            target: commit.hash.as_str().to_string(),
+            mode,
+            expected_head: expected_head.as_str().to_string(),
+            predicted_loss_files,
+        });
     }
 
     /// Moves the highlighted plan entry one position up (`K`, T-236/US-084
@@ -2254,6 +2472,38 @@ impl App {
                     }
                 }
             }
+            OperationKind::CherryPick { commit, is_merge } => match CommitHash::new(commit) {
+                Ok(hash) => {
+                    let merge_parent = is_merge.then_some(MergeParentPolicy::FirstParent);
+                    vec![Command::CherryPick(repo, hash, merge_parent)]
+                }
+                Err(err) => {
+                    self.operation.fail(err);
+                    Vec::new()
+                }
+            },
+            OperationKind::Revert { commit, is_merge } => match CommitHash::new(commit) {
+                Ok(hash) => {
+                    let merge_parent = is_merge.then_some(MergeParentPolicy::FirstParent);
+                    vec![Command::Revert(repo, hash, merge_parent)]
+                }
+                Err(err) => {
+                    self.operation.fail(err);
+                    Vec::new()
+                }
+            },
+            OperationKind::Reset {
+                target,
+                mode,
+                expected_head,
+                ..
+            } => match CommitHash::new(expected_head) {
+                Ok(expected_head) => vec![Command::Reset(repo, target, mode, expected_head)],
+                Err(err) => {
+                    self.operation.fail(err);
+                    Vec::new()
+                }
+            },
         }
     }
 
@@ -2318,6 +2568,11 @@ impl App {
                 self.rebase_plan_cursor = 0;
                 self.rebase_plan_reword_input = None;
                 self.rebase_plan_error = None;
+                self.last_cherry_pick_result = None;
+                self.last_revert_result = None;
+                self.reset_mode_open = false;
+                self.reset_mode_cursor = 0;
+                self.reset_target = None;
 
                 let mut commands = vec![
                     Command::RefreshStatus(ticket, repo.clone()),
@@ -2595,6 +2850,47 @@ impl App {
             Ok(outcome) => {
                 self.operation.succeed();
                 self.last_rebase_result = Some(outcome);
+                self.refresh_commands_for(RefreshReason::AfterMutation)
+            }
+            Err(error) => {
+                self.operation.fail(error);
+                Vec::new()
+            }
+        }
+    }
+
+    /// Handles [`crate::message::Message::CherryPickFinished`] (T-238/
+    /// US-086). Success records the [`CherryPickResult`] (criterion 3:
+    /// applying, a conflict, and an empty "already applied" result are
+    /// always three distinct, explicit outcomes) and refreshes, which is
+    /// also what picks up the resulting `InProgressOperation::CherryPick`
+    /// when the result was `Conflict` or `Empty` — both leave a pending
+    /// cherry-pick recoverable via skip/abort, mirroring
+    /// [`Self::on_merge_finished`]'s own reasoning exactly.
+    pub fn on_cherry_pick_finished(
+        &mut self,
+        result: Result<CherryPickResult, GitSailError>,
+    ) -> Vec<Command> {
+        match result {
+            Ok(outcome) => {
+                self.operation.succeed();
+                self.last_cherry_pick_result = Some(outcome);
+                self.refresh_commands_for(RefreshReason::AfterMutation)
+            }
+            Err(error) => {
+                self.operation.fail(error);
+                Vec::new()
+            }
+        }
+    }
+
+    /// Handles [`crate::message::Message::RevertFinished`] (T-239/US-087),
+    /// mirroring [`Self::on_cherry_pick_finished`] exactly.
+    pub fn on_revert_finished(&mut self, result: Result<RevertResult, GitSailError>) -> Vec<Command> {
+        match result {
+            Ok(outcome) => {
+                self.operation.succeed();
+                self.last_revert_result = Some(outcome);
                 self.refresh_commands_for(RefreshReason::AfterMutation)
             }
             Err(error) => {

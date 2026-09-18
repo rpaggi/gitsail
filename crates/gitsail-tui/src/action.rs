@@ -187,4 +187,21 @@ pub enum Action {
     RebasePlanRewordInput(char),
     /// Removes the last character from the Reword message prompt.
     RebasePlanRewordBackspace,
+
+    // -- T-238/T-239/US-086/US-087: cherry-pick, revert -------------------
+    /// Requests confirmation to cherry-pick the highlighted Graph commit
+    /// onto the current branch (`x`, Graph panel only; T-238/US-086
+    /// criterion 1: commit and destination are shown before executing).
+    RequestCherryPick,
+    /// Requests confirmation to revert the highlighted Graph commit (`v`,
+    /// Graph panel only; T-239/US-087 criterion 1), mirroring
+    /// [`Action::RequestCherryPick`].
+    RequestRevert,
+
+    // -- T-240/US-088: reset -----------------------------------------------
+    /// Opens the reset-mode chooser overlay for the highlighted Graph commit
+    /// (`z`, Graph panel only; T-240/US-088 criterion 1). Never itself a
+    /// mutation — mirrors [`Action::RequestRebasePlan`]'s own "opening the
+    /// picker is not itself a mutation" rationale.
+    RequestReset,
 }

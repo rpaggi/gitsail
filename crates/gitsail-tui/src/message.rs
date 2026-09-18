@@ -3,8 +3,8 @@
 //! (SAD §18: "... return typed messages/events").
 
 use gitsail_application::{
-    ApplyPatchResult, MergeResult, Page, PatchPreview, PullOutcome, RebasePlan, RebaseResult,
-    RefreshTicket,
+    ApplyPatchResult, CherryPickResult, MergeResult, Page, PatchPreview, PullOutcome, RebasePlan,
+    RebaseResult, RefreshTicket, RevertResult,
 };
 use gitsail_domain::{
     Blame, Branch, Commit, CommitHash, ConflictSides, Diff, GitSailError, InProgressOperation,
@@ -113,4 +113,14 @@ pub enum Message {
     /// overlay rather than through [`crate::operation::OperationState`] —
     /// see [`crate::app::App::on_rebase_plan_loaded`].
     RebasePlanLoaded(Result<RebasePlan, GitSailError>),
+    /// [`crate::worker::Command::CherryPick`] completed (T-238/US-086).
+    /// Carries the [`CherryPickResult`] on success — distinct from
+    /// [`Self::OperationFinished`] so applying/conflict/empty are always
+    /// three distinct, explicit outcomes (US-086 criterion 3), never
+    /// collapsed into a bare success/failure (mirrors
+    /// [`Self::MergeFinished`]'s own reasoning).
+    CherryPickFinished(Result<CherryPickResult, GitSailError>),
+    /// [`crate::worker::Command::Revert`] completed (T-239/US-087). Carries
+    /// the [`RevertResult`] on success, mirroring [`Self::CherryPickFinished`].
+    RevertFinished(Result<RevertResult, GitSailError>),
 }

@@ -6,7 +6,9 @@
 //! reaching a widget (SAD §33) — this module is the render boundary that
 //! rule applies at; `App` itself always holds the raw value.
 
-use gitsail_application::{MergeResult, PullOutcome, RebaseAction, RebaseResult};
+use gitsail_application::{
+    CherryPickResult, MergeResult, PullOutcome, RebaseAction, RebaseResult, ResetMode, RevertResult,
+};
 use gitsail_domain::{
     BlameOrigin, BranchKind, Commit, ConflictSideContent, ConflictStage, DiffLineOrigin,
     GitTimestamp, TagKind,
@@ -695,6 +697,8 @@ fn render_overlays(frame: &mut Frame, area: Rect, app: &App) {
         render_rebase_plan_reword(frame, area, app);
     } else if app.rebase_plan_open() {
         render_rebase_plan_overlay(frame, area, app);
+    } else if app.reset_mode_open() {
+        render_reset_mode_overlay(frame, area, app);
     } else if app.branch_input().is_some() {
         render_branch_name_prompt(frame, area, app);
     } else if app.sync_error().is_some() {
@@ -987,6 +991,44 @@ fn render_operation_overlay(frame: &mut Frame, area: Rect, app: &App) {
         }
     }
 
+    // T-238/US-086 criterion 3: applying, a conflict, and an empty "already
+    // applied" result are always three distinct, explicit lines, mirroring
+    // the merge/rebase blocks above exactly.
+    if matches!(kind, OperationKind::CherryPick { .. }) {
+        if let Some(outcome) = app.last_cherry_pick_result() {
+            let text = match outcome {
+                CherryPickResult::Applied { hash } => {
+                    format!("applied as {}", hash.to_short(8).as_str())
+                }
+                CherryPickResult::Conflict { files } => format!(
+                    "CONFLICT — {} file{} need resolution (press 'M' once dismissed)",
+                    files.len(),
+                    if files.len() == 1 { "" } else { "s" }
+                ),
+                CherryPickResult::Empty => "EMPTY — already applied on the current branch (press 'M' to skip/abort once dismissed)".to_string(),
+            };
+            lines.push(Line::from(text));
+        }
+    }
+
+    // T-239/US-087 criterion 2: completion and conflict are always two
+    // distinct, explicit lines, mirroring `CherryPick` above.
+    if matches!(kind, OperationKind::Revert { .. }) {
+        if let Some(outcome) = app.last_revert_result() {
+            let text = match outcome {
+                RevertResult::Applied { hash } => {
+                    format!("reverted as {}", hash.to_short(8).as_str())
+                }
+                RevertResult::Conflict { files } => format!(
+                    "CONFLICT — {} file{} need resolution (press 'M' once dismissed)",
+                    files.len(),
+                    if files.len() == 1 { "" } else { "s" }
+                ),
+            };
+            lines.push(Line::from(text));
+        }
+    }
+
     if let Some(error) = error_line {
         lines.push(Line::from(error));
     }
@@ -1210,6 +1252,62 @@ fn render_rebase_plan_reword(frame: &mut Frame, area: Rect, app: &App) {
     );
 }
 
+/// Shows the reset-mode chooser (`z`, T-240/US-088 criterion 1): each of
+/// Git's three modes with its own concrete, distinct effect on
+/// `HEAD`/the index/the working tree spelled out in place — never a bare
+/// "soft/mixed/hard" label a person has to already know the meaning of —
+/// and, for `Hard`, the exact live count of uncommitted changes that would
+/// be permanently discarded if it were chosen right now (US-088 criterion
+/// 2), so the loss is visible *before* `Enter` even starts the reinforced
+/// confirmation [`render_operation_overlay`] shows next.
+fn render_reset_mode_overlay(frame: &mut Frame, area: Rect, app: &App) {
+    let mut lines = Vec::new();
+    if let Some(commit) = app.reset_target() {
+        lines.push(Line::from(format!(
+            "Reset to {} — {}",
+            commit.short_hash.as_str(),
+            sanitize::safe_line(&commit.subject)
+        )));
+        lines.push(Line::from(""));
+    }
+
+    let predicted_loss = app.predicted_reset_loss_file_count();
+    let modes: [(ResetMode, &str); 3] = [
+        (
+            ResetMode::Soft,
+            "Soft — HEAD moves only; index and working tree preserved (changes become staged)",
+        ),
+        (
+            ResetMode::Mixed,
+            "Mixed — HEAD and index move; working tree preserved (changes become unstaged)",
+        ),
+        (ResetMode::Hard, "Hard — HEAD, index and working tree all move"),
+    ];
+    for (index, (mode, description)) in modes.iter().enumerate() {
+        let marker = if index == app.reset_mode_cursor() { '>' } else { ' ' };
+        let mut line = format!("{marker} {description}");
+        if *mode == ResetMode::Hard {
+            line.push_str(&format!(
+                " — {predicted_loss} uncommitted change{} would be PERMANENTLY DISCARDED",
+                if predicted_loss == 1 { "" } else { "s" }
+            ));
+        }
+        lines.push(Line::from(line));
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from("j/k select · Enter confirms · Esc closes"));
+
+    let popup = centered_rect(75, 50, area);
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: true })
+            .block(Block::default().title("Reset Mode").borders(Borders::ALL)),
+        popup,
+    );
+}
+
 fn render_branch_name_prompt(frame: &mut Frame, area: Rect, app: &App) {
     let lines = vec![
         Line::from("New branch name:"),
@@ -1300,6 +1398,9 @@ fn render_help(frame: &mut Frame, area: Rect) {
         Line::from("o (Sidebar)       rebase the current branch onto the highlighted branch"),
         Line::from("O (Sidebar)       plan an interactive rebase onto the highlighted branch"),
         Line::from("  within the plan: j/k select · J/K reorder · a cycle action · Enter confirms"),
+        Line::from("x (Graph)         cherry-pick the highlighted commit onto the current branch"),
+        Line::from("v (Graph)         revert the highlighted commit"),
+        Line::from("z (Graph)         reset to the highlighted commit (choose soft/mixed/hard)"),
         Line::from("t (References)    cycle Tags/Remotes/Stash"),
         Line::from("Enter (References) view the highlighted entry's details"),
         Line::from("r                 refresh status and branches"),

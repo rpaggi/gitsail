@@ -16,15 +16,15 @@ pub mod request_id;
 pub use compat::{parse_envelope, EnvelopeDecodeError, SUPPORTED_SCHEMA_VERSIONS};
 pub use dto::{
     AmendPreviewDto, ApplyPatchResultDto, BlameDto, BlameLineDto, BlameOriginDto, BranchDto,
-    BranchKindDto, ChangeTypeDto, CommitDiffDto, CommitDto, CommitGraphPageDto,
-    CommitGraphRowDto, CommitResultDto, ConflictSideContentDto, ConflictSidesDto,
-    ConflictStageDto, ConflictedFileDto, DecorationDto, DiffDto, DiffHunkDto, DiffLineDto,
-    DiffLineOriginDto, FileChangeDto, FileContentDto, FileDiffDto, FileStatusCodeDto,
-    GitTimestampDto, GraphEdgeDto, HeadStateDto, InProgressOperationDto, LineHistoryDto,
-    LineHistoryEntryDto, LineRangeDto, MergeResultDto, OperationCapabilityDto, PatchExportDto,
-    PatchPreviewDto, PullOutcomeDto, PullResultDto, RebaseActionDto, RebasePlanDto,
-    RebasePlanEntryDto, RebaseResultDto, RecentRepositoryDto, RemoteDto, RepositoryDto,
-    RepositoryStatusDto, SignatureDto, SyncTargetDto,
+    BranchKindDto, ChangeTypeDto, CherryPickResultDto, CommitDiffDto, CommitDto,
+    CommitGraphPageDto, CommitGraphRowDto, CommitResultDto, ConflictSideContentDto,
+    ConflictSidesDto, ConflictStageDto, ConflictedFileDto, DecorationDto, DiffDto, DiffHunkDto,
+    DiffLineDto, DiffLineOriginDto, FileChangeDto, FileContentDto, FileDiffDto,
+    FileStatusCodeDto, GitTimestampDto, GraphEdgeDto, HeadStateDto, InProgressOperationDto,
+    LineHistoryDto, LineHistoryEntryDto, LineRangeDto, MergeResultDto, OperationCapabilityDto,
+    PatchExportDto, PatchPreviewDto, PullOutcomeDto, PullResultDto, RebaseActionDto,
+    RebasePlanDto, RebasePlanEntryDto, RebaseResultDto, RecentRepositoryDto, RemoteDto,
+    RepositoryDto, RepositoryStatusDto, RevertResultDto, SignatureDto, SyncTargetDto,
 };
 pub use envelope::{Envelope, Page, SCHEMA_VERSION};
 pub use error::ErrorPayload;

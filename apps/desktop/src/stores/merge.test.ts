@@ -5,11 +5,13 @@ import { clearMocks, mockIPC } from "@tauri-apps/api/mocks";
 import { capabilitiesOf, conflictedFilesOf, useMergeStore } from "./merge";
 import { useOperationStore } from "./operation";
 import type {
+  CherryPickResultDto,
   ConflictSidesDto,
   InProgressOperationDto,
   MergeResultDto,
   RebasePlanDto,
   RebaseResultDto,
+  RevertResultDto,
 } from "../services/dto";
 
 function samplePlan(): RebasePlanDto {
@@ -131,6 +133,106 @@ describe("merge store", () => {
     expect(store.lastMergeResult).toEqual(conflictOutcome);
     expect(store.hasConflicts).toBe(true);
     expect(useOperationStore().status).toBe("succeeded");
+  });
+
+  it("requestCherryPick is Moderate risk, names the exact commit, and reports Applied distinctly", async () => {
+    const received: Record<string, unknown>[] = [];
+    const outcome: CherryPickResultDto = { outcome: "applied", hash: "b".repeat(40) };
+    mockIPC((cmd, args) => {
+      if (cmd === "cherry_pick") {
+        received.push(args as Record<string, unknown>);
+        return outcome;
+      }
+      if (cmd === "get_repository_status") return statusResponse();
+      if (cmd === "detect_in_progress_operation") return { kind: "none" } satisfies InProgressOperationDto;
+      throw new Error(`unexpected command ${cmd}`);
+    });
+    const store = useMergeStore();
+
+    await store.requestCherryPick("a".repeat(40), "aaaaaaa", false);
+    const operation = useOperationStore();
+    expect(operation.current?.risk).toBe("moderate");
+    expect(operation.current?.targetLabel).toBe("cherry-picking commit 'aaaaaaa' onto the current branch");
+
+    await operation.confirm();
+
+    expect(received).toEqual([{ commit: "a".repeat(40), mergeParent: null }]);
+    expect(store.lastCherryPickResult).toEqual(outcome);
+    expect(operation.status).toBe("succeeded");
+  });
+
+  it("requestCherryPick against a merge commit names the first-parent policy explicitly and sends it", async () => {
+    const received: Record<string, unknown>[] = [];
+    mockIPC((cmd, args) => {
+      if (cmd === "cherry_pick") {
+        received.push(args as Record<string, unknown>);
+        return { outcome: "empty" } satisfies CherryPickResultDto;
+      }
+      if (cmd === "get_repository_status") return statusResponse();
+      if (cmd === "detect_in_progress_operation") return { kind: "none" } satisfies InProgressOperationDto;
+      throw new Error(`unexpected command ${cmd}`);
+    });
+    const store = useMergeStore();
+
+    await store.requestCherryPick("a".repeat(40), "aaaaaaa", true);
+    expect(useOperationStore().current?.targetLabel).toContain("first parent");
+
+    await useOperationStore().confirm();
+
+    expect(received).toEqual([{ commit: "a".repeat(40), mergeParent: "firstParent" }]);
+    expect(store.lastCherryPickResult).toEqual({ outcome: "empty" });
+  });
+
+  it("a conflicting cherry-pick never presents as a plain success — the conflict outcome is recorded distinctly", async () => {
+    const conflictOutcome: CherryPickResultDto = {
+      outcome: "conflict",
+      conflictedFiles: [{ path: "f.txt", stage: "bothModified" }],
+    };
+    mockIPC((cmd) => {
+      if (cmd === "cherry_pick") return conflictOutcome;
+      if (cmd === "get_repository_status") return statusResponse();
+      if (cmd === "detect_in_progress_operation") {
+        return {
+          kind: "cherryPick",
+          target: "a".repeat(40),
+          conflictedFiles: [{ path: "f.txt", stage: "bothModified" }],
+          capabilities: ["continue", "skip", "abort"],
+        } satisfies InProgressOperationDto;
+      }
+      throw new Error(`unexpected command ${cmd}`);
+    });
+    const store = useMergeStore();
+
+    await store.requestCherryPick("a".repeat(40), "aaaaaaa", false);
+    await useOperationStore().confirm();
+
+    expect(store.lastCherryPickResult).toEqual(conflictOutcome);
+    expect(store.hasConflicts).toBe(true);
+  });
+
+  it("requestRevert is Moderate risk, names the exact commit, and reports Applied distinctly", async () => {
+    const received: Record<string, unknown>[] = [];
+    const outcome: RevertResultDto = { outcome: "applied", hash: "c".repeat(40) };
+    mockIPC((cmd, args) => {
+      if (cmd === "revert") {
+        received.push(args as Record<string, unknown>);
+        return outcome;
+      }
+      if (cmd === "get_repository_status") return statusResponse();
+      if (cmd === "detect_in_progress_operation") return { kind: "none" } satisfies InProgressOperationDto;
+      throw new Error(`unexpected command ${cmd}`);
+    });
+    const store = useMergeStore();
+
+    await store.requestRevert("d".repeat(40), "ddddddd", false);
+    const operation = useOperationStore();
+    expect(operation.current?.risk).toBe("moderate");
+    expect(operation.current?.targetLabel).toBe("reverting commit 'ddddddd'");
+
+    await operation.confirm();
+
+    expect(received).toEqual([{ commit: "d".repeat(40), mergeParent: null }]);
+    expect(store.lastRevertResult).toEqual(outcome);
   });
 
   it("inspectConflict loads the base/ours/theirs sides for the given path", async () => {

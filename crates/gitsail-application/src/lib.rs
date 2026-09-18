@@ -38,15 +38,15 @@ pub use use_cases::{
     RevisionComparison,
 };
 pub use write_ports::{
-    ApplyPatchResult, MergeResult, PatchPreview, PullOutcome, RebaseAction, RebasePlan,
-    RebasePlanEntry, RebaseResult, RepositoryWritePort, StashApplyOutcome, StashScope,
-    TagAnnotation, WorktreeBranchSpec,
+    ApplyPatchResult, CherryPickResult, MergeParentPolicy, MergeResult, PatchPreview, PullOutcome,
+    RebaseAction, RebasePlan, RebasePlanEntry, RebaseResult, RepositoryWritePort, ResetMode,
+    RevertResult, StashApplyOutcome, StashScope, TagAnnotation, WorktreeBranchSpec,
 };
 pub use write_use_cases::{
-    AbortOperation, AmendCommit, ApplyPatch, ApplyStash, ContinueOperation, CreateBranch,
-    CreateCommit, CreateStash, CreateTag, CreateWorktree, DeleteBranch, DeleteTag, DropStash,
-    ExecuteRebasePlan, Fetch, ForcePushWithLease, MarkConflictResolved, Merge,
+    AbortOperation, AmendCommit, ApplyPatch, ApplyStash, CherryPick, ContinueOperation,
+    CreateBranch, CreateCommit, CreateStash, CreateTag, CreateWorktree, DeleteBranch, DeleteTag,
+    DropStash, ExecuteRebasePlan, Fetch, ForcePushWithLease, MarkConflictResolved, Merge,
     PlanRebase, PopStash, PreviewPatchApplication, Pull, Push, Rebase, RemoveWorktree,
-    RenameBranch, SkipOperation, StageFiles, StageHunks, SwitchBranch, TakeConflictSide,
-    UnstageFiles, UnstageHunks,
+    RenameBranch, Reset, Revert, SkipOperation, StageFiles, StageHunks, SwitchBranch,
+    TakeConflictSide, UnstageFiles, UnstageHunks,
 };

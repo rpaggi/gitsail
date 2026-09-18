@@ -33,6 +33,7 @@ import { defineStore } from "pinia";
 
 import {
   abortOperation as abortOperationCommand,
+  cherryPick as cherryPickCommand,
   continueOperation as continueOperationCommand,
   detectInProgressOperation,
   executeRebasePlan as executeRebasePlanCommand,
@@ -41,18 +42,22 @@ import {
   merge as mergeCommand,
   planRebase as planRebaseCommand,
   rebase as rebaseCommand,
+  revert as revertCommand,
   skipOperation as skipOperationCommand,
   takeConflictSide as takeConflictSideCommand,
 } from "../services/merge";
 import type {
+  CherryPickResultDto,
   ConflictedFileDto,
   ConflictSidesDto,
   InProgressOperationDto,
+  MergeParentPolicyDto,
   MergeResultDto,
   OperationCapabilityDto,
   RebaseActionDto,
   RebasePlanDto,
   RebaseResultDto,
+  RevertResultDto,
 } from "../services/dto";
 import { isErrorPayload, type ErrorPayload } from "../services/errors";
 import { useOperationStore } from "./operation";
@@ -86,6 +91,14 @@ export const useMergeStore = defineStore("merge", {
      * criterion 3: completion and conflict are always two distinct,
      * explicit outcomes) — mirrors `lastMergeResult`'s own convention. */
     lastRebaseResult: null as RebaseResultDto | null,
+    /** The outcome of the last successful `requestCherryPick` (T-238/US-086
+     * criterion 3: applying, a conflict, and an empty "already applied"
+     * result are always three distinct, explicit outcomes) — mirrors
+     * `lastMergeResult`'s own convention. */
+    lastCherryPickResult: null as CherryPickResultDto | null,
+    /** The outcome of the last successful `requestRevert` (T-239/US-087
+     * criterion 2), mirroring `lastCherryPickResult`. */
+    lastRevertResult: null as RevertResultDto | null,
     /** The conflicted file most recently inspected (T-232/US-080 criterion
      * 2), or `null` before anything has been inspected, or once the
      * highlighted file/operation changes. */
@@ -197,6 +210,52 @@ export const useMergeStore = defineStore("merge", {
         targetLabel: `rebasing the current branch onto '${ontoRevision}'`,
         run: async () => {
           this.lastRebaseResult = await rebaseCommand(ontoRevision);
+          await session.refreshStatus("after_mutation");
+          await this.refreshInProgressOperation();
+        },
+      });
+    },
+
+    /** Requests cherry-picking `commit` onto the current branch (T-238/
+     * US-086 criterion 1: the exact commit and the current branch as
+     * destination are both named by `targetLabel` before anything runs).
+     * `isMerge` selects this workspace's fixed first-parent policy for a
+     * merge commit — named explicitly in `targetLabel` rather than left
+     * implicit (US-086 criterion 2: never silently guessed). Applying, a
+     * conflict, and an empty "already applied" result are always three
+     * distinct, explicit outcomes (criterion 3). */
+    async requestCherryPick(commit: string, shortHash: string, isMerge: boolean): Promise<void> {
+      const operation = useOperationStore();
+      const session = useRepositorySessionStore();
+      const mergeParent: MergeParentPolicyDto | undefined = isMerge ? "firstParent" : undefined;
+      await operation.request({
+        kind: "cherryPick",
+        risk: "moderate",
+        targetLabel: isMerge
+          ? `cherry-picking merge commit '${shortHash}' (using its first parent)`
+          : `cherry-picking commit '${shortHash}' onto the current branch`,
+        run: async () => {
+          this.lastCherryPickResult = await cherryPickCommand(commit, mergeParent);
+          await session.refreshStatus("after_mutation");
+          await this.refreshInProgressOperation();
+        },
+      });
+    },
+
+    /** Requests reverting `commit` (T-239/US-087 criterion 1), mirroring
+     * `requestCherryPick` exactly. */
+    async requestRevert(commit: string, shortHash: string, isMerge: boolean): Promise<void> {
+      const operation = useOperationStore();
+      const session = useRepositorySessionStore();
+      const mergeParent: MergeParentPolicyDto | undefined = isMerge ? "firstParent" : undefined;
+      await operation.request({
+        kind: "revert",
+        risk: "moderate",
+        targetLabel: isMerge
+          ? `reverting merge commit '${shortHash}' (using its first parent)`
+          : `reverting commit '${shortHash}'`,
+        run: async () => {
+          this.lastRevertResult = await revertCommand(commit, mergeParent);
           await session.refreshStatus("after_mutation");
           await this.refreshInProgressOperation();
         },

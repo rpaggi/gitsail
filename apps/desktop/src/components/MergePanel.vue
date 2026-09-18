@@ -172,6 +172,32 @@ onMounted(() => {
       </template>
     </p>
 
+    <h3>Cherry-pick / Revert / Reset</h3>
+    <p class="merge-panel__hint">
+      Right-click a commit in the graph to cherry-pick, revert, or reset to it.
+    </p>
+
+    <p v-if="merge.lastCherryPickResult" class="merge-panel__result" :class="{ conflict: merge.lastCherryPickResult.outcome !== 'applied' }">
+      <template v-if="merge.lastCherryPickResult.outcome === 'applied'">
+        Cherry-picked as {{ merge.lastCherryPickResult.hash.slice(0, 8) }}.
+      </template>
+      <template v-else-if="merge.lastCherryPickResult.outcome === 'empty'">
+        EMPTY — already applied on the current branch (use Continue/Skip/Abort below).
+      </template>
+      <template v-else>
+        CONFLICT — {{ merge.lastCherryPickResult.conflictedFiles.length }} file(s) need resolution below.
+      </template>
+    </p>
+
+    <p v-if="merge.lastRevertResult" class="merge-panel__result" :class="{ conflict: merge.lastRevertResult.outcome === 'conflict' }">
+      <template v-if="merge.lastRevertResult.outcome === 'applied'">
+        Reverted as {{ merge.lastRevertResult.hash.slice(0, 8) }}.
+      </template>
+      <template v-else>
+        CONFLICT — {{ merge.lastRevertResult.conflictedFiles.length }} file(s) need resolution below.
+      </template>
+    </p>
+
     <section v-if="merge.hasConflicts" class="merge-panel__conflicts">
       <h4>Conflicted files ({{ conflictedFiles.length }})</h4>
       <ul>
@@ -217,6 +243,11 @@ onMounted(() => {
 .merge-panel__request {
   display: flex;
   gap: 0.5rem;
+}
+.merge-panel__hint {
+  margin: 0;
+  font-size: 0.85rem;
+  opacity: 0.7;
 }
 .merge-panel__result {
   margin: 0;

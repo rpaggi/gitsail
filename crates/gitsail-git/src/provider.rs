@@ -22,10 +22,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use gitsail_application::{
-    ApplyPatchResult, BlameRequest, CommitQuery, DiffRequest, LineHistoryRequest, MergeResult,
-    Page, PatchPreview, Precondition, PullOutcome, RebaseAction, RebasePlan, RebasePlanEntry,
-    RebaseResult, RepositoryReadPort, RepositoryWritePort, StashApplyOutcome, StashScope,
-    TagAnnotation, WorktreeBranchSpec,
+    ApplyPatchResult, BlameRequest, CherryPickResult, CommitQuery, DiffRequest, LineHistoryRequest,
+    MergeParentPolicy, MergeResult, Page, PatchPreview, Precondition, PullOutcome, RebaseAction,
+    RebasePlan, RebasePlanEntry, RebaseResult, RepositoryReadPort, RepositoryWritePort, ResetMode,
+    RevertResult, StashApplyOutcome, StashScope, TagAnnotation, WorktreeBranchSpec,
 };
 use gitsail_domain::{
     BisectOperation, Blame, BlameLine, BlameOrigin, Branch, BranchKind, BranchName, ChangeType,
@@ -2361,6 +2361,218 @@ impl RepositoryWritePort for GitCliProvider {
             "rebase plan execution did not converge within the expected number of steps",
         ))
     }
+
+    /// See [`RepositoryWritePort::cherry_pick`]. `git cherry-pick <commit>`
+    /// (T-238/US-086): refuses up front when another operation is already
+    /// pending ([`Self::require_no_pending_operation`], mirroring
+    /// [`Self::merge`]/[`Self::rebase`]'s own check). When `commit` is a
+    /// merge commit, `merge_parent` must be supplied explicitly (US-086
+    /// criterion 2) — this port refuses *before ever invoking Git* rather
+    /// than letting Git's own "-m option is required" refusal stand in for
+    /// this port's own explicit, documented contract (see
+    /// [`MergeParentPolicy`]'s doc); passing a policy against a non-merge
+    /// commit is refused just as explicitly, since Git itself has no
+    /// meaningful parent-2 to select there either. `-c core.editor=true`
+    /// avoids ever opening an interactive editor for the resulting commit
+    /// message, matching [`Self::merge`]'s own rationale. A conflict and an
+    /// "already applied" (empty) result are both distinguished from an
+    /// ordinary success by re-inspecting real `.git/` state afterward,
+    /// exactly like [`Self::merge`]/[`Self::rebase`] already do for their
+    /// own conflict case (US-086 criterion 3).
+    fn cherry_pick(
+        &self,
+        repo: &Repository,
+        commit: &CommitHash,
+        merge_parent: Option<MergeParentPolicy>,
+    ) -> Result<CherryPickResult, GitSailError> {
+        require_worktree(repo, "cherry-pick")?;
+        self.require_no_pending_operation(repo)?;
+
+        let target = RepositoryReadPort::commit(self, repo, commit)?;
+        let mut args = vec![
+            "-c".to_string(),
+            "core.editor=true".to_string(),
+            "cherry-pick".to_string(),
+        ];
+        if target.is_merge() {
+            let Some(policy) = merge_parent else {
+                return Err(GitSailError::new(
+                    ErrorCode::InvalidRepositoryState,
+                    format!(
+                        "{commit} is a merge commit: cherry-picking it requires an explicit merge parent policy"
+                    ),
+                )
+                .with_remediation(
+                    "pass MergeParentPolicy::FirstParent to cherry-pick this merge commit against its first parent, or choose a different, non-merge commit",
+                ));
+            };
+            args.push("-m".to_string());
+            args.push(policy.mainline_number().to_string());
+        } else if merge_parent.is_some() {
+            return Err(GitSailError::new(
+                ErrorCode::InvalidRepositoryState,
+                format!("{commit} is not a merge commit: a merge parent policy does not apply to it"),
+            ));
+        }
+        args.push("--end-of-options".to_string());
+        args.push(commit.as_str().to_string());
+
+        match self.run(args, &repo.root_path) {
+            Ok(_) => {
+                let hash = RepositoryReadPort::resolve_revision(self, repo, "HEAD")?;
+                Ok(CherryPickResult::Applied { hash })
+            }
+            Err(err) => {
+                if err.code() == ErrorCode::ProcessFailure {
+                    let diagnostic_text =
+                        err.diagnostic().map(|d| d.to_string()).unwrap_or_default();
+                    if diagnostic_text.contains("is now empty") {
+                        return Ok(CherryPickResult::Empty);
+                    }
+                    if let InProgressOperation::CherryPick(op) =
+                        RepositoryReadPort::detect_in_progress_operation(self, repo)?
+                    {
+                        if !op.conflicted_files.is_empty() {
+                            return Ok(CherryPickResult::Conflict {
+                                files: op.conflicted_files,
+                            });
+                        }
+                    }
+                }
+                Err(classify_cherry_pick_failure(err))
+            }
+        }
+    }
+
+    /// See [`RepositoryWritePort::revert`]. `git revert <commit>` (T-239/
+    /// US-087): a new commit undoing `commit`'s change, never a rewrite or
+    /// move of any existing reference (History Editing Rules #8) — this is
+    /// structural, not just a convention this port happens to follow: `git
+    /// revert` only ever applies the inverse patch and creates a commit, the
+    /// same code path `git cherry-pick` uses in the opposite direction, with
+    /// no ref-moving/rewriting code path of its own. Otherwise mirrors
+    /// [`Self::cherry_pick`] exactly: refuses up front when another
+    /// operation is pending, requires an explicit `merge_parent` for a merge
+    /// commit (US-087 criterion 3), and distinguishes a conflict from an
+    /// ordinary success by re-inspecting real `.git/` state.
+    fn revert(
+        &self,
+        repo: &Repository,
+        commit: &CommitHash,
+        merge_parent: Option<MergeParentPolicy>,
+    ) -> Result<RevertResult, GitSailError> {
+        require_worktree(repo, "revert")?;
+        self.require_no_pending_operation(repo)?;
+
+        let target = RepositoryReadPort::commit(self, repo, commit)?;
+        let mut args = vec![
+            "-c".to_string(),
+            "core.editor=true".to_string(),
+            "revert".to_string(),
+        ];
+        if target.is_merge() {
+            let Some(policy) = merge_parent else {
+                return Err(GitSailError::new(
+                    ErrorCode::InvalidRepositoryState,
+                    format!(
+                        "{commit} is a merge commit: reverting it requires an explicit merge parent policy"
+                    ),
+                )
+                .with_remediation(
+                    "pass MergeParentPolicy::FirstParent to revert this merge commit against its first parent, or choose a different, non-merge commit",
+                ));
+            };
+            args.push("-m".to_string());
+            args.push(policy.mainline_number().to_string());
+        } else if merge_parent.is_some() {
+            return Err(GitSailError::new(
+                ErrorCode::InvalidRepositoryState,
+                format!("{commit} is not a merge commit: a merge parent policy does not apply to it"),
+            ));
+        }
+        args.push("--end-of-options".to_string());
+        args.push(commit.as_str().to_string());
+
+        match self.run(args, &repo.root_path) {
+            Ok(_) => {
+                let hash = RepositoryReadPort::resolve_revision(self, repo, "HEAD")?;
+                Ok(RevertResult::Applied { hash })
+            }
+            Err(err) => {
+                if err.code() == ErrorCode::ProcessFailure {
+                    if let InProgressOperation::Revert(op) =
+                        RepositoryReadPort::detect_in_progress_operation(self, repo)?
+                    {
+                        if !op.conflicted_files.is_empty() {
+                            return Ok(RevertResult::Conflict {
+                                files: op.conflicted_files,
+                            });
+                        }
+                    }
+                }
+                Err(classify_revert_failure(err))
+            }
+        }
+    }
+
+    /// See [`RepositoryWritePort::reset`]. `git reset --soft/--mixed/--hard
+    /// <target>` (T-240/US-088). Refuses up front when another operation is
+    /// already pending, mirroring [`Self::merge`]/[`Self::cherry_pick`]'s
+    /// own check — resetting `HEAD`/the index mid-merge/mid-rebase would
+    /// corrupt that operation's own state rather than cleanly abandon it (a
+    /// caller that wants to abandon it uses
+    /// [`Self::abort_operation`] instead). Revalidates `expected_head`
+    /// against the current `HEAD` immediately before resetting (US-088
+    /// criterion 3) via [`Precondition`], the same mechanism
+    /// [`Self::amend_commit`] already uses — a `HEAD` that moved between
+    /// preview and confirmation (e.g. a hard reset's reinforced
+    /// confirmation, built against an older `HEAD`) is refused rather than
+    /// executed against whatever `HEAD` happens to be now.
+    ///
+    /// `target_revision` is resolved to a concrete commit hash up front
+    /// (rather than passed through as raw text with an `--end-of-options`
+    /// guard, this adapter's usual injection-safety convention for a
+    /// caller-controlled revision — see [`Self::merge`]/[`Self::rebase`]):
+    /// verified empirically, `git reset` has no `--`/`--end-of-options`
+    /// escape hatch compatible with `--soft`/`--mixed` at all (`--`
+    /// switches `reset` into its own distinct "unstage these paths" mode,
+    /// refused outright together with a mode flag: "Cannot do soft reset
+    /// with paths"). Resolving first closes the same injection surface by
+    /// construction instead: the argument `git reset` actually receives is
+    /// always this adapter's own hex `CommitHash` text, never
+    /// caller-controlled free text that could be parsed as a flag.
+    fn reset(
+        &self,
+        repo: &Repository,
+        target_revision: &str,
+        mode: ResetMode,
+        expected_head: &CommitHash,
+    ) -> Result<(), GitSailError> {
+        require_worktree(repo, "reset")?;
+        self.require_no_pending_operation(repo)?;
+
+        let current_head = RepositoryReadPort::resolve_revision(self, repo, "HEAD")?;
+        Precondition::new(expected_head.clone())
+            .revalidate(&current_head)
+            .map_err(|_| {
+                GitSailError::new(
+                    ErrorCode::OperationConflict,
+                    "HEAD changed since this reset was confirmed",
+                )
+                .with_remediation(
+                    "review the new HEAD and this reset's predicted effect again before retrying",
+                )
+            })?;
+
+        let target = RepositoryReadPort::resolve_revision(self, repo, target_revision)?;
+        let args = vec![
+            "reset".to_string(),
+            mode.git_flag().to_string(),
+            target.as_str().to_string(),
+        ];
+        self.run(args, &repo.root_path)?;
+        Ok(())
+    }
 }
 
 /// Direction in which a reconstructed hunk patch is applied to the index:
@@ -3440,6 +3652,79 @@ fn classify_rebase_failure(err: GitSailError) -> GitSailError {
         .with_remediation(
             "commit your changes, or create an explicit stash first, then retry — this is never done automatically",
         )
+        .with_source(err)
+    } else {
+        err
+    }
+}
+
+/// Reclassifies a failed `git cherry-pick` (T-238/US-086) into a clear
+/// [`ErrorCode::OperationConflict`] for the genuine (non-conflict, non-empty)
+/// refusal Git can give: local changes that would be overwritten. A real
+/// conflict or an empty result never reaches this function at all — the
+/// caller ([`GitCliProvider::cherry_pick`]) intercepts both cases first.
+/// Any other failure passes through unchanged.
+fn classify_cherry_pick_failure(err: GitSailError) -> GitSailError {
+    if err.code() != ErrorCode::ProcessFailure {
+        return err;
+    }
+    let diagnostic_text = err.diagnostic().map(|d| d.to_string()).unwrap_or_default();
+    if diagnostic_text.contains("Your local changes to the following files would be overwritten")
+        || diagnostic_text.contains("Please commit your changes or stash them")
+    {
+        GitSailError::new(
+            ErrorCode::OperationConflict,
+            "local changes would be overwritten by this cherry-pick",
+        )
+        .with_remediation("commit or stash your local changes first, then retry")
+        .with_source(err)
+    } else {
+        err
+    }
+}
+
+/// Reclassifies a failed `git revert` (T-239/US-087) into a clear,
+/// classified error for the two genuine (non-conflict) refusals Git can
+/// give: local changes that would be overwritten, and an empty result (the
+/// commit's change is not present to undo). Verified empirically against
+/// real Git 2.43: unlike [`GitCliProvider::cherry_pick`]'s own empty case
+/// (which leaves a paused `CHERRY_PICK_HEAD` and prints "previous
+/// cherry-pick is now empty"), a plain single `git revert`'s empty result
+/// exits with Git's ordinary "nothing to commit, working tree clean" and
+/// leaves **no** `REVERT_HEAD` behind at all — there is nothing left
+/// pending to skip/abort in that case, so this is reported as a plain,
+/// clearly classified error rather than implying a recoverable paused
+/// operation exists. "is now empty" is still matched too, defensively, for
+/// the (rarer) case for `git revert`'s own sequencer-pause path reports it
+/// with that exact cherry-pick-shared wording instead. A real conflict
+/// never reaches this function at all — the caller
+/// ([`GitCliProvider::revert`]) intercepts that case first. Any other
+/// failure passes through unchanged.
+fn classify_revert_failure(err: GitSailError) -> GitSailError {
+    if err.code() != ErrorCode::ProcessFailure {
+        return err;
+    }
+    let diagnostic_text = err.diagnostic().map(|d| d.to_string()).unwrap_or_default();
+    if diagnostic_text.contains("is now empty")
+        || diagnostic_text.contains("nothing to commit, working tree clean")
+    {
+        GitSailError::new(
+            ErrorCode::InvalidRepositoryState,
+            "this revert would produce no changes: the commit's effect is not present on the current branch",
+        )
+        .with_remediation(
+            "skip this revert (RepositoryWritePort::skip_operation) or abort it (RepositoryWritePort::abort_operation), if one is still pending, or simply choose a different commit",
+        )
+        .with_source(err)
+    } else if diagnostic_text
+        .contains("Your local changes to the following files would be overwritten")
+        || diagnostic_text.contains("Please commit your changes or stash them")
+    {
+        GitSailError::new(
+            ErrorCode::OperationConflict,
+            "local changes would be overwritten by this revert",
+        )
+        .with_remediation("commit or stash your local changes first, then retry")
         .with_source(err)
     } else {
         err

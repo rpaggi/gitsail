@@ -6,11 +6,15 @@
 import { invoke } from "@tauri-apps/api/core";
 
 import type {
+  CherryPickResultDto,
   ConflictSidesDto,
   InProgressOperationDto,
+  MergeParentPolicyDto,
   MergeResultDto,
   RebasePlanDto,
   RebaseResultDto,
+  ResetModeDto,
+  RevertResultDto,
 } from "./dto";
 
 /** Detects a merge/rebase/cherry-pick/revert/bisect currently in progress
@@ -99,4 +103,41 @@ export async function planRebase(ontoRevision: string): Promise<RebasePlanDto> {
  * rather than silently rebuilding itself. */
 export async function executeRebasePlan(plan: RebasePlanDto): Promise<RebaseResultDto> {
   return invoke<RebaseResultDto>("execute_rebase_plan", { plan });
+}
+
+/** Applies `commit`'s change onto the current branch (T-238/US-086).
+ * `mergeParent` must be `"firstParent"` when `commit` is a merge commit
+ * (US-086 criterion 2) — omitted against a merge commit is refused by the
+ * Core itself, never guessed here. Applying, a conflict, and an empty
+ * "already applied" result are always three distinct, explicit outcomes
+ * (criterion 3) — never thrown as an opaque error for the latter two. */
+export async function cherryPick(
+  commit: string,
+  mergeParent?: MergeParentPolicyDto,
+): Promise<CherryPickResultDto> {
+  return invoke<CherryPickResultDto>("cherry_pick", { commit, mergeParent: mergeParent ?? null });
+}
+
+/** Creates a new commit undoing `commit`'s change (T-239/US-087) — never
+ * rewrites or moves any existing reference. `mergeParent` mirrors
+ * `cherryPick`'s own contract. Completion and conflict are always two
+ * distinct, explicit outcomes (criterion 2). */
+export async function revert(
+  commit: string,
+  mergeParent?: MergeParentPolicyDto,
+): Promise<RevertResultDto> {
+  return invoke<RevertResultDto>("revert", { commit, mergeParent: mergeParent ?? null });
+}
+
+/** Moves `HEAD` (and, per `mode`, the index/working tree) to
+ * `targetRevision` (T-240/US-088). `expectedHead` must be the exact hash
+ * last observed as `HEAD` when the reset was previewed/confirmed — the Core
+ * revalidates it is still `HEAD` immediately before resetting and rejects
+ * with a classified conflict otherwise (criterion 3). */
+export async function reset(
+  targetRevision: string,
+  mode: ResetModeDto,
+  expectedHead: string,
+): Promise<void> {
+  await invoke<void>("reset", { targetRevision, mode, expectedHead });
 }

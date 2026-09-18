@@ -283,6 +283,32 @@ export type RebaseResultDto =
   | { outcome: "completed"; newHead: string }
   | { outcome: "conflict"; conflictedFiles: ConflictedFileDto[] };
 
+/** A cherry-pick's exact outcome (T-238/US-086 criterion 3): applying, a
+ * conflict, and an empty "already applied" result are always three
+ * distinct, explicit variants — never collapsed into a bare success. */
+export type CherryPickResultDto =
+  | { outcome: "applied"; hash: string }
+  | { outcome: "conflict"; conflictedFiles: ConflictedFileDto[] }
+  | { outcome: "empty" };
+
+/** A revert's exact outcome (T-239/US-087 criterion 2): completion and
+ * conflict are always two distinct, explicit variants, mirroring
+ * `CherryPickResultDto`'s own convention. */
+export type RevertResultDto =
+  | { outcome: "applied"; hash: string }
+  | { outcome: "conflict"; conflictedFiles: ConflictedFileDto[] };
+
+/** Which parent of a merge commit becomes the diff base for a cherry-pick/
+ * revert (T-238/T-239; US-086/US-087 criterion 2). Mirrors
+ * `gitsail_application::MergeParentPolicy`: this version supports exactly
+ * one policy, and omitting it against a merge commit is refused by the
+ * Core rather than guessed. */
+export type MergeParentPolicyDto = "firstParent";
+
+/** Which part of the repository a reset moves (T-240/US-088 criterion 1) —
+ * mirrors `gitsail_application::ResetMode` exactly. */
+export type ResetModeDto = "soft" | "mixed" | "hard";
+
 /** One action assignable to a rebase plan entry (T-236/US-084 criterion 1).
  * `"edit"` is deliberately not modeled — see `RebaseAction`'s own doc in
  * `gitsail-application`: every other action a person would reach for before

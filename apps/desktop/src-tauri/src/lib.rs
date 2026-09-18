@@ -117,6 +117,9 @@ pub fn run() {
             commands::skip_operation,
             commands::plan_rebase,
             commands::execute_rebase_plan,
+            commands::cherry_pick,
+            commands::revert,
+            commands::reset,
         ])
         .run(tauri::generate_context!())
         .expect("error while running the GitSail Desktop application");

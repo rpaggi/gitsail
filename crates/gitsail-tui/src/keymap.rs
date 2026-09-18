@@ -51,6 +51,10 @@ pub enum InputContext {
     /// priority over [`Self::RebasePlan`] exactly like
     /// [`Self::CommitMessage`] takes priority over [`Self::Normal`].
     RebasePlanReword,
+    /// The reset-mode chooser overlay is open (`z`, T-240/US-088) —
+    /// navigable like [`Self::RebasePlan`], picking soft/mixed/hard before
+    /// anything is confirmed.
+    ResetMode,
     /// No overlay is active; the panels and shortcuts bar are live.
     Normal,
 }
@@ -135,6 +139,13 @@ pub fn action_for(key: KeyEvent, ctx: InputContext) -> Option<Action> {
             KeyCode::Char(c) => Some(Action::RebasePlanRewordInput(c)),
             _ => None,
         },
+        InputContext::ResetMode => match key.code {
+            KeyCode::Char('q') | KeyCode::Esc => Some(Action::Dismiss),
+            KeyCode::Up | KeyCode::Char('k') => Some(Action::MoveUp),
+            KeyCode::Down | KeyCode::Char('j') => Some(Action::MoveDown),
+            KeyCode::Enter => Some(Action::Activate),
+            _ => None,
+        },
         InputContext::Normal => match key.code {
             KeyCode::Tab => Some(Action::FocusNext),
             KeyCode::BackTab => Some(Action::FocusPrev),
@@ -165,6 +176,9 @@ pub fn action_for(key: KeyEvent, ctx: InputContext) -> Option<Action> {
             KeyCode::Char('M') => Some(Action::ToggleConflictsPanel),
             KeyCode::Char('o') => Some(Action::RequestRebase),
             KeyCode::Char('O') => Some(Action::RequestRebasePlan),
+            KeyCode::Char('x') => Some(Action::RequestCherryPick),
+            KeyCode::Char('v') => Some(Action::RequestRevert),
+            KeyCode::Char('z') => Some(Action::RequestReset),
             _ => None,
         },
     }

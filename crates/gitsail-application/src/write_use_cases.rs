@@ -13,8 +13,9 @@ use gitsail_domain::{
 
 use crate::mutation::Precondition;
 use crate::write_ports::{
-    ApplyPatchResult, MergeResult, PatchPreview, PullOutcome, RebasePlan, RebaseResult,
-    RepositoryWritePort, StashApplyOutcome, StashScope, TagAnnotation, WorktreeBranchSpec,
+    ApplyPatchResult, CherryPickResult, MergeParentPolicy, MergeResult, PatchPreview, PullOutcome,
+    RebasePlan, RebaseResult, RepositoryWritePort, ResetMode, RevertResult, StashApplyOutcome,
+    StashScope, TagAnnotation, WorktreeBranchSpec,
 };
 
 pub struct StageFiles {
@@ -596,6 +597,75 @@ impl ExecuteRebasePlan {
 
     pub fn execute(&self, repo: &Repository, plan: &RebasePlan) -> Result<RebaseResult, GitSailError> {
         self.port.execute_rebase_plan(repo, plan)
+    }
+}
+
+/// Applies a selected commit's change onto the current branch (T-238/
+/// US-086). See [`RepositoryWritePort::cherry_pick`] for the applied/
+/// conflict/empty contract and the merge-parent policy this delegates to
+/// unchanged.
+pub struct CherryPick {
+    port: Arc<dyn RepositoryWritePort>,
+}
+
+impl CherryPick {
+    pub fn new(port: Arc<dyn RepositoryWritePort>) -> Self {
+        Self { port }
+    }
+
+    pub fn execute(
+        &self,
+        repo: &Repository,
+        commit: &CommitHash,
+        merge_parent: Option<MergeParentPolicy>,
+    ) -> Result<CherryPickResult, GitSailError> {
+        self.port.cherry_pick(repo, commit, merge_parent)
+    }
+}
+
+/// Creates a new commit undoing a selected commit's change (T-239/US-087).
+/// See [`RepositoryWritePort::revert`] for the applied/conflict contract and
+/// the merge-parent policy this delegates to unchanged.
+pub struct Revert {
+    port: Arc<dyn RepositoryWritePort>,
+}
+
+impl Revert {
+    pub fn new(port: Arc<dyn RepositoryWritePort>) -> Self {
+        Self { port }
+    }
+
+    pub fn execute(
+        &self,
+        repo: &Repository,
+        commit: &CommitHash,
+        merge_parent: Option<MergeParentPolicy>,
+    ) -> Result<RevertResult, GitSailError> {
+        self.port.revert(repo, commit, merge_parent)
+    }
+}
+
+/// Moves `HEAD` (and, per `mode`, the index/working tree) to a target
+/// revision (T-240/US-088). See [`RepositoryWritePort::reset`] for the exact
+/// per-mode contract and the `expected_head` precondition this delegates to
+/// unchanged.
+pub struct Reset {
+    port: Arc<dyn RepositoryWritePort>,
+}
+
+impl Reset {
+    pub fn new(port: Arc<dyn RepositoryWritePort>) -> Self {
+        Self { port }
+    }
+
+    pub fn execute(
+        &self,
+        repo: &Repository,
+        target_revision: &str,
+        mode: ResetMode,
+        expected_head: &CommitHash,
+    ) -> Result<(), GitSailError> {
+        self.port.reset(repo, target_revision, mode, expected_head)
     }
 }
 

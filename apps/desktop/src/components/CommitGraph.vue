@@ -8,6 +8,8 @@
 import { computed, onMounted, ref } from "vue";
 
 import { useCommitGraphStore } from "../stores/graph";
+import { useMergeStore } from "../stores/merge";
+import { useResetStore } from "../stores/reset";
 import {
   DEFAULT_LANE_WIDTH,
   DEFAULT_ROW_HEIGHT,
@@ -18,6 +20,8 @@ import {
 } from "./commitGraphLayout";
 
 const graph = useCommitGraphStore();
+const merge = useMergeStore();
+const resetStore = useResetStore();
 
 const viewport = ref<HTMLElement | null>(null);
 const scrollTop = ref(0);
@@ -94,6 +98,51 @@ function copySelectedHash(): void {
     void navigator.clipboard?.writeText(hash);
   }
   closeContextMenu();
+}
+
+/** The full commit the context menu is currently open for — looked up from
+ * the already-loaded rows by hash, so the menu never needs a second read
+ * (T-238/US-086; T-239/US-087; T-240/US-088). `undefined` while no menu is
+ * open, or in the vanishingly unlikely case the row scrolled out of the
+ * currently loaded page between opening the menu and clicking an action. */
+const contextCommit = computed(() =>
+  graph.rows.find((row) => row.commit.hash === contextMenu.value?.hash)?.commit,
+);
+
+/** Cherry-picks the right-clicked commit onto the current branch (T-238/
+ * US-086 criterion 1). A merge commit always uses this workspace's fixed
+ * first-parent policy (`isMerge`), named explicitly in the resulting
+ * confirmation rather than left implicit. */
+function requestCherryPick(): void {
+  const commit = contextCommit.value;
+  closeContextMenu();
+  if (!commit) {
+    return;
+  }
+  void merge.requestCherryPick(commit.hash, commit.shortHash, commit.isMerge);
+}
+
+/** Reverts the right-clicked commit (T-239/US-087 criterion 1), mirroring
+ * `requestCherryPick`. */
+function requestRevert(): void {
+  const commit = contextCommit.value;
+  closeContextMenu();
+  if (!commit) {
+    return;
+  }
+  void merge.requestRevert(commit.hash, commit.shortHash, commit.isMerge);
+}
+
+/** Opens the reset-mode chooser (`HistoryEditingPanel.vue`) for the
+ * right-clicked commit (T-240/US-088 criterion 1) — never itself a
+ * mutation. */
+function requestReset(): void {
+  const commit = contextCommit.value;
+  closeContextMenu();
+  if (!commit) {
+    return;
+  }
+  resetStore.open({ hash: commit.hash, shortHash: commit.shortHash });
 }
 
 onMounted(() => {
@@ -174,6 +223,9 @@ onMounted(() => {
       @click.stop
     >
       <button @click="copySelectedHash">Copy hash ({{ contextMenu.hash.slice(0, 8) }})</button>
+      <button @click="requestCherryPick">Cherry-pick</button>
+      <button @click="requestRevert">Revert</button>
+      <button @click="requestReset">Reset to here…</button>
     </div>
   </div>
 </template>
@@ -251,6 +303,12 @@ onMounted(() => {
   border: 1px solid #555;
   padding: 0.25rem;
   z-index: 10;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+.commit-graph__context-menu button {
+  text-align: left;
 }
 .error {
   color: #c0392b;

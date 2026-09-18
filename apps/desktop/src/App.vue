@@ -6,6 +6,7 @@ import BranchPanel from "./components/BranchPanel.vue";
 import CommitGraph from "./components/CommitGraph.vue";
 import ConfirmationDialog from "./components/ConfirmationDialog.vue";
 import DiffViewer from "./components/DiffViewer.vue";
+import HistoryEditingPanel from "./components/HistoryEditingPanel.vue";
 import MergePanel from "./components/MergePanel.vue";
 import RecentRepositories from "./components/RecentRepositories.vue";
 import RepositoryOpener from "./components/RepositoryOpener.vue";
@@ -87,6 +88,7 @@ onBeforeUnmount(() => {
       </div>
     </div>
     <ConfirmationDialog />
+    <HistoryEditingPanel />
   </main>
 </template>
 

@@ -21,12 +21,13 @@ use std::sync::Arc;
 use std::thread;
 
 use gitsail_application::{
-    AbortOperation, ApplyPatch, BlameRequest, CommitQuery, ContinueOperation, CreateBranch,
-    CreateCommit, DeleteBranch, DetectInProgressOperation, DiffRequest, ExecuteRebasePlan, Fetch,
-    GetCommitHistory, GetConflictSides, GetDiff, GetFileBlame, GetRepositoryStatus, ListBranches,
-    MarkConflictResolved, Merge, OpenRepository, PlanRebase, PreviewPatchApplication, Pull, Push,
-    Rebase, RebasePlan, RefreshTicket, RenameBranch, RepositoryReadPort, RepositoryWritePort,
-    SkipOperation, StageFiles, SwitchBranch, TakeConflictSide, UnstageFiles,
+    AbortOperation, ApplyPatch, BlameRequest, CherryPick, CommitQuery, ContinueOperation,
+    CreateBranch, CreateCommit, DeleteBranch, DetectInProgressOperation, DiffRequest,
+    ExecuteRebasePlan, Fetch, GetCommitHistory, GetConflictSides, GetDiff, GetFileBlame,
+    GetRepositoryStatus, ListBranches, MarkConflictResolved, Merge, MergeParentPolicy,
+    OpenRepository, PlanRebase, PreviewPatchApplication, Pull, Push, Rebase, RebasePlan,
+    RefreshTicket, RenameBranch, RepositoryReadPort, RepositoryWritePort, Reset, ResetMode,
+    Revert, SkipOperation, StageFiles, SwitchBranch, TakeConflictSide, UnstageFiles,
 };
 use gitsail_domain::{BranchName, CancellationToken, CommitHash, ConflictSide, Repository};
 
@@ -120,6 +121,18 @@ pub enum Command {
     /// US-084; T-237/US-085's squash/fixup are just two of this same plan's
     /// actions).
     ExecuteRebasePlan(Repository, RebasePlan),
+    /// Cherry-picks `commit` onto the current branch (T-238/US-086).
+    /// `merge_parent` is only ever `Some` for a merge commit (see
+    /// `gitsail_application::MergeParentPolicy`'s own doc).
+    CherryPick(Repository, CommitHash, Option<MergeParentPolicy>),
+    /// Reverts `commit`'s change as a new commit on the current branch
+    /// (T-239/US-087). `merge_parent` mirrors [`Self::CherryPick`]'s own
+    /// contract.
+    Revert(Repository, CommitHash, Option<MergeParentPolicy>),
+    /// Resets `HEAD`/the index/the working tree (per `mode`) to a target
+    /// revision (T-240/US-088), revalidating `expected_head` immediately
+    /// before running.
+    Reset(Repository, String, ResetMode, CommitHash),
 }
 
 /// Spawns one background thread per command in `commands`, each reporting
@@ -284,6 +297,18 @@ fn spawn_one(
             Command::ExecuteRebasePlan(repo, plan) => {
                 let result = ExecuteRebasePlan::new(write_port).execute(&repo, &plan);
                 Message::RebaseFinished(result)
+            }
+            Command::CherryPick(repo, commit, merge_parent) => {
+                let result = CherryPick::new(write_port).execute(&repo, &commit, merge_parent);
+                Message::CherryPickFinished(result)
+            }
+            Command::Revert(repo, commit, merge_parent) => {
+                let result = Revert::new(write_port).execute(&repo, &commit, merge_parent);
+                Message::RevertFinished(result)
+            }
+            Command::Reset(repo, target_revision, mode, expected_head) => {
+                let result = Reset::new(write_port).execute(&repo, &target_revision, mode, &expected_head);
+                Message::OperationFinished(result)
             }
         };
         // The receiving end only disappears once the app is shutting down

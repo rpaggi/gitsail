@@ -208,6 +208,135 @@ pub enum RebaseResult {
     Conflict { files: Vec<ConflictedFile> },
 }
 
+/// Which parent of a merge commit becomes the diff base for
+/// [`RepositoryWritePort::cherry_pick`]/[`RepositoryWritePort::revert`]
+/// (T-238/T-239; US-086/US-087 criterion 2). Git itself requires an
+/// explicit `-m <n>` to cherry-pick/revert a merge commit at all — there is
+/// no meaningful default parent to assume silently, and guessing one would
+/// contradict this workspace's own "never silently guessed" convention
+/// (History Editing Rules #7). This version supports exactly one policy,
+/// `FirstParent` (`-m 1`), deliberately mirroring the same first-parent
+/// convention [`crate::ports::RepositoryReadPort::diff`]'s own merge-commit
+/// handling already established (see `crate::use_cases`'s
+/// `get_commit_diff_uses_the_first_parent_for_a_merge_commit` test) rather
+/// than inventing a second, unrelated convention for this operation. A
+/// caller must pass this explicitly to cherry-pick/revert a merge commit;
+/// omitting it against a merge commit is a clear refusal (never a silent
+/// guess, and never an attempt to cherry-pick/revert every parent), and no
+/// other parent number is supported in this version — a documented v0.5
+/// scope cut, not an oversight.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MergeParentPolicy {
+    FirstParent,
+}
+
+impl MergeParentPolicy {
+    /// The `-m <n>` mainline number Git expects for this policy.
+    pub const fn mainline_number(self) -> u32 {
+        match self {
+            MergeParentPolicy::FirstParent => 1,
+        }
+    }
+}
+
+/// Outcome of [`RepositoryWritePort::cherry_pick`] (T-238/US-086 criterion
+/// 3): applying, a conflict, and an empty (no-op) result are always three
+/// distinct, explicit outcomes — never collapsed into one another, mirroring
+/// [`MergeResult`]/[`RebaseResult`]'s own convention. Git itself reports an
+/// empty cherry-pick distinctly from either a conflict or an ordinary
+/// success (its own "The previous cherry-pick is now empty" refusal, which
+/// still leaves `CHERRY_PICK_HEAD` in place — exactly like a conflict,
+/// recoverable via [`RepositoryWritePort::skip_operation`]/
+/// [`RepositoryWritePort::abort_operation`] — rather than either failing
+/// outright or silently creating an empty commit).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CherryPickResult {
+    /// The cherry-pick completed and created `hash`, a new commit on the
+    /// current branch.
+    Applied { hash: CommitHash },
+    /// The cherry-pick could not complete automatically: `files` are left
+    /// unmerged in the index, exactly as
+    /// [`crate::ports::RepositoryReadPort::detect_in_progress_operation`]
+    /// would also report them, and the repository is left with a pending
+    /// cherry-pick ([`gitsail_domain::InProgressOperation::CherryPick`]) for
+    /// continue/skip/abort to pick up.
+    Conflict { files: Vec<ConflictedFile> },
+    /// `commit`'s change is already present on the current branch (or
+    /// otherwise produces no net diff against it): Git reports this
+    /// distinctly from both a clean success and a conflict, and this port
+    /// preserves that distinction rather than collapsing it into either one
+    /// (US-086 criterion 3). The repository is left with a pending
+    /// cherry-pick, exactly like [`Self::Conflict`], recoverable via
+    /// [`RepositoryWritePort::skip_operation`] (move on without this
+    /// commit) or [`RepositoryWritePort::abort_operation`].
+    Empty,
+}
+
+/// Outcome of [`RepositoryWritePort::revert`] (T-239/US-087 criterion 2):
+/// completion and conflict are always two distinct, explicit outcomes,
+/// mirroring [`CherryPickResult`]. [`Self::Applied`] is always a brand-new
+/// commit on top of the current branch, structurally — never a rewrite or
+/// silent move of an existing reference (History Editing Rules #8): this
+/// port only ever invokes `git revert`, which Git itself implements purely
+/// as "apply the inverse patch and commit", with no code path that moves or
+/// deletes an existing ref.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RevertResult {
+    /// The revert completed and created `hash`, a new commit on the current
+    /// branch undoing `commit`'s change.
+    Applied { hash: CommitHash },
+    /// The revert could not complete automatically: `files` are left
+    /// unmerged in the index, exactly as
+    /// [`crate::ports::RepositoryReadPort::detect_in_progress_operation`]
+    /// would also report them, and the repository is left with a pending
+    /// revert ([`gitsail_domain::InProgressOperation::Revert`]) for
+    /// continue/skip/abort to pick up.
+    Conflict { files: Vec<ConflictedFile> },
+}
+
+/// Which part of the repository [`RepositoryWritePort::reset`] moves
+/// (T-240/US-088 criterion 1) — Git's own three reset modes, each strictly
+/// more of the repository state than the last:
+/// - `Soft`: moves `HEAD` only. The index and working tree are untouched,
+///   so whatever changes existed between the old and new `HEAD` now show up
+///   as staged.
+/// - `Mixed`: moves `HEAD` and resets the index to match the new `HEAD`.
+///   The working tree is untouched, so those same changes now show up as
+///   unstaged instead.
+/// - `Hard`: moves `HEAD`, the index, **and** the working tree to match
+///   `target_revision` exactly. Any uncommitted change — staged or not — is
+///   discarded outright; this is the one mode that can lose real work
+///   (US-088 criterion 2), and the only one classified
+///   [`crate::mutation::RiskLevel::Destructive`]
+///   ([`crate::mutation::MutationKind::Reset`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ResetMode {
+    Soft,
+    Mixed,
+    Hard,
+}
+
+impl ResetMode {
+    /// The `git reset` flag for this mode.
+    pub const fn git_flag(self) -> &'static str {
+        match self {
+            ResetMode::Soft => "--soft",
+            ResetMode::Mixed => "--mixed",
+            ResetMode::Hard => "--hard",
+        }
+    }
+}
+
+impl std::fmt::Display for ResetMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            ResetMode::Soft => "soft",
+            ResetMode::Mixed => "mixed",
+            ResetMode::Hard => "hard",
+        })
+    }
+}
+
 /// One action assignable to a commit in a [`RebasePlan`] (T-236/US-084
 /// criterion 1). `Edit` is deliberately not modeled — a documented scope cut
 /// (task note): every other action a person would actually reach for before
@@ -959,6 +1088,81 @@ pub trait RepositoryWritePort: Send + Sync {
     ) -> Result<RebaseResult, GitSailError> {
         let _ = (repo, plan);
         Err(unsupported("execute_rebase_plan"))
+    }
+
+    // -------------------------------------------------------------------
+    // EPIC-17/T-238..T-240 (US-086..088): cherry-pick, revert, and reset.
+    // Defaulted the same way as the batches above, for the same reason
+    // (existing `RepositoryWritePort` implementers predating this task keep
+    // compiling unchanged). [`gitsail_git::GitCliProvider`] overrides every
+    // one of these with a real `git` implementation. All three depend only
+    // on T-230/US-078 (in-progress operation detection, already delivered)
+    // and EPIC-22/EPIC-23 (already delivered): they need no new base
+    // capability of their own.
+
+    /// Applies `commit`'s change onto the current branch as a new commit via
+    /// `git cherry-pick` (T-238/US-086). Refuses up front when another
+    /// [`gitsail_domain::InProgressOperation`] is already pending, mirroring
+    /// [`Self::merge`]/[`Self::rebase`]'s own check. `merge_parent` selects
+    /// the diff base when `commit` is a merge commit (US-086 criterion 2):
+    /// `None` against a merge commit is refused outright with a clear,
+    /// actionable message rather than guessing `-m 1` silently — see
+    /// [`MergeParentPolicy`]'s own doc for why only `FirstParent` is
+    /// supported at all. See [`CherryPickResult`] for why success, conflict,
+    /// and "already applied" are always three distinct, explicit outcomes
+    /// (US-086 criterion 3), never a generic error for the conflict/empty
+    /// cases.
+    fn cherry_pick(
+        &self,
+        repo: &Repository,
+        commit: &CommitHash,
+        merge_parent: Option<MergeParentPolicy>,
+    ) -> Result<CherryPickResult, GitSailError> {
+        let _ = (repo, commit, merge_parent);
+        Err(unsupported("cherry_pick"))
+    }
+
+    /// Creates a new commit on the current branch undoing `commit`'s change
+    /// via `git revert` (T-239/US-087) — never rewrites or moves any
+    /// existing reference (History Editing Rules #8; US-087 criterion 2).
+    /// Refuses up front when another [`gitsail_domain::InProgressOperation`]
+    /// is already pending, mirroring [`Self::cherry_pick`]. `merge_parent`
+    /// mirrors [`Self::cherry_pick`]'s own contract exactly for a merge
+    /// commit (US-087 criterion 3). See [`RevertResult`] for why completion
+    /// and conflict are always two distinct, explicit outcomes.
+    fn revert(
+        &self,
+        repo: &Repository,
+        commit: &CommitHash,
+        merge_parent: Option<MergeParentPolicy>,
+    ) -> Result<RevertResult, GitSailError> {
+        let _ = (repo, commit, merge_parent);
+        Err(unsupported("revert"))
+    }
+
+    /// Moves `HEAD` (and, per `mode`, the index and/or working tree) to
+    /// `target_revision` via `git reset` (T-240/US-088). `expected_head` is
+    /// the commit hash a caller last observed as `HEAD` (typically from a
+    /// prior preview read) — this call revalidates it is still `HEAD`
+    /// immediately before resetting and refuses with
+    /// [`gitsail_domain::ErrorCode::OperationConflict`] otherwise (US-088
+    /// criterion 3), the same [`crate::mutation::Precondition`] discipline
+    /// [`Self::amend_commit`]'s own `expected_head` already applies — a
+    /// confirmation given against an older `HEAD` (in particular, a `Hard`
+    /// reset's reinforced confirmation, which names the exact predicted loss
+    /// against that older state) must never authorize resetting whatever
+    /// `HEAD` happens to be *now*: a concurrent change between preview and
+    /// confirmation always forces a fresh evaluation instead. See
+    /// [`ResetMode`] for exactly what each mode moves and preserves.
+    fn reset(
+        &self,
+        repo: &Repository,
+        target_revision: &str,
+        mode: ResetMode,
+        expected_head: &CommitHash,
+    ) -> Result<(), GitSailError> {
+        let _ = (repo, target_revision, mode, expected_head);
+        Err(unsupported("reset"))
     }
 }
 

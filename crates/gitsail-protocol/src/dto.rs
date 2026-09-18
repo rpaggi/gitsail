@@ -13,8 +13,9 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use gitsail_application::{
-    AmendPreview, ApplyPatchResult, CommitDiff, MergeResult, PatchExport, PatchPreview,
-    PullOutcome, RebaseAction, RebasePlan, RebasePlanEntry, RebaseResult, RecentRepositoryEntry,
+    AmendPreview, ApplyPatchResult, CherryPickResult, CommitDiff, MergeResult, PatchExport,
+    PatchPreview, PullOutcome, RebaseAction, RebasePlan, RebasePlanEntry, RebaseResult,
+    RecentRepositoryEntry, RevertResult,
 };
 use gitsail_domain::{
     Blame, BlameLine, BlameOrigin, Branch, BranchKind, ChangeType, Commit, CommitHash,
@@ -741,6 +742,65 @@ impl From<&RebaseResult> for RebaseResultDto {
                 new_head: new_head.as_str().to_string(),
             },
             RebaseResult::Conflict { files } => Self::Conflict {
+                conflicted_files: conflicted_files_dto(files),
+            },
+        }
+    }
+}
+
+/// A cherry-pick's exact outcome (T-238/US-086 criterion 3): applying, a
+/// conflict, and an empty "already applied" result are always three
+/// distinct, explicit variants — never collapsed into a bare success or a
+/// generic error. Mirrors [`CherryPickResult`] one-to-one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "outcome", rename_all = "camelCase")]
+pub enum CherryPickResultDto {
+    Applied {
+        hash: String,
+    },
+    Conflict {
+        #[serde(rename = "conflictedFiles")]
+        conflicted_files: Vec<ConflictedFileDto>,
+    },
+    Empty,
+}
+
+impl From<&CherryPickResult> for CherryPickResultDto {
+    fn from(result: &CherryPickResult) -> Self {
+        match result {
+            CherryPickResult::Applied { hash } => Self::Applied {
+                hash: hash.as_str().to_string(),
+            },
+            CherryPickResult::Conflict { files } => Self::Conflict {
+                conflicted_files: conflicted_files_dto(files),
+            },
+            CherryPickResult::Empty => Self::Empty,
+        }
+    }
+}
+
+/// A revert's exact outcome (T-239/US-087 criterion 2): completion and
+/// conflict are always two distinct, explicit variants, mirroring
+/// [`RevertResult`] one-to-one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "outcome", rename_all = "camelCase")]
+pub enum RevertResultDto {
+    Applied {
+        hash: String,
+    },
+    Conflict {
+        #[serde(rename = "conflictedFiles")]
+        conflicted_files: Vec<ConflictedFileDto>,
+    },
+}
+
+impl From<&RevertResult> for RevertResultDto {
+    fn from(result: &RevertResult) -> Self {
+        match result {
+            RevertResult::Applied { hash } => Self::Applied {
+                hash: hash.as_str().to_string(),
+            },
+            RevertResult::Conflict { files } => Self::Conflict {
                 conflicted_files: conflicted_files_dto(files),
             },
         }
@@ -1891,6 +1951,53 @@ mod tests {
             ff_json["outcome"], conflict_json["outcome"],
             "a conflict must never be tagged the same as a fast-forward"
         );
+    }
+
+    #[test]
+    fn cherry_pick_result_dto_distinguishes_applied_conflict_and_empty() {
+        let applied = CherryPickResultDto::from(&CherryPickResult::Applied {
+            hash: CommitHash::new("a".repeat(40)).unwrap(),
+        });
+        let conflict = CherryPickResultDto::from(&CherryPickResult::Conflict {
+            files: vec![ConflictedFile {
+                path: PathBuf::from("f.txt"),
+                stage: ConflictStage::BothModified,
+            }],
+        });
+        let empty = CherryPickResultDto::from(&CherryPickResult::Empty);
+
+        let applied_json = serde_json::to_value(&applied).unwrap();
+        let conflict_json = serde_json::to_value(&conflict).unwrap();
+        let empty_json = serde_json::to_value(&empty).unwrap();
+
+        assert_eq!(applied_json["outcome"], "applied");
+        assert_eq!(applied_json["hash"], "a".repeat(40));
+        assert_eq!(conflict_json["outcome"], "conflict");
+        assert_eq!(conflict_json["conflictedFiles"][0]["path"], "f.txt");
+        assert_eq!(empty_json["outcome"], "empty");
+        assert_ne!(applied_json["outcome"], conflict_json["outcome"]);
+        assert_ne!(conflict_json["outcome"], empty_json["outcome"]);
+    }
+
+    #[test]
+    fn revert_result_dto_distinguishes_applied_and_conflict() {
+        let applied = RevertResultDto::from(&RevertResult::Applied {
+            hash: CommitHash::new("c".repeat(40)).unwrap(),
+        });
+        let conflict = RevertResultDto::from(&RevertResult::Conflict {
+            files: vec![ConflictedFile {
+                path: PathBuf::from("g.txt"),
+                stage: ConflictStage::BothModified,
+            }],
+        });
+
+        let applied_json = serde_json::to_value(&applied).unwrap();
+        let conflict_json = serde_json::to_value(&conflict).unwrap();
+
+        assert_eq!(applied_json["outcome"], "applied");
+        assert_eq!(applied_json["hash"], "c".repeat(40));
+        assert_eq!(conflict_json["outcome"], "conflict");
+        assert_eq!(conflict_json["conflictedFiles"][0]["path"], "g.txt");
     }
 
     #[test]
