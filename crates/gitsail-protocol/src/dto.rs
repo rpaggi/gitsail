@@ -12,12 +12,12 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use gitsail_application::{AmendPreview, CommitDiff, PatchExport, RecentRepositoryEntry};
+use gitsail_application::{AmendPreview, CommitDiff, PatchExport, PullOutcome, RecentRepositoryEntry};
 use gitsail_domain::{
     Blame, BlameLine, BlameOrigin, Branch, BranchKind, ChangeType, Commit, CommitHash, Decoration,
     Diff, DiffHunk, DiffLine, DiffLineOrigin, FileChange, FileContentAtRevision, FileContentKind,
     FileDiff, FileStatusCode, GitTimestamp, GraphEdge, GraphRow, HeadState, LineHistory,
-    LineHistoryEntry, LineRange, Repository, RepositoryStatus, Signature,
+    LineHistoryEntry, LineRange, Remote, Repository, RepositoryStatus, Signature,
 };
 
 /// Converts a filesystem path to its wire representation.
@@ -430,6 +430,90 @@ impl From<&Branch> for BranchDto {
             is_current: branch.is_current,
         }
     }
+}
+
+// ---------------------------------------------------------------------
+// Remotes and sync (EPIC-19/US-096..098; exposed to Desktop for US-060/
+// T-193's fetch/pull/push subset). Mirrors `gitsail-tui`'s own rendering
+// convention (`crates/gitsail-tui/src/ui.rs`): a remote's URLs always cross
+// this boundary already redacted (`RemoteUrl::redacted`), never the raw
+// string — the same "never leak an embedded credential" rule SAD §11/§28
+// hold for any diagnostic surface applies here too.
+// ---------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteDto {
+    pub name: String,
+    pub fetch_url: String,
+    pub push_url: String,
+}
+
+impl From<&Remote> for RemoteDto {
+    fn from(remote: &Remote) -> Self {
+        Self {
+            name: remote.name.clone(),
+            fetch_url: remote.fetch_url.redacted(),
+            push_url: remote.push_url.redacted(),
+        }
+    }
+}
+
+/// Which remote (and, for pull/push, which branch) a sync action would
+/// target — returned by `resolve_sync_target` for a caller to display
+/// *before* running fetch/pull/push (US-060 criterion 2), and echoed back
+/// by `fetch`/`push` themselves once they have run, naming exactly what
+/// they acted on. `branch` is the current branch used to resolve the
+/// remote (via its upstream, when set) — always present once a repository
+/// with a checked-out branch is open, fetch included, since knowing which
+/// branch informed the choice is part of "never an implicit, silently
+/// guessed choice" (mirrors `gitsail_tui::App::resolve_sync_remote`'s own
+/// contract).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncTargetDto {
+    pub remote: String,
+    pub branch: Option<String>,
+}
+
+/// A pull's exact outcome (US-097/US-060 criterion 2: "already up to date"
+/// and "fast-forwarded" are shown explicitly, never collapsed into a bare
+/// success) — mirrors `gitsail_application::PullOutcome` one-to-one, the
+/// same as `gitsail-tui`'s own rendering of it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "outcome", rename_all = "camelCase")]
+pub enum PullOutcomeDto {
+    AlreadyUpToDate,
+    // `rename_all` on an enum only renames variant names, not struct-variant
+    // field names (no existing DTO here had an underscored field inside an
+    // enum variant to reveal that until this one) — spelled out explicitly
+    // so the wire field is `newHead`, matching every other DTO's camelCase
+    // convention.
+    FastForwarded {
+        #[serde(rename = "newHead")]
+        new_head: String,
+    },
+}
+
+impl From<&PullOutcome> for PullOutcomeDto {
+    fn from(outcome: &PullOutcome) -> Self {
+        match outcome {
+            PullOutcome::AlreadyUpToDate => Self::AlreadyUpToDate,
+            PullOutcome::FastForwarded { new_head } => Self::FastForwarded {
+                new_head: new_head.as_str().to_string(),
+            },
+        }
+    }
+}
+
+/// A completed pull's full report: which remote/branch it targeted plus its
+/// [`PullOutcomeDto`] (US-060 criterion 2).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PullResultDto {
+    pub remote: String,
+    pub branch: String,
+    pub outcome: PullOutcomeDto,
 }
 
 // ---------------------------------------------------------------------
@@ -1157,6 +1241,70 @@ mod tests {
         assert_eq!(json["head"]["subject"], "original message");
         assert_eq!(json["head"]["hash"], "b".repeat(40));
         assert_eq!(json["stagedDiff"]["files"][0]["path"], "a.txt");
+    }
+
+    // -- Remotes and sync (EPIC-19/US-060/T-193) ---------------------------
+
+    #[test]
+    fn remote_dto_redacts_embedded_credentials_in_both_urls() {
+        let remote = gitsail_domain::Remote {
+            name: "origin".to_string(),
+            fetch_url: gitsail_domain::RemoteUrl::new(
+                "https://user:secret-token@github.com/org/repo.git",
+            ),
+            push_url: gitsail_domain::RemoteUrl::new(
+                "https://user:secret-token@github.com/org/repo.git",
+            ),
+        };
+
+        let dto = RemoteDto::from(&remote);
+
+        assert_eq!(dto.name, "origin");
+        assert!(!dto.fetch_url.contains("secret-token"));
+        assert!(!dto.push_url.contains("secret-token"));
+        assert_eq!(dto.fetch_url, "https://***@github.com/org/repo.git");
+    }
+
+    #[test]
+    fn pull_outcome_dto_tags_already_up_to_date_and_fast_forwarded_distinctly() {
+        let up_to_date = PullOutcomeDto::from(&PullOutcome::AlreadyUpToDate);
+        let hash = CommitHash::new("a".repeat(40)).unwrap();
+        let fast_forwarded = PullOutcomeDto::from(&PullOutcome::FastForwarded { new_head: hash.clone() });
+
+        let up_to_date_json = serde_json::to_value(&up_to_date).unwrap();
+        let fast_forwarded_json = serde_json::to_value(&fast_forwarded).unwrap();
+
+        assert_eq!(up_to_date_json["outcome"], "alreadyUpToDate");
+        assert_eq!(fast_forwarded_json["outcome"], "fastForwarded");
+        assert_eq!(fast_forwarded_json["newHead"], "a".repeat(40));
+    }
+
+    #[test]
+    fn pull_result_dto_carries_the_resolved_target_and_outcome() {
+        let dto = PullResultDto {
+            remote: "origin".to_string(),
+            branch: "main".to_string(),
+            outcome: PullOutcomeDto::AlreadyUpToDate,
+        };
+
+        let json = serde_json::to_value(&dto).unwrap();
+
+        assert_eq!(json["remote"], "origin");
+        assert_eq!(json["branch"], "main");
+        assert_eq!(json["outcome"]["outcome"], "alreadyUpToDate");
+    }
+
+    #[test]
+    fn sync_target_dto_allows_an_absent_branch() {
+        let dto = SyncTargetDto {
+            remote: "origin".to_string(),
+            branch: None,
+        };
+
+        let json = serde_json::to_value(&dto).unwrap();
+
+        assert_eq!(json["remote"], "origin");
+        assert!(json["branch"].is_null());
     }
 
     #[test]

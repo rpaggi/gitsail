@@ -1,8 +1,8 @@
-// Local-branch state (T-193's local-branch subset of US-060 — create/
-// switch/delete only; fetch/pull/push are out of scope). Every mutation
-// goes through `stores/operation.ts` (T-194/US-061), so a create/switch/
-// delete always shows its target and risk before running and can always
-// be cancelled before it touches the repository.
+// Local-branch state (US-060's create/switch/delete subset; remote sync —
+// fetch/pull/push — lives in `stores/sync.ts`). Every mutation goes through
+// `stores/operation.ts` (T-194/US-061), so a create/switch/delete always
+// shows its target and risk before running and can always be cancelled
+// before it touches the repository.
 
 import { defineStore } from "pinia";
 

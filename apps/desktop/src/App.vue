@@ -11,6 +11,7 @@ import RepositoryOpener from "./components/RepositoryOpener.vue";
 import SearchPalette from "./components/SearchPalette.vue";
 import StagingPanel from "./components/StagingPanel.vue";
 import StatusPanel from "./components/StatusPanel.vue";
+import SyncPanel from "./components/SyncPanel.vue";
 import { useAppDataStore } from "./stores/appData";
 import { useCommitGraphStore } from "./stores/graph";
 import { useRepositorySessionStore } from "./stores/session";
@@ -72,6 +73,7 @@ onBeforeUnmount(() => {
       <aside class="workspace__sidebar">
         <SearchPalette />
         <BranchPanel />
+        <SyncPanel />
         <AmendPanel />
       </aside>
       <div class="workspace__main">

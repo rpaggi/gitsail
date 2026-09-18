@@ -20,7 +20,8 @@ pub use dto::{
     CommitResultDto, DecorationDto, DiffDto, DiffHunkDto, DiffLineDto, DiffLineOriginDto,
     FileChangeDto, FileContentDto, FileDiffDto, FileStatusCodeDto, GitTimestampDto, GraphEdgeDto,
     HeadStateDto, LineHistoryDto, LineHistoryEntryDto, LineRangeDto, PatchExportDto,
-    RecentRepositoryDto, RepositoryDto, RepositoryStatusDto, SignatureDto,
+    PullOutcomeDto, PullResultDto, RecentRepositoryDto, RemoteDto, RepositoryDto,
+    RepositoryStatusDto, SignatureDto, SyncTargetDto,
 };
 pub use envelope::{Envelope, Page, SCHEMA_VERSION};
 pub use error::ErrorPayload;

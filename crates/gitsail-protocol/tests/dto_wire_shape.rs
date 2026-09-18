@@ -25,7 +25,7 @@
 
 use gitsail_protocol::{
     BranchDto, BranchKindDto, CommitDto, CommitGraphPageDto, DecorationDto, DiffLineOriginDto,
-    GitTimestampDto, HeadStateDto, RepositoryDto, SignatureDto,
+    GitTimestampDto, HeadStateDto, PullOutcomeDto, RepositoryDto, SignatureDto, SyncTargetDto,
 };
 use serde_json::json;
 
@@ -132,6 +132,38 @@ fn diff_line_origin_dto_is_a_plain_snake_case_string_enum() {
     assert_eq!(
         serde_json::to_value(DiffLineOriginDto::Deletion).unwrap(),
         json!("deletion")
+    );
+}
+
+#[test]
+fn pull_outcome_dto_is_internally_tagged_with_an_explicitly_renamed_struct_variant_field() {
+    // The one DTO in this crate needing an explicit per-field `rename`
+    // inside an enum variant (`rename_all` on an enum only renames variant
+    // names, not struct-variant fields) — pinned here since that is easy to
+    // silently drop in a future edit.
+    assert_eq!(
+        serde_json::to_value(PullOutcomeDto::AlreadyUpToDate).unwrap(),
+        json!({ "outcome": "alreadyUpToDate" })
+    );
+    assert_eq!(
+        serde_json::to_value(PullOutcomeDto::FastForwarded {
+            new_head: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef".to_string()
+        })
+        .unwrap(),
+        json!({
+            "outcome": "fastForwarded",
+            "newHead": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+        })
+    );
+}
+
+#[test]
+fn sync_target_dto_serializes_an_absent_branch_as_null() {
+    let target = SyncTargetDto { remote: "origin".to_string(), branch: None };
+
+    assert_eq!(
+        serde_json::to_value(&target).unwrap(),
+        json!({ "remote": "origin", "branch": null })
     );
 }
 

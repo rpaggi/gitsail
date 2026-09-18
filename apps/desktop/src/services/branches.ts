@@ -1,6 +1,6 @@
-// The typed frontend service for local branch operations (T-193's
-// local-branch subset of US-060: create/switch/delete only — fetch/pull/push
-// are out of scope, blocked on EPIC-19/Remote Operations). Following
+// The typed frontend service for local branch operations (US-060's
+// create/switch/delete subset; remote sync — fetch/pull/push — is a
+// separate concern in `services/sync.ts`/`stores/sync.ts`). Following
 // `repository.ts`'s convention: this is the only module that calls
 // `invoke("list_branches" | "create_branch" | "switch_branch" |
 // "delete_branch", ...)`.

@@ -19,19 +19,20 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use gitsail_application::{
-    AmendCommit, CommitQuery, CreateBranch, CreateCommit, DeleteBranch, DiffRequest,
+    AmendCommit, CommitQuery, CreateBranch, CreateCommit, DeleteBranch, DiffRequest, Fetch,
     ForgetRecentRepository, GetCommit, GetCommitHistory, GetDiff, ListBranches,
-    ListRecentRepositories, OpenRepository, PreviewAmend, RecordRecentRepository, RefreshReason,
-    StageFiles, StageHunks, SwitchBranch, UnstageFiles, UnstageHunks,
+    ListRecentRepositories, OpenRepository, PreviewAmend, Pull, Push, RecordRecentRepository,
+    RefreshReason, StageFiles, StageHunks, SwitchBranch, UnstageFiles, UnstageHunks,
 };
 use gitsail_domain::{
-    BranchName, CancellationToken, CommitHash, ErrorCode, FileDiff, GitSailError, GraphCommit,
-    Repository,
+    Branch, BranchKind, BranchName, CancellationToken, CommitHash, ErrorCode, FileDiff,
+    GitSailError, GraphCommit, Remote, Repository,
 };
 use gitsail_protocol::{
     AmendPreviewDto, BranchDto, CommitDto, CommitGraphPageDto, CommitGraphRowDto,
-    CommitResultDto, DiffDto, ErrorPayload, FileDiffDto, PatchExportDto, RecentRepositoryDto,
-    RepositoryDto, RepositoryStatusDto,
+    CommitResultDto, DiffDto, ErrorPayload, FileDiffDto, PatchExportDto, PullOutcomeDto,
+    PullResultDto, RecentRepositoryDto, RemoteDto, RepositoryDto, RepositoryStatusDto,
+    SyncTargetDto,
 };
 
 use crate::state::{AppState, StartupIntent};
@@ -534,7 +535,7 @@ fn amend_commit_impl(
     Ok(CommitResultDto::from(&hash))
 }
 
-// -- US-060 (local-branch subset only; fetch/pull/push are out of scope) --
+// -- US-060: local branches, plus remote sync (fetch/pull/push) --------
 
 #[tauri::command]
 pub fn create_branch(
@@ -584,6 +585,189 @@ fn delete_branch_impl(state: &AppState, name: &str, force: bool) -> Result<(), G
     let name = BranchName::new(name)?;
     run_mutation(state, |repository| {
         DeleteBranch::new(state.write_port()).execute(repository, &name, force)
+    })
+}
+
+// -- US-060: remote sync (fetch/pull/push), EPIC-19 -----------------------
+//
+// Every command below resolves which remote (and, for pull/push, which
+// branch) it targets the same way `gitsail-tui`'s own `App::
+// resolve_sync_remote` does (T-182/US-049): prefer the current branch's
+// configured upstream, else the sole configured remote, else refuse rather
+// than silently guessing among several — this story's own criterion 3
+// ("mesma política, mesmo resultado esperado") requires the two surfaces to
+// agree, so the algorithm is copied verbatim rather than reinvented, just
+// against this crate's own already-fetched `Branch`/`Remote` values instead
+// of the TUI's in-memory `App` fields.
+
+/// Resolves which remote fetch/pull/push should target, given `current_branch`,
+/// the repository's branches, and its configured remotes. Pure (no I/O) so it
+/// is trivially unit-testable independent of any adapter — see this
+/// module's tests for the same four scenarios `gitsail-tui`'s own
+/// `resolve_sync_remote` tests cover (upstream preferred, sole-remote
+/// fallback, no remote configured, ambiguous with no upstream).
+fn resolve_remote_name(
+    current_branch: &BranchName,
+    branches: &[Branch],
+    remotes: &[Remote],
+) -> Result<String, GitSailError> {
+    if let Some(branch) = branches
+        .iter()
+        .find(|b| matches!(b.kind, BranchKind::Local) && &b.name == current_branch)
+    {
+        if let Some(upstream) = branch.upstream.as_ref() {
+            if let Some((remote, _)) = upstream.as_str().split_once('/') {
+                return Ok(remote.to_string());
+            }
+        }
+    }
+
+    match remotes.len() {
+        1 => Ok(remotes[0].name.clone()),
+        0 => Err(GitSailError::new(
+            ErrorCode::InvalidRepositoryState,
+            "no remote is configured",
+        )
+        .with_remediation("add a remote (e.g. `git remote add origin <url>`) first")),
+        _ => Err(GitSailError::new(
+            ErrorCode::InvalidRepositoryState,
+            "the current branch has no upstream and multiple remotes are configured — cannot determine which to use",
+        )
+        .with_remediation("set an upstream for this branch, e.g. `git push -u <remote> <branch>`")),
+    }
+}
+
+/// Reads whatever `resolve_remote_name` needs against `repository` (its
+/// current branch, its branches, its configured remotes) and resolves the
+/// sync target, all through the read port — never mutating anything.
+fn resolve_sync_target_for(
+    state: &AppState,
+    repository: &Repository,
+) -> Result<(BranchName, String), GitSailError> {
+    let current_branch = repository.current_branch.clone().ok_or_else(|| {
+        GitSailError::new(
+            ErrorCode::InvalidRepositoryState,
+            "no branch is currently checked out",
+        )
+        .with_remediation("check out a branch before syncing with a remote")
+    })?;
+    let branches = ListBranches::new(state.port()).execute(repository)?;
+    let remotes = state.port().list_remotes(repository)?;
+    let remote = resolve_remote_name(&current_branch, &branches, &remotes)?;
+    Ok((current_branch, remote))
+}
+
+/// Lists the repository's configured remotes (EPIC-18/US-091), used by the
+/// Desktop sync panel to show what is configured alongside the resolved
+/// target. Read-only.
+#[tauri::command]
+pub fn list_remotes(state: tauri::State<AppState>) -> Result<Vec<RemoteDto>, ErrorPayload> {
+    list_remotes_impl(&state).map_err(|err| ErrorPayload::from(&err))
+}
+
+fn list_remotes_impl(state: &AppState) -> Result<Vec<RemoteDto>, GitSailError> {
+    let (repository, _epoch) = state.repository_with_epoch()?;
+    let remotes = state.port().list_remotes(&repository)?;
+    Ok(remotes.iter().map(RemoteDto::from).collect())
+}
+
+/// Resolves which remote (and current branch) fetch/pull/push would target,
+/// without mutating anything (US-060 criterion 2: the remote/branch/
+/// upstream that would be affected is shown *before* running the
+/// operation). The frontend calls this to populate a confirmation prompt or
+/// a standing "this is what Fetch/Pull/Push will do" display; `fetch`/
+/// `pull`/`push` below each re-resolve the same way immediately before
+/// acting, so what actually runs is never a stale snapshot of this call.
+#[tauri::command]
+pub fn resolve_sync_target(state: tauri::State<AppState>) -> Result<SyncTargetDto, ErrorPayload> {
+    resolve_sync_target_impl(&state).map_err(|err| ErrorPayload::from(&err))
+}
+
+fn resolve_sync_target_impl(state: &AppState) -> Result<SyncTargetDto, GitSailError> {
+    let (repository, _epoch) = state.repository_with_epoch()?;
+    let (current_branch, remote) = resolve_sync_target_for(state, &repository)?;
+    Ok(SyncTargetDto {
+        remote,
+        branch: Some(current_branch.as_str().to_string()),
+    })
+}
+
+/// Fetches the resolved remote's refs (US-096; `Safe` risk per SAD §20's own
+/// named example, mirrored by the frontend's operation-risk classification
+/// — no confirmation gate here, matching every other Tauri command in this
+/// file). Never touches the working tree/HEAD (`RepositoryWritePort::
+/// fetch`'s own contract, unchanged).
+#[tauri::command]
+pub fn fetch(state: tauri::State<AppState>) -> Result<SyncTargetDto, ErrorPayload> {
+    fetch_impl(&state).map_err(|err| ErrorPayload::from(&err))
+}
+
+fn fetch_impl(state: &AppState) -> Result<SyncTargetDto, GitSailError> {
+    let (current_branch, remote) = run_mutation(state, |repository| {
+        let (current_branch, remote) = resolve_sync_target_for(state, repository)?;
+        Fetch::new(state.write_port()).execute(repository, &remote, &CancellationToken::new())?;
+        Ok((current_branch, remote))
+    })?;
+    Ok(SyncTargetDto {
+        remote,
+        branch: Some(current_branch.as_str().to_string()),
+    })
+}
+
+/// Integrates the resolved remote's tracked branch via a fast-forward-only
+/// pull (US-097). Never merges, rebases, or otherwise integrates a
+/// divergent history automatically: a refused divergence comes back as an
+/// ordinary [`GitSailError`] (`ErrorCode::OperationConflict`), exactly
+/// `RepositoryWritePort::pull`'s fixed policy, matching `gitsail-tui`'s own
+/// T-182 behavior (this story's criterion 3).
+#[tauri::command]
+pub fn pull(state: tauri::State<AppState>) -> Result<PullResultDto, ErrorPayload> {
+    pull_impl(&state).map_err(|err| ErrorPayload::from(&err))
+}
+
+fn pull_impl(state: &AppState) -> Result<PullResultDto, GitSailError> {
+    let (current_branch, remote, outcome) = run_mutation(state, |repository| {
+        let (current_branch, remote) = resolve_sync_target_for(state, repository)?;
+        let outcome = Pull::new(state.write_port()).execute(
+            repository,
+            &remote,
+            &current_branch,
+            &CancellationToken::new(),
+        )?;
+        Ok((current_branch, remote, outcome))
+    })?;
+    Ok(PullResultDto {
+        remote,
+        branch: current_branch.as_str().to_string(),
+        outcome: PullOutcomeDto::from(&outcome),
+    })
+}
+
+/// Publishes the current branch to the resolved remote via a plain,
+/// non-force push (US-098). A non-fast-forward rejection is never escalated
+/// to a force push automatically — that stays `RepositoryWritePort::
+/// force_push_with_lease`'s own, separate, out-of-scope operation (matching
+/// `gitsail-tui`'s T-182 `OperationKind::Push`, which deliberately excludes
+/// it for the same reason).
+#[tauri::command]
+pub fn push(state: tauri::State<AppState>) -> Result<SyncTargetDto, ErrorPayload> {
+    push_impl(&state).map_err(|err| ErrorPayload::from(&err))
+}
+
+fn push_impl(state: &AppState) -> Result<SyncTargetDto, GitSailError> {
+    let (current_branch, remote) = run_mutation(state, |repository| {
+        let (current_branch, remote) = resolve_sync_target_for(state, repository)?;
+        Push::new(state.write_port()).execute(
+            repository,
+            &remote,
+            &current_branch,
+            &CancellationToken::new(),
+        )?;
+        Ok((current_branch, remote))
+    })?;
+    Ok(SyncTargetDto {
+        remote,
+        branch: Some(current_branch.as_str().to_string()),
     })
 }
 
@@ -643,6 +827,10 @@ mod tests {
         /// Keyed by revision expression (e.g. `"HEAD"`, a branch name); the
         /// other source `resolve_revision()` checks.
         revisions: std::collections::HashMap<String, CommitHash>,
+        /// Configured remotes (US-060/T-193's fetch/pull/push subset),
+        /// reported by `list_remotes` and consulted by
+        /// `resolve_sync_target_for`.
+        remotes: Vec<Remote>,
     }
 
     impl Default for FakePort {
@@ -655,6 +843,7 @@ mod tests {
                 branches: vec![],
                 commits_by_hash: std::collections::HashMap::new(),
                 revisions: std::collections::HashMap::new(),
+                remotes: vec![],
             }
         }
     }
@@ -756,6 +945,10 @@ mod tests {
         ) -> Result<gitsail_domain::FileContentAtRevision, GitSailError> {
             unimplemented!("not exercised by these tests")
         }
+
+        fn list_remotes(&self, _repo: &Repository) -> Result<Vec<Remote>, GitSailError> {
+            Ok(self.remotes.clone())
+        }
     }
 
     fn sample_repository() -> Repository {
@@ -850,6 +1043,10 @@ mod tests {
         received_switch_target: Mutex<Option<BranchName>>,
         received_create_branch: Mutex<Option<(BranchName, Option<CommitHash>)>>,
         received_delete_branch: Mutex<Option<(BranchName, bool)>>,
+        received_fetch: Mutex<Option<String>>,
+        received_pull: Mutex<Option<(String, BranchName)>>,
+        received_push: Mutex<Option<(String, BranchName)>>,
+        pull_outcome: gitsail_application::PullOutcome,
     }
 
     impl FakeWritePort {
@@ -866,11 +1063,19 @@ mod tests {
                 received_switch_target: Mutex::new(None),
                 received_create_branch: Mutex::new(None),
                 received_delete_branch: Mutex::new(None),
+                received_fetch: Mutex::new(None),
+                received_pull: Mutex::new(None),
+                received_push: Mutex::new(None),
+                pull_outcome: gitsail_application::PullOutcome::AlreadyUpToDate,
             }
         }
 
         fn failing() -> Self {
             Self { fail: true, ..Self::new() }
+        }
+
+        fn with_pull_outcome(outcome: gitsail_application::PullOutcome) -> Self {
+            Self { pull_outcome: outcome, ..Self::new() }
         }
     }
 
@@ -963,6 +1168,47 @@ mod tests {
                 return Err(GitSailError::new(ErrorCode::OperationConflict, "HEAD changed since preview"));
             }
             Ok(self.commit_hash.clone())
+        }
+
+        fn fetch(
+            &self,
+            _repo: &Repository,
+            remote: &str,
+            _cancel: &CancellationToken,
+        ) -> Result<(), GitSailError> {
+            *self.received_fetch.lock().unwrap() = Some(remote.to_string());
+            if self.fail {
+                return Err(GitSailError::new(ErrorCode::Internal, "network error"));
+            }
+            Ok(())
+        }
+
+        fn pull(
+            &self,
+            _repo: &Repository,
+            remote: &str,
+            branch: &BranchName,
+            _cancel: &CancellationToken,
+        ) -> Result<gitsail_application::PullOutcome, GitSailError> {
+            *self.received_pull.lock().unwrap() = Some((remote.to_string(), branch.clone()));
+            if self.fail {
+                return Err(GitSailError::new(ErrorCode::OperationConflict, "would diverge history"));
+            }
+            Ok(self.pull_outcome.clone())
+        }
+
+        fn push(
+            &self,
+            _repo: &Repository,
+            remote: &str,
+            branch: &BranchName,
+            _cancel: &CancellationToken,
+        ) -> Result<(), GitSailError> {
+            *self.received_push.lock().unwrap() = Some((remote.to_string(), branch.clone()));
+            if self.fail {
+                return Err(GitSailError::new(ErrorCode::OperationConflict, "non-fast-forward"));
+            }
+            Ok(())
         }
     }
 
@@ -1564,6 +1810,243 @@ mod tests {
         assert_eq!(err.code(), ErrorCode::OperationConflict);
     }
 
+    // -- US-060: remote sync resolution (`resolve_remote_name`), mirroring
+    // `gitsail_tui::App::resolve_sync_remote`'s own four scenarios ----------
+
+    fn sample_remote(name: &str) -> Remote {
+        Remote {
+            name: name.to_string(),
+            fetch_url: gitsail_domain::RemoteUrl::new(format!("https://example.com/{name}.git")),
+            push_url: gitsail_domain::RemoteUrl::new(format!("https://example.com/{name}.git")),
+        }
+    }
+
+    fn branch_with_upstream(name: &str, upstream: Option<&str>) -> Branch {
+        Branch {
+            name: BranchName::new(name).unwrap(),
+            kind: gitsail_domain::BranchKind::Local,
+            target: CommitHash::new("a".repeat(40)).unwrap(),
+            upstream: upstream.map(|u| BranchName::new(u).unwrap()),
+            ahead: 0,
+            behind: 0,
+            is_current: true,
+        }
+    }
+
+    #[test]
+    fn resolve_remote_name_prefers_the_current_branchs_upstream_remote_over_a_guess() {
+        let main = BranchName::new("main").unwrap();
+        let branches = vec![branch_with_upstream("main", Some("upstream/main"))];
+        let remotes = vec![sample_remote("origin"), sample_remote("upstream")];
+
+        let remote = resolve_remote_name(&main, &branches, &remotes).unwrap();
+
+        assert_eq!(remote, "upstream");
+    }
+
+    #[test]
+    fn resolve_remote_name_falls_back_to_the_sole_configured_remote() {
+        let main = BranchName::new("main").unwrap();
+        let branches = vec![branch_with_upstream("main", None)];
+        let remotes = vec![sample_remote("origin")];
+
+        let remote = resolve_remote_name(&main, &branches, &remotes).unwrap();
+
+        assert_eq!(remote, "origin");
+    }
+
+    #[test]
+    fn resolve_remote_name_with_no_remote_configured_reports_a_clear_error() {
+        let main = BranchName::new("main").unwrap();
+
+        let err = resolve_remote_name(&main, &[], &[]).unwrap_err();
+
+        assert_eq!(err.code(), ErrorCode::InvalidRepositoryState);
+        assert!(err.message().contains("no remote"));
+    }
+
+    #[test]
+    fn resolve_remote_name_with_multiple_remotes_and_no_upstream_refuses_to_guess() {
+        let main = BranchName::new("main").unwrap();
+        let branches = vec![branch_with_upstream("main", None)];
+        let remotes = vec![sample_remote("origin"), sample_remote("upstream")];
+
+        let err = resolve_remote_name(&main, &branches, &remotes).unwrap_err();
+
+        assert_eq!(err.code(), ErrorCode::InvalidRepositoryState);
+        assert!(err.remediation().is_some());
+    }
+
+    // -- US-060: fetch/pull/push command wiring (fakes; DTO mapping/errors) -
+
+    #[test]
+    fn list_remotes_reports_every_configured_remote() {
+        let state = state_from_port(FakePort {
+            remotes: vec![sample_remote("origin")],
+            ..FakePort::default()
+        });
+        open_repository_impl(&state, "/repo").unwrap();
+
+        let remotes = list_remotes_impl(&state).unwrap();
+
+        assert_eq!(remotes.len(), 1);
+        assert_eq!(remotes[0].name, "origin");
+    }
+
+    #[test]
+    fn resolve_sync_target_reports_the_resolved_remote_and_current_branch() {
+        let state = state_from_port(FakePort {
+            branches: vec![branch_with_upstream("main", None)],
+            remotes: vec![sample_remote("origin")],
+            ..FakePort::default()
+        });
+        open_repository_impl(&state, "/repo").unwrap();
+
+        let target = resolve_sync_target_impl(&state).unwrap();
+
+        assert_eq!(target.remote, "origin");
+        assert_eq!(target.branch.as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn resolve_sync_target_with_no_remote_configured_fails_instead_of_guessing() {
+        let state = state_from_port(FakePort {
+            branches: vec![branch_with_upstream("main", None)],
+            remotes: vec![],
+            ..FakePort::default()
+        });
+        open_repository_impl(&state, "/repo").unwrap();
+
+        let err = resolve_sync_target_impl(&state).unwrap_err();
+
+        assert_eq!(err.code(), ErrorCode::InvalidRepositoryState);
+    }
+
+    #[test]
+    fn fetch_delegates_the_resolved_remote_to_the_write_port() {
+        let state = state_from_port_and_write_port(
+            FakePort {
+                branches: vec![branch_with_upstream("main", None)],
+                remotes: vec![sample_remote("origin")],
+                ..FakePort::default()
+            },
+            FakeWritePort::new(),
+        );
+        open_repository_impl(&state, "/repo").unwrap();
+
+        let target = fetch_impl(&state).unwrap();
+
+        assert_eq!(target.remote, "origin");
+        assert_eq!(target.branch.as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn fetch_propagates_a_write_port_failure() {
+        let state = state_from_port_and_write_port(
+            FakePort {
+                branches: vec![branch_with_upstream("main", None)],
+                remotes: vec![sample_remote("origin")],
+                ..FakePort::default()
+            },
+            FakeWritePort::failing(),
+        );
+        open_repository_impl(&state, "/repo").unwrap();
+
+        let err = fetch_impl(&state).unwrap_err();
+
+        assert_eq!(err.code(), ErrorCode::Internal);
+    }
+
+    #[test]
+    fn fetch_with_no_remote_configured_fails_before_ever_reaching_the_write_port() {
+        let state = state_from_port_and_write_port(
+            FakePort { branches: vec![branch_with_upstream("main", None)], ..FakePort::default() },
+            FakeWritePort::new(),
+        );
+        open_repository_impl(&state, "/repo").unwrap();
+
+        let err = fetch_impl(&state).unwrap_err();
+
+        assert_eq!(err.code(), ErrorCode::InvalidRepositoryState);
+    }
+
+    #[test]
+    fn pull_maps_the_write_ports_outcome_into_the_result_dto() {
+        let hash = CommitHash::new("b".repeat(40)).unwrap();
+        let state = state_from_port_and_write_port(
+            FakePort {
+                branches: vec![branch_with_upstream("main", None)],
+                remotes: vec![sample_remote("origin")],
+                ..FakePort::default()
+            },
+            FakeWritePort::with_pull_outcome(gitsail_application::PullOutcome::FastForwarded {
+                new_head: hash.clone(),
+            }),
+        );
+        open_repository_impl(&state, "/repo").unwrap();
+
+        let result = pull_impl(&state).unwrap();
+
+        assert_eq!(result.remote, "origin");
+        assert_eq!(result.branch, "main");
+        assert_eq!(
+            result.outcome,
+            PullOutcomeDto::FastForwarded { new_head: hash.as_str().to_string() }
+        );
+    }
+
+    #[test]
+    fn pull_propagates_a_rejected_divergence_as_an_operation_conflict() {
+        let state = state_from_port_and_write_port(
+            FakePort {
+                branches: vec![branch_with_upstream("main", None)],
+                remotes: vec![sample_remote("origin")],
+                ..FakePort::default()
+            },
+            FakeWritePort::failing(),
+        );
+        open_repository_impl(&state, "/repo").unwrap();
+
+        let err = pull_impl(&state).unwrap_err();
+
+        assert_eq!(err.code(), ErrorCode::OperationConflict);
+    }
+
+    #[test]
+    fn push_delegates_the_resolved_remote_and_current_branch_to_the_write_port() {
+        let state = state_from_port_and_write_port(
+            FakePort {
+                branches: vec![branch_with_upstream("main", None)],
+                remotes: vec![sample_remote("origin")],
+                ..FakePort::default()
+            },
+            FakeWritePort::new(),
+        );
+        open_repository_impl(&state, "/repo").unwrap();
+
+        let target = push_impl(&state).unwrap();
+
+        assert_eq!(target.remote, "origin");
+        assert_eq!(target.branch.as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn push_propagates_a_non_fast_forward_rejection_and_never_escalates_to_force() {
+        let state = state_from_port_and_write_port(
+            FakePort {
+                branches: vec![branch_with_upstream("main", None)],
+                remotes: vec![sample_remote("origin")],
+                ..FakePort::default()
+            },
+            FakeWritePort::failing(),
+        );
+        open_repository_impl(&state, "/repo").unwrap();
+
+        let err = push_impl(&state).unwrap_err();
+
+        assert_eq!(err.code(), ErrorCode::OperationConflict);
+    }
+
     // -- Epoch guard extended to writes (this module's `run_mutation`) -----
 
     #[test]
@@ -1751,5 +2234,306 @@ mod tests {
             "the new session's freshly reset graph must never be contaminated by the old \
              session's stale page"
         );
+    }
+
+    // -- US-060/T-193 DoD: "E2E compara estados Git resultantes com os
+    // fluxos da TUI" — real, temporary Git repositories via the real
+    // `GitCliProvider` adapter (never a fake), every "remote" being another
+    // local, on-disk *bare* repository. Mirrors `gitsail-tui`'s own
+    // `tests/remote_sync.rs` and `tests/support/mod.rs` fixture helpers
+    // (T-182/US-049) line for line, adapted to call this module's private
+    // `*_impl` functions directly (this crate has no public API a separate
+    // `tests/` integration binary could reach — `commands`/`state` are
+    // private `mod`s in `lib.rs` — so these real-adapter tests live in this
+    // same internal `#[cfg(test)]` module instead, exactly like every other
+    // test in this file).
+    mod remote_sync_real_git {
+        use super::*;
+        use gitsail_git::{GitCliProvider, GitProcessRunner, GitProcessRunnerConfig};
+        use std::process::Command as ProcessCommand;
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        pub struct TempDir(PathBuf);
+
+        impl TempDir {
+            fn new(label: &str) -> Self {
+                static COUNTER: AtomicU32 = AtomicU32::new(0);
+                let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+                let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+                let path = std::env::temp_dir().join(format!("gitsail-desktop-{label}-{nanos}-{n}"));
+                std::fs::create_dir_all(&path).expect("create temp dir");
+                Self(path)
+            }
+
+            fn path(&self) -> &Path {
+                &self.0
+            }
+        }
+
+        impl Drop for TempDir {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+
+        fn git(dir: &Path, args: &[&str]) {
+            let status = ProcessCommand::new("git")
+                .args(args)
+                .current_dir(dir)
+                .env("LC_ALL", "C")
+                .env("LANG", "C")
+                .status()
+                .unwrap_or_else(|e| panic!("failed to spawn git {args:?}: {e}"));
+            assert!(status.success(), "git {args:?} failed in {dir:?}");
+        }
+
+        /// A bare repository standing in for a real remote (never a real
+        /// network), mirroring `gitsail-git`'s and `gitsail-tui`'s own
+        /// EPIC-19/T-182 integration tests.
+        fn init_bare_remote(label: &str) -> TempDir {
+            let dir = TempDir::new(label);
+            git(dir.path(), &["init", "--quiet", "--bare", "--initial-branch=main"]);
+            dir
+        }
+
+        fn clone_repo(remote: &Path, label: &str) -> TempDir {
+            let dir = TempDir::new(label);
+            git(
+                dir.path().parent().unwrap(),
+                &["clone", "--quiet", "--", remote.to_str().unwrap(), dir.path().to_str().unwrap()],
+            );
+            git(dir.path(), &["config", "user.name", "Test User"]);
+            git(dir.path(), &["config", "user.email", "test@example.com"]);
+            dir
+        }
+
+        fn seed_and_push_initial_commit(dir: &Path) {
+            std::fs::write(dir.join("a.txt"), "one\n").unwrap();
+            git(dir, &["add", "a.txt"]);
+            git(dir, &["commit", "--quiet", "-m", "first commit"]);
+            git(dir, &["push", "--quiet", "--", "origin", "main"]);
+        }
+
+        fn head(dir: &Path) -> String {
+            let output = ProcessCommand::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(dir)
+                .output()
+                .unwrap();
+            String::from_utf8(output.stdout).unwrap().trim().to_string()
+        }
+
+        fn remote_tracking_head(dir: &Path, remote: &str, branch: &str) -> String {
+            let output = ProcessCommand::new("git")
+                .args(["rev-parse", &format!("refs/remotes/{remote}/{branch}")])
+                .current_dir(dir)
+                .output()
+                .unwrap();
+            String::from_utf8(output.stdout).unwrap().trim().to_string()
+        }
+
+        fn remote_branch_head(dir: &Path, branch: &str) -> String {
+            let output = ProcessCommand::new("git")
+                .args(["rev-parse", &format!("refs/heads/{branch}")])
+                .current_dir(dir)
+                .output()
+                .unwrap();
+            String::from_utf8(output.stdout).unwrap().trim().to_string()
+        }
+
+        /// A real `AppState` wired to the real `GitCliProvider` adapter for
+        /// both ports — never a fake — exercising the exact production
+        /// wiring `lib.rs::run` sets up.
+        fn real_app_state() -> AppState {
+            let runner =
+                GitProcessRunner::new(GitProcessRunnerConfig::default()).expect("git runner");
+            let provider = Arc::new(GitCliProvider::new(runner));
+            let port: Arc<dyn gitsail_application::RepositoryReadPort> = provider.clone();
+            let write_port: Arc<dyn gitsail_application::RepositoryWritePort> = provider;
+            AppState::new(port, write_port, InMemoryRecents::shared())
+        }
+
+        #[test]
+        fn list_remotes_reports_a_fresh_clones_single_origin() {
+            let remote_dir = init_bare_remote("list-remotes-remote");
+            let local_dir = clone_repo(remote_dir.path(), "list-remotes-local");
+            seed_and_push_initial_commit(local_dir.path());
+
+            let state = real_app_state();
+            open_repository_impl(&state, local_dir.path().to_str().unwrap()).unwrap();
+
+            let remotes = list_remotes_impl(&state).unwrap();
+
+            assert_eq!(remotes.len(), 1);
+            assert_eq!(remotes[0].name, "origin");
+        }
+
+        #[test]
+        fn resolve_sync_target_resolves_the_sole_remote_and_current_branch() {
+            let remote_dir = init_bare_remote("resolve-target-remote");
+            let local_dir = clone_repo(remote_dir.path(), "resolve-target-local");
+            seed_and_push_initial_commit(local_dir.path());
+
+            let state = real_app_state();
+            open_repository_impl(&state, local_dir.path().to_str().unwrap()).unwrap();
+
+            let target = resolve_sync_target_impl(&state).unwrap();
+
+            assert_eq!(target.remote, "origin");
+            assert_eq!(target.branch.as_deref(), Some("main"));
+        }
+
+        #[test]
+        fn fetch_updates_remote_tracking_refs_without_touching_the_working_tree() {
+            let remote_dir = init_bare_remote("fetch-remote");
+            let local_dir = clone_repo(remote_dir.path(), "fetch-local");
+            seed_and_push_initial_commit(local_dir.path());
+
+            // Someone else pushes a new commit to the remote after this clone.
+            let other_dir = clone_repo(remote_dir.path(), "fetch-other");
+            std::fs::write(other_dir.path().join("new.txt"), "content\n").unwrap();
+            git(other_dir.path(), &["add", "new.txt"]);
+            git(other_dir.path(), &["commit", "--quiet", "-m", "advance remote"]);
+            git(other_dir.path(), &["push", "--quiet", "origin", "main"]);
+            let advanced_head = head(other_dir.path());
+
+            let state = real_app_state();
+            open_repository_impl(&state, local_dir.path().to_str().unwrap()).unwrap();
+            let before = head(local_dir.path());
+
+            let target = fetch_impl(&state).unwrap();
+
+            assert_eq!(target.remote, "origin");
+            assert_eq!(
+                remote_tracking_head(local_dir.path(), "origin", "main"),
+                advanced_head,
+                "fetch must update the remote-tracking ref to the new commit"
+            );
+            assert_eq!(head(local_dir.path()), before, "fetch must never touch the working tree/HEAD");
+        }
+
+        #[test]
+        fn fetch_with_no_remote_configured_fails_clearly_instead_of_guessing() {
+            let dir = TempDir::new("fetch-no-remote");
+            git(dir.path(), &["init", "--quiet", "--initial-branch=main"]);
+            git(dir.path(), &["config", "user.name", "Test User"]);
+            git(dir.path(), &["config", "user.email", "test@example.com"]);
+            std::fs::write(dir.path().join("a.txt"), "one\n").unwrap();
+            git(dir.path(), &["add", "a.txt"]);
+            git(dir.path(), &["commit", "--quiet", "-m", "first commit"]);
+
+            let state = real_app_state();
+            open_repository_impl(&state, dir.path().to_str().unwrap()).unwrap();
+
+            let err = fetch_impl(&state).unwrap_err();
+
+            assert_eq!(err.code(), ErrorCode::InvalidRepositoryState);
+        }
+
+        #[test]
+        fn pull_fast_forwards_a_behind_branch_and_reports_the_outcome() {
+            let remote_dir = init_bare_remote("pull-ff-remote");
+            let behind_dir = clone_repo(remote_dir.path(), "pull-ff-behind");
+            seed_and_push_initial_commit(behind_dir.path());
+
+            let ahead_dir = clone_repo(remote_dir.path(), "pull-ff-ahead");
+            std::fs::write(ahead_dir.path().join("new.txt"), "content\n").unwrap();
+            git(ahead_dir.path(), &["add", "new.txt"]);
+            git(ahead_dir.path(), &["commit", "--quiet", "-m", "advance"]);
+            git(ahead_dir.path(), &["push", "--quiet", "origin", "main"]);
+            let advanced_head = head(ahead_dir.path());
+
+            let state = real_app_state();
+            open_repository_impl(&state, behind_dir.path().to_str().unwrap()).unwrap();
+
+            let result = pull_impl(&state).unwrap();
+
+            assert_eq!(result.remote, "origin");
+            assert_eq!(result.branch, "main");
+            assert_eq!(
+                result.outcome,
+                PullOutcomeDto::FastForwarded { new_head: advanced_head.clone() }
+            );
+            assert_eq!(
+                head(behind_dir.path()),
+                advanced_head,
+                "a fast-forward pull must move the local branch to the remote's tip — the \
+                 same Git end-state `gitsail-tui`'s own T-182 pull produces for this scenario"
+            );
+        }
+
+        #[test]
+        fn pull_with_nothing_new_reports_already_up_to_date() {
+            let remote_dir = init_bare_remote("pull-uptodate-remote");
+            let local_dir = clone_repo(remote_dir.path(), "pull-uptodate-local");
+            seed_and_push_initial_commit(local_dir.path());
+
+            let state = real_app_state();
+            open_repository_impl(&state, local_dir.path().to_str().unwrap()).unwrap();
+
+            let result = pull_impl(&state).unwrap();
+
+            assert_eq!(result.outcome, PullOutcomeDto::AlreadyUpToDate);
+        }
+
+        #[test]
+        fn push_publishes_local_commits_to_the_remote() {
+            let remote_dir = init_bare_remote("push-remote");
+            let local_dir = clone_repo(remote_dir.path(), "push-local");
+
+            std::fs::write(local_dir.path().join("new.txt"), "content\n").unwrap();
+            git(local_dir.path(), &["add", "new.txt"]);
+            git(local_dir.path(), &["commit", "--quiet", "-m", "local work"]);
+            let new_head = head(local_dir.path());
+
+            let state = real_app_state();
+            open_repository_impl(&state, local_dir.path().to_str().unwrap()).unwrap();
+
+            let target = push_impl(&state).unwrap();
+
+            assert_eq!(target.remote, "origin");
+            assert_eq!(
+                remote_branch_head(remote_dir.path(), "main"),
+                new_head,
+                "the bare remote must now have the pushed commit — the same Git end-state \
+                 `gitsail-tui`'s own T-182 push produces for this scenario"
+            );
+        }
+
+        /// T-193's DoD, same as T-182's before it: "E2E ... cobre
+        /// sincronização e push rejeitado."
+        #[test]
+        fn a_non_fast_forward_push_is_rejected_and_the_remote_state_is_preserved() {
+            let remote_dir = init_bare_remote("push-reject-remote");
+            let seed_dir = clone_repo(remote_dir.path(), "push-reject-seed");
+
+            // Another clone pushes first, advancing the remote.
+            let other_dir = clone_repo(remote_dir.path(), "push-reject-other");
+            std::fs::write(other_dir.path().join("other.txt"), "content\n").unwrap();
+            git(other_dir.path(), &["add", "other.txt"]);
+            git(other_dir.path(), &["commit", "--quiet", "-m", "other's commit"]);
+            git(other_dir.path(), &["push", "--quiet", "origin", "main"]);
+            let remote_head_before = remote_branch_head(remote_dir.path(), "main");
+
+            // `seed_dir`, unaware of that push, commits on top of the old
+            // base — pushing now would be a non-fast-forward.
+            std::fs::write(seed_dir.path().join("mine.txt"), "content\n").unwrap();
+            git(seed_dir.path(), &["add", "mine.txt"]);
+            git(seed_dir.path(), &["commit", "--quiet", "-m", "my divergent commit"]);
+
+            let state = real_app_state();
+            open_repository_impl(&state, seed_dir.path().to_str().unwrap()).unwrap();
+
+            let err = push_impl(&state).unwrap_err();
+
+            assert_eq!(err.code(), ErrorCode::OperationConflict);
+            assert_eq!(
+                remote_branch_head(remote_dir.path(), "main"),
+                remote_head_before,
+                "a rejected push must never be silently escalated to a force push — the \
+                 remote's state must be exactly what it was before the attempt"
+            );
+        }
     }
 }

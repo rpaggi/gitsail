@@ -159,6 +159,39 @@ export interface BranchDto {
   isCurrent: boolean;
 }
 
+// -- Remotes and sync (EPIC-19/US-096..098; US-060/T-193's fetch/pull/push
+// subset) -----------------------------------------------------------------
+//
+// Mirrors `crates/gitsail-protocol/src/dto.rs`'s remote/sync section.
+// `RemoteDto`'s URLs are already redacted server-side (`RemoteUrl::
+// redacted`) — the frontend never sees a raw credential to begin with.
+
+export interface RemoteDto {
+  name: string;
+  fetchUrl: string;
+  pushUrl: string;
+}
+
+/** What a sync action would target (or, for `fetch`/`push`, what it just
+ * acted on) — `branch` is `null` only when no repository/branch context is
+ * available at all; once resolved it is always the current branch, even
+ * for `fetch` (which itself targets a whole remote, not one branch) since
+ * that branch's upstream is what informed the remote choice. */
+export interface SyncTargetDto {
+  remote: string;
+  branch: string | null;
+}
+
+export type PullOutcomeDto =
+  | { outcome: "alreadyUpToDate" }
+  | { outcome: "fastForwarded"; newHead: string };
+
+export interface PullResultDto {
+  remote: string;
+  branch: string;
+  outcome: PullOutcomeDto;
+}
+
 // -- Diffs (US-057/US-058): mirrors `gitsail_protocol::dto`'s diff
 // section. `FileDiffDto` travels both ways — read from `get_diff`,
 // trimmed down and echoed back to `stage_hunks`/`unstage_hunks` for a
