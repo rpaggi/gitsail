@@ -81,4 +81,21 @@ pub enum Action {
     /// (`y`, Diff panel only), falling back to saving a file when the
     /// clipboard is unavailable (US-029 criterion 3).
     ExportPatch,
+
+    // -- US-049: sync with a remote --------------------------------------
+    /// Fetches the resolved remote (`f`). `Safe`, so this dispatches
+    /// immediately rather than confirming first, exactly like
+    /// [`Action::ToggleStage`].
+    RequestFetch,
+    /// Requests confirmation to pull the resolved remote's tracked branch
+    /// (`p`) — fast-forward only; see [`crate::operation::OperationKind::Pull`].
+    RequestPull,
+    /// Requests confirmation to push the current branch to the resolved
+    /// remote (`P`).
+    RequestPush,
+
+    // -- US-050: inspect tags, remotes and stash --------------------------
+    /// Cycles the References panel between its Tags/Remotes/Stash sub-views
+    /// (`t`, References panel only), mirroring [`Action::ToggleBlameView`].
+    CycleReferenceView,
 }

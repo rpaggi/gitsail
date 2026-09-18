@@ -28,7 +28,10 @@ pub enum InputContext {
     /// The commit-details overlay is open (Enter on the Graph panel,
     /// US-045 criterion 3).
     CommitDetails,
-    /// No overlay is active; the five panels and shortcuts bar are live.
+    /// The reference-details overlay is open (Enter on the References
+    /// panel, US-050 criterion 2), mirroring [`Self::CommitDetails`].
+    ReferenceDetails,
+    /// No overlay is active; the panels and shortcuts bar are live.
     Normal,
 }
 
@@ -78,6 +81,10 @@ pub fn action_for(key: KeyEvent, ctx: InputContext) -> Option<Action> {
             KeyCode::Char('q') | KeyCode::Esc => Some(Action::Dismiss),
             _ => None,
         },
+        InputContext::ReferenceDetails => match key.code {
+            KeyCode::Char('q') | KeyCode::Esc => Some(Action::Dismiss),
+            _ => None,
+        },
         InputContext::Normal => match key.code {
             KeyCode::Tab => Some(Action::FocusNext),
             KeyCode::BackTab => Some(Action::FocusPrev),
@@ -98,6 +105,10 @@ pub fn action_for(key: KeyEvent, ctx: InputContext) -> Option<Action> {
             KeyCode::Char('s') => Some(Action::ToggleStage),
             KeyCode::Char('C') => Some(Action::StartCommit),
             KeyCode::Char('y') => Some(Action::ExportPatch),
+            KeyCode::Char('f') => Some(Action::RequestFetch),
+            KeyCode::Char('p') => Some(Action::RequestPull),
+            KeyCode::Char('P') => Some(Action::RequestPush),
+            KeyCode::Char('t') => Some(Action::CycleReferenceView),
             _ => None,
         },
     }
@@ -229,6 +240,43 @@ mod tests {
         assert_eq!(
             action_for(press(KeyCode::Char('y')), InputContext::Normal),
             Some(Action::ExportPatch)
+        );
+    }
+
+    #[test]
+    fn remote_sync_and_reference_keys_map_in_the_normal_context() {
+        assert_eq!(
+            action_for(press(KeyCode::Char('f')), InputContext::Normal),
+            Some(Action::RequestFetch)
+        );
+        assert_eq!(
+            action_for(press(KeyCode::Char('p')), InputContext::Normal),
+            Some(Action::RequestPull)
+        );
+        assert_eq!(
+            action_for(press(KeyCode::Char('P')), InputContext::Normal),
+            Some(Action::RequestPush)
+        );
+        assert_eq!(
+            action_for(press(KeyCode::Char('t')), InputContext::Normal),
+            Some(Action::CycleReferenceView)
+        );
+    }
+
+    #[test]
+    fn reference_details_context_only_accepts_dismiss_keys() {
+        assert_eq!(
+            action_for(press(KeyCode::Char('q')), InputContext::ReferenceDetails),
+            Some(Action::Dismiss)
+        );
+        assert_eq!(
+            action_for(press(KeyCode::Esc), InputContext::ReferenceDetails),
+            Some(Action::Dismiss)
+        );
+        assert_eq!(
+            action_for(press(KeyCode::Char('j')), InputContext::ReferenceDetails),
+            None,
+            "movement must not leak through the reference-details overlay"
         );
     }
 

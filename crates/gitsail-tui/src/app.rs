@@ -16,12 +16,12 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use gitsail_application::{
-    export_patch, BlameRequest, CommitQuery, DiffRequest, Page, RefreshReason, RepositoryReadPort,
-    RepositorySession,
+    export_patch, BlameRequest, CommitQuery, DiffRequest, Page, PullOutcome, RefreshReason,
+    RepositoryReadPort, RepositorySession,
 };
 use gitsail_domain::{
-    Blame, Branch, BranchName, Commit, CommitGraph, CommitHash, Diff, GitSailError, GraphCommit,
-    HeadState, Repository, RepositoryStatus,
+    Blame, Branch, BranchKind, BranchName, Commit, CommitGraph, CommitHash, Diff, ErrorCode,
+    GitSailError, GraphCommit, HeadState, Remote, Repository, RepositoryStatus, Stash, Tag,
 };
 
 use crate::action::Action;
@@ -41,10 +41,20 @@ pub enum Panel {
     Graph,
     Details,
     Diff,
+    /// Lists tags, remotes and stash entries (US-050), switching between
+    /// them via [`ReferenceView`] rather than three separate `Panel`
+    /// variants — see that type's own doc.
+    References,
 }
 
 impl Panel {
-    const ALL: [Panel; 4] = [Panel::Sidebar, Panel::Graph, Panel::Details, Panel::Diff];
+    const ALL: [Panel; 5] = [
+        Panel::Sidebar,
+        Panel::Graph,
+        Panel::Details,
+        Panel::Diff,
+        Panel::References,
+    ];
 
     pub fn title(self) -> &'static str {
         match self {
@@ -52,6 +62,7 @@ impl Panel {
             Panel::Graph => "Graph",
             Panel::Details => "Details",
             Panel::Diff => "Diff",
+            Panel::References => "References",
         }
     }
 
@@ -91,6 +102,38 @@ pub enum ViewPhase {
 pub enum DiffViewMode {
     Diff,
     Blame,
+}
+
+/// Which list the References panel currently shows (US-050 criterion 1).
+/// Kept as a sub-mode of [`Panel::References`], cycled by a dedicated key
+/// (`t`), rather than three separate `Panel` variants — mirroring
+/// [`DiffViewMode`]'s own rationale: all three apply to the same panel slot
+/// and share one selection cursor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReferenceView {
+    Tags,
+    Remotes,
+    Stash,
+}
+
+impl ReferenceView {
+    pub fn title(self) -> &'static str {
+        match self {
+            ReferenceView::Tags => "Tags",
+            ReferenceView::Remotes => "Remotes",
+            ReferenceView::Stash => "Stash",
+        }
+    }
+
+    /// Cycles to the next sub-view in a fixed, documented order (mirrors
+    /// [`Panel::next`]).
+    fn next(self) -> Self {
+        match self {
+            ReferenceView::Tags => ReferenceView::Remotes,
+            ReferenceView::Remotes => ReferenceView::Stash,
+            ReferenceView::Stash => ReferenceView::Tags,
+        }
+    }
 }
 
 /// Outcome of the last [`Action::ExportPatch`] (US-029 criterion 1: "origem
@@ -192,6 +235,27 @@ pub struct App {
     blame_scroll: u16,
     blame_request_id: u64,
 
+    // -- US-050: tags/remotes/stash inspection -----------------------------
+    tags: Vec<Tag>,
+    remotes: Vec<Remote>,
+    stashes: Vec<Stash>,
+    reference_view: ReferenceView,
+    reference_cursor: usize,
+    reference_details_open: bool,
+
+    // -- US-049: sync with a remote -----------------------------------------
+    /// A remote/branch resolution failure (US-049 criterion 1: never guess
+    /// across several equally-plausible remotes) — a side-channel banner
+    /// like [`Self::patch_export`], not modeled through [`OperationState`]
+    /// since nothing was ever confirmed or dispatched.
+    sync_error: Option<GitSailError>,
+    /// The outcome of the last successful [`Action::RequestPull`] (US-049
+    /// criterion 1: divergence/"nothing to integrate" must be shown
+    /// explicitly, not collapsed into a bare success) — mirrors
+    /// [`Self::patch_export`]'s "transient banner, cleared by the next
+    /// relevant action" convention.
+    last_pull_outcome: Option<PullOutcome>,
+
     // -- US-029: copy or export a patch -----------------------------------
     /// Presentation-only side effect, injected so tests can exercise both
     /// the copy-succeeds and clipboard-unavailable-falls-back-to-file paths
@@ -279,6 +343,14 @@ impl App {
             blame_error: None,
             blame_scroll: 0,
             blame_request_id: 0,
+            tags: Vec::new(),
+            remotes: Vec::new(),
+            stashes: Vec::new(),
+            reference_view: ReferenceView::Tags,
+            reference_cursor: 0,
+            reference_details_open: false,
+            sync_error: None,
+            last_pull_outcome: None,
             clipboard,
             patch_export: None,
             branch_input: None,
@@ -415,6 +487,59 @@ impl App {
         self.blame_scroll
     }
 
+    /// The local tags loaded so far (US-050 criterion 1).
+    pub fn tags(&self) -> &[Tag] {
+        &self.tags
+    }
+
+    /// The configured remotes loaded so far (US-050 criterion 1).
+    pub fn remotes(&self) -> &[Remote] {
+        &self.remotes
+    }
+
+    /// The stash entries loaded so far (US-050 criterion 1), newest first.
+    pub fn stashes(&self) -> &[Stash] {
+        &self.stashes
+    }
+
+    pub fn reference_view(&self) -> ReferenceView {
+        self.reference_view
+    }
+
+    pub fn reference_cursor(&self) -> usize {
+        self.reference_cursor
+    }
+
+    /// Whether the reference-details overlay is open (US-050 criterion 2).
+    pub fn reference_details_open(&self) -> bool {
+        self.reference_details_open
+    }
+
+    /// The number of entries in the currently active reference sub-view —
+    /// what [`Self::move_cursor`]/[`Self::open_reference_details`] index
+    /// into, and what `ui` uses to know whether the cursor highlight
+    /// applies to a real row or the sub-view's own empty-state text.
+    pub fn reference_len(&self) -> usize {
+        match self.reference_view {
+            ReferenceView::Tags => self.tags.len(),
+            ReferenceView::Remotes => self.remotes.len(),
+            ReferenceView::Stash => self.stashes.len(),
+        }
+    }
+
+    /// A remote/branch resolution failure from the last
+    /// [`Action::RequestFetch`]/[`Action::RequestPull`]/
+    /// [`Action::RequestPush`] (US-049 criterion 1), or `None` once
+    /// dismissed or superseded by a successful resolution.
+    pub fn sync_error(&self) -> Option<&GitSailError> {
+        self.sync_error.as_ref()
+    }
+
+    /// The outcome of the last successful pull (US-049 criterion 1).
+    pub fn last_pull_outcome(&self) -> Option<&PullOutcome> {
+        self.last_pull_outcome.as_ref()
+    }
+
     /// The outcome of the last patch export/copy action (US-029 criterion
     /// 1), or `None` before one has ever run or after it was superseded by
     /// a new diff selection.
@@ -507,7 +632,8 @@ impl App {
     /// Which keys are currently meaningful (US-042 criterion 3: help/
     /// search/prompts never let a hidden action through). Priority: the
     /// help overlay always wins; then the commit-details overlay (US-045
-    /// criterion 3); then the commit composer, but only while no operation
+    /// criterion 3); then the reference-details overlay (US-050 criterion
+    /// 2); then the commit composer, but only while no operation
     /// is confirming/running — the moment `Enter` moves it to `Confirming`,
     /// this falls through to `Normal` so the *second* `Enter` is handled by
     /// the confirmation intercept in [`Self::handle_activate`] instead of
@@ -521,6 +647,8 @@ impl App {
             InputContext::Help
         } else if self.commit_details_open {
             InputContext::CommitDetails
+        } else if self.reference_details_open {
+            InputContext::ReferenceDetails
         } else if self.commit_message.is_some() && self.operation.is_idle() {
             InputContext::CommitMessage
         } else if self.branch_input.is_some() {
@@ -661,6 +789,16 @@ impl App {
                 self.export_patch();
                 Vec::new()
             }
+            Action::RequestFetch => self.request_fetch(),
+            Action::RequestPull => self.request_pull(),
+            Action::RequestPush => self.request_push(),
+            Action::CycleReferenceView => {
+                if self.focus == Panel::References {
+                    self.reference_view = self.reference_view.next();
+                    self.reference_cursor = 0;
+                }
+                Vec::new()
+            }
         }
     }
 
@@ -710,6 +848,11 @@ impl App {
                 Vec::new()
             }
             Panel::Graph => self.move_graph_cursor(delta),
+            Panel::References => {
+                self.reference_cursor =
+                    Self::cyclic_cursor(self.reference_cursor, delta, self.reference_len());
+                Vec::new()
+            }
         }
     }
 
@@ -848,6 +991,10 @@ impl App {
                 self.open_commit_details();
                 Vec::new()
             }
+            Panel::References => {
+                self.open_reference_details();
+                Vec::new()
+            }
             _ => Vec::new(),
         }
     }
@@ -861,6 +1008,16 @@ impl App {
     fn open_commit_details(&mut self) {
         if self.selected_graph_commit().is_some() {
             self.commit_details_open = true;
+        }
+    }
+
+    /// Opens the reference-details overlay for the entry currently under
+    /// the References panel's cursor (US-050 criterion 2), mirroring
+    /// [`Self::open_commit_details`]: a no-op when the active sub-view has
+    /// nothing loaded (e.g. no tags exist yet).
+    fn open_reference_details(&mut self) {
+        if self.reference_cursor < self.reference_len() {
+            self.reference_details_open = true;
         }
     }
 
@@ -1008,6 +1165,8 @@ impl App {
             self.help_visible = false;
         } else if self.commit_details_open {
             self.commit_details_open = false;
+        } else if self.reference_details_open {
+            self.reference_details_open = false;
         } else if self.commit_message.is_some() && self.operation.is_idle() {
             // A confirmation in flight (`Confirming(CreateCommit)`) is left
             // alone here — cancelling *that* is `operation.cancel()` below,
@@ -1028,7 +1187,19 @@ impl App {
             self.sidebar_cursor = 0;
         } else if self.patch_export.is_some() {
             self.patch_export = None;
+        } else if self.sync_error.is_some() {
+            self.sync_error = None;
         } else {
+            // A terminal operation overlay (`Succeeded`/`Failed`) being
+            // dismissed also clears any lingering pull-outcome banner from
+            // the same operation, so a stale "fast-forwarded to ..." can
+            // never survive into the next one.
+            if matches!(
+                self.operation,
+                OperationState::Succeeded(_) | OperationState::Failed(_, _)
+            ) {
+                self.last_pull_outcome = None;
+            }
             self.operation.cancel();
         }
     }
@@ -1103,6 +1274,144 @@ impl App {
         });
     }
 
+    /// Resolves which remote fetch/pull/push should target (US-049
+    /// criterion 1: remote and branch/upstream are always explicit — never
+    /// an implicit, silently guessed choice). Prefers the current branch's
+    /// configured upstream (`origin/main` names remote `origin`) since that
+    /// is the most specific signal available; falls back to the sole
+    /// configured remote when there is exactly one and no upstream is set;
+    /// otherwise refuses rather than picking among several equally
+    /// plausible remotes.
+    fn resolve_sync_remote(&self) -> Result<String, GitSailError> {
+        let Some(session) = self.session.as_ref() else {
+            return Err(GitSailError::new(
+                ErrorCode::InvalidRepositoryState,
+                "no repository is open yet",
+            ));
+        };
+        let current_branch = session.repository().current_branch.as_ref().ok_or_else(|| {
+            GitSailError::new(
+                ErrorCode::InvalidRepositoryState,
+                "no branch is currently checked out",
+            )
+            .with_remediation("check out a branch before syncing with a remote")
+        })?;
+
+        if let Some(branch) = self
+            .branches
+            .iter()
+            .find(|b| matches!(b.kind, BranchKind::Local) && &b.name == current_branch)
+        {
+            if let Some(upstream) = branch.upstream.as_ref() {
+                if let Some((remote, _)) = upstream.as_str().split_once('/') {
+                    return Ok(remote.to_string());
+                }
+            }
+        }
+
+        match self.remotes.len() {
+            1 => Ok(self.remotes[0].name.clone()),
+            0 => Err(GitSailError::new(
+                ErrorCode::InvalidRepositoryState,
+                "no remote is configured",
+            )
+            .with_remediation("add a remote (e.g. `git remote add origin <url>`) first")),
+            _ => Err(GitSailError::new(
+                ErrorCode::InvalidRepositoryState,
+                "the current branch has no upstream and multiple remotes are configured — cannot determine which to use",
+            )
+            .with_remediation("set an upstream for this branch, e.g. `git push -u <remote> <branch>`")),
+        }
+    }
+
+    /// Fetches the resolved remote (US-049 criterion 1). `Safe`, so this
+    /// dispatches immediately without a confirmation step, exactly like
+    /// [`Self::request_toggle_stage`].
+    fn request_fetch(&mut self) -> Vec<Command> {
+        self.sync_error = None;
+        self.last_pull_outcome = None;
+        let remote = match self.resolve_sync_remote() {
+            Ok(remote) => remote,
+            Err(err) => {
+                self.sync_error = Some(err);
+                return Vec::new();
+            }
+        };
+        let kind = OperationKind::Fetch { remote };
+        self.operation.begin(kind.clone());
+        self.operation.confirm();
+        self.dispatch_operation(kind)
+    }
+
+    /// Starts confirmation for pulling the resolved remote's tracked branch
+    /// (US-049). `Moderate`, so this always confirms first, like
+    /// [`Self::request_checkout`].
+    fn request_pull(&mut self) -> Vec<Command> {
+        self.sync_error = None;
+        self.last_pull_outcome = None;
+        let Some(current_branch) = self
+            .session
+            .as_ref()
+            .and_then(|s| s.repository().current_branch.clone())
+        else {
+            self.sync_error = Some(
+                GitSailError::new(
+                    ErrorCode::InvalidRepositoryState,
+                    "no branch is currently checked out",
+                )
+                .with_remediation("check out a branch before syncing with a remote"),
+            );
+            return Vec::new();
+        };
+        let remote = match self.resolve_sync_remote() {
+            Ok(remote) => remote,
+            Err(err) => {
+                self.sync_error = Some(err);
+                return Vec::new();
+            }
+        };
+        self.operation.begin(OperationKind::Pull {
+            remote,
+            branch: current_branch.as_str().to_string(),
+        });
+        Vec::new()
+    }
+
+    /// Starts confirmation for pushing the current branch to the resolved
+    /// remote (US-049). `Moderate`, matching [`Self::request_pull`]. Never
+    /// forces — see [`crate::operation::OperationKind::Push`]'s doc for why
+    /// force-push is out of scope here.
+    fn request_push(&mut self) -> Vec<Command> {
+        self.sync_error = None;
+        self.last_pull_outcome = None;
+        let Some(current_branch) = self
+            .session
+            .as_ref()
+            .and_then(|s| s.repository().current_branch.clone())
+        else {
+            self.sync_error = Some(
+                GitSailError::new(
+                    ErrorCode::InvalidRepositoryState,
+                    "no branch is currently checked out",
+                )
+                .with_remediation("check out a branch before syncing with a remote"),
+            );
+            return Vec::new();
+        };
+        let remote = match self.resolve_sync_remote() {
+            Ok(remote) => remote,
+            Err(err) => {
+                self.sync_error = Some(err);
+                return Vec::new();
+            }
+        };
+        self.operation.begin(OperationKind::Push {
+            remote,
+            branch: current_branch.as_str().to_string(),
+        });
+        Vec::new()
+    }
+
     /// Turns a confirmed [`OperationKind`] into the [`Command`] that
     /// actually runs it. A malformed name (only possible from a
     /// hand-typed branch name — `Branch`/`StatusEntry`-derived kinds are
@@ -1149,6 +1458,21 @@ impl App {
                     Vec::new()
                 }
             },
+            OperationKind::Fetch { remote } => vec![Command::Fetch(repo, remote)],
+            OperationKind::Pull { remote, branch } => match BranchName::new(branch) {
+                Ok(name) => vec![Command::Pull(repo, remote, name)],
+                Err(err) => {
+                    self.operation.fail(err);
+                    Vec::new()
+                }
+            },
+            OperationKind::Push { remote, branch } => match BranchName::new(branch) {
+                Ok(name) => vec![Command::Push(repo, remote, name)],
+                Err(err) => {
+                    self.operation.fail(err);
+                    Vec::new()
+                }
+            },
         }
     }
 
@@ -1157,10 +1481,14 @@ impl App {
             return Vec::new();
         };
         let ticket = session.begin_refresh(reason);
+        let generation = session.generation();
         let repo = session.repository().clone();
         vec![
             Command::RefreshStatus(ticket, repo.clone()),
-            Command::LoadBranches(session.generation(), repo),
+            Command::LoadBranches(generation, repo.clone()),
+            Command::LoadTags(generation, repo.clone()),
+            Command::LoadRemotes(generation, repo.clone()),
+            Command::LoadStashEntries(generation, repo),
         ]
     }
 
@@ -1190,10 +1518,17 @@ impl App {
                 self.active_commit_filter = None;
                 self.commit_search = None;
                 self.commit_details_open = false;
+                self.reference_details_open = false;
+                self.reference_cursor = 0;
+                self.sync_error = None;
+                self.last_pull_outcome = None;
 
                 let mut commands = vec![
                     Command::RefreshStatus(ticket, repo.clone()),
-                    Command::LoadBranches(generation, repo),
+                    Command::LoadBranches(generation, repo.clone()),
+                    Command::LoadTags(generation, repo.clone()),
+                    Command::LoadRemotes(generation, repo.clone()),
+                    Command::LoadStashEntries(generation, repo.clone()),
                 ];
                 commands.extend(self.restart_commit_graph(CommitQuery::default()));
                 commands
@@ -1305,6 +1640,67 @@ impl App {
         // are what US-040 criterion 2 requires an error state for.
     }
 
+    /// Clamps `self.reference_cursor` to the currently active reference
+    /// sub-view's length, exactly like [`Self::on_branches_loaded`] clamps
+    /// `sidebar_cursor` — called after any of the three lists below is
+    /// (re)loaded, since whichever one is on screen right now may have
+    /// shrunk.
+    fn clamp_reference_cursor(&mut self) {
+        let max = self.reference_len().saturating_sub(1);
+        self.reference_cursor = self.reference_cursor.min(max);
+    }
+
+    /// Handles [`crate::message::Message::TagsLoaded`] (US-050), matching
+    /// [`Self::on_branches_loaded`]'s staleness/failure handling: a stale or
+    /// failed load leaves the existing (possibly empty) list in place
+    /// rather than promoting it into the whole view's error phase.
+    pub fn on_tags_loaded(&mut self, generation: u64, result: Result<Vec<Tag>, GitSailError>) {
+        let Some(session) = self.session.as_ref() else {
+            return;
+        };
+        if session.generation() != generation {
+            return;
+        }
+        if let Ok(tags) = result {
+            self.tags = tags;
+            self.clamp_reference_cursor();
+        }
+    }
+
+    /// Handles [`crate::message::Message::RemotesLoaded`] (US-050), matching
+    /// [`Self::on_tags_loaded`].
+    pub fn on_remotes_loaded(&mut self, generation: u64, result: Result<Vec<Remote>, GitSailError>) {
+        let Some(session) = self.session.as_ref() else {
+            return;
+        };
+        if session.generation() != generation {
+            return;
+        }
+        if let Ok(remotes) = result {
+            self.remotes = remotes;
+            self.clamp_reference_cursor();
+        }
+    }
+
+    /// Handles [`crate::message::Message::StashEntriesLoaded`] (US-050),
+    /// matching [`Self::on_tags_loaded`].
+    pub fn on_stash_entries_loaded(
+        &mut self,
+        generation: u64,
+        result: Result<Vec<Stash>, GitSailError>,
+    ) {
+        let Some(session) = self.session.as_ref() else {
+            return;
+        };
+        if session.generation() != generation {
+            return;
+        }
+        if let Ok(stashes) = result {
+            self.stashes = stashes;
+            self.clamp_reference_cursor();
+        }
+    }
+
     /// Handles [`crate::message::Message::DiffLoaded`] (US-046), discarding
     /// a result computed for a since-abandoned selection.
     pub fn on_diff_loaded(&mut self, request_id: u64, result: Result<Diff, GitSailError>) {
@@ -1378,6 +1774,28 @@ impl App {
             Ok(_hash) => {
                 self.operation.succeed();
                 self.commit_message = None;
+                self.refresh_commands_for(RefreshReason::AfterMutation)
+            }
+            Err(error) => {
+                self.operation.fail(error);
+                Vec::new()
+            }
+        }
+    }
+
+    /// Handles [`crate::message::Message::PullFinished`] (US-049). Success
+    /// records the [`PullOutcome`] (criterion 1: "already up to date" and
+    /// "fast-forwarded" are shown explicitly, never collapsed into a bare
+    /// success) and refreshes; a refused divergence — reported as an
+    /// ordinary `Err` per `RepositoryWritePort::pull`'s fixed
+    /// fast-forward-only policy — moves to `Failed` with its message,
+    /// exactly like [`Self::on_operation_finished`], and never merges,
+    /// rebases, or force-integrates anything on its own (criterion 3).
+    pub fn on_pull_finished(&mut self, result: Result<PullOutcome, GitSailError>) -> Vec<Command> {
+        match result {
+            Ok(outcome) => {
+                self.operation.succeed();
+                self.last_pull_outcome = Some(outcome);
                 self.refresh_commands_for(RefreshReason::AfterMutation)
             }
             Err(error) => {
@@ -1593,12 +2011,25 @@ mod tests {
         let open_commands = app.on_repository_opened(Ok(repo));
         assert_eq!(app.view_phase(), ViewPhase::Loading);
 
-        let (ticket, repo_for_status) = match open_commands.as_slice() {
-            [Command::RefreshStatus(t, r), Command::LoadBranches(_, _), Command::LoadCommitGraph(_, _, _)] => {
-                (*t, r.clone())
-            }
-            other => panic!("unexpected commands: {other:?}"),
-        };
+        let (ticket, repo_for_status) = open_commands
+            .iter()
+            .find_map(|c| match c {
+                Command::RefreshStatus(t, r) => Some((*t, r.clone())),
+                _ => None,
+            })
+            .expect("a RefreshStatus command");
+        assert!(
+            open_commands
+                .iter()
+                .any(|c| matches!(c, Command::LoadBranches(_, _))),
+            "opening a repository must also request its branches"
+        );
+        assert!(
+            open_commands
+                .iter()
+                .any(|c| matches!(c, Command::LoadCommitGraph(_, _, _))),
+            "opening a repository must also request its commit graph"
+        );
 
         app.on_status_refreshed(ticket, Ok(clean_status()));
         assert_eq!(app.view_phase(), ViewPhase::Loaded);
@@ -1712,12 +2143,13 @@ mod tests {
         assert!(matches!(commands.as_slice(), [Command::OpenRepository(_)]));
 
         let open_commands = app.on_repository_opened(Ok(sample_repository()));
-        let (ticket, repo) = match open_commands.as_slice() {
-            [Command::RefreshStatus(t, r), Command::LoadBranches(_, _), Command::LoadCommitGraph(_, _, _)] => {
-                (*t, r.clone())
-            }
-            other => panic!("unexpected commands: {other:?}"),
-        };
+        let (ticket, repo) = open_commands
+            .iter()
+            .find_map(|c| match c {
+                Command::RefreshStatus(t, r) => Some((*t, r.clone())),
+                _ => None,
+            })
+            .expect("a RefreshStatus command");
 
         let (tx, rx) = mpsc::channel();
         let port_dyn: Arc<dyn RepositoryReadPort> = port.clone();
@@ -2088,11 +2520,16 @@ mod tests {
         )
         .unwrap()));
         assert!(
-            matches!(
-                commands.as_slice(),
-                [Command::RefreshStatus(_, _), Command::LoadBranches(_, _)]
-            ),
-            "success must refresh status and branches"
+            commands
+                .iter()
+                .any(|c| matches!(c, Command::RefreshStatus(_, _))),
+            "success must refresh status"
+        );
+        assert!(
+            commands
+                .iter()
+                .any(|c| matches!(c, Command::LoadBranches(_, _))),
+            "success must refresh branches"
         );
         assert!(app.commit_message().is_none());
         assert!(matches!(app.operation(), OperationState::Succeeded(_)));
@@ -2291,5 +2728,310 @@ mod tests {
             app.patch_export().is_none(),
             "a new diff selection must clear the previous export result"
         );
+    }
+
+    // -- US-049: sync with a remote ---------------------------------------
+
+    fn sample_remote(name: &str) -> Remote {
+        Remote {
+            name: name.to_string(),
+            fetch_url: gitsail_domain::RemoteUrl::new(format!("https://example.test/{name}.git")),
+            push_url: gitsail_domain::RemoteUrl::new(format!("https://example.test/{name}.git")),
+        }
+    }
+
+    fn open_with_branches_and_remotes(app: &mut App, branches: Vec<Branch>, remotes: Vec<Remote>) {
+        app.on_repository_opened(Ok(sample_repository()));
+        let generation = app.session().unwrap().generation();
+        app.on_branches_loaded(generation, Ok(branches));
+        app.on_remotes_loaded(generation, Ok(remotes));
+    }
+
+    #[test]
+    fn fetch_with_a_single_configured_remote_dispatches_without_confirmation() {
+        let (mut app, _port) = new_app();
+        open_with_branches_and_remotes(
+            &mut app,
+            vec![sample_branch("main", true)],
+            vec![sample_remote("origin")],
+        );
+
+        let commands = app.update(Action::RequestFetch);
+        match commands.as_slice() {
+            [Command::Fetch(_, remote)] => assert_eq!(remote, "origin"),
+            other => panic!("expected exactly one Fetch command, got {other:?}"),
+        }
+        assert!(
+            matches!(
+                app.operation(),
+                OperationState::InProgress(OperationKind::Fetch { .. })
+            ),
+            "Fetch is Safe and must skip the Confirming step"
+        );
+        assert!(app.sync_error().is_none());
+    }
+
+    #[test]
+    fn fetch_with_no_remote_configured_reports_a_clear_error_without_dispatching() {
+        let (mut app, _port) = new_app();
+        open_with_branches_and_remotes(&mut app, vec![sample_branch("main", true)], vec![]);
+
+        let commands = app.update(Action::RequestFetch);
+        assert!(commands.is_empty(), "nothing must be dispatched");
+        assert!(app.operation().is_idle());
+        assert!(
+            app.sync_error()
+                .map(|e| e.message().contains("no remote"))
+                .unwrap_or(false),
+            "the error must explain no remote is configured, got {:?}",
+            app.sync_error()
+        );
+    }
+
+    #[test]
+    fn fetch_with_multiple_remotes_and_no_upstream_refuses_to_guess() {
+        let (mut app, _port) = new_app();
+        open_with_branches_and_remotes(
+            &mut app,
+            vec![sample_branch("main", true)],
+            vec![sample_remote("origin"), sample_remote("upstream")],
+        );
+
+        let commands = app.update(Action::RequestFetch);
+        assert!(commands.is_empty(), "an ambiguous remote must never be guessed");
+        assert!(app.sync_error().is_some());
+    }
+
+    #[test]
+    fn fetch_prefers_the_current_branchs_upstream_remote_over_a_guess() {
+        let (mut app, _port) = new_app();
+        let mut main = sample_branch("main", true);
+        main.upstream = Some(BranchName::new("upstream/main").unwrap());
+        open_with_branches_and_remotes(
+            &mut app,
+            vec![main],
+            vec![sample_remote("origin"), sample_remote("upstream")],
+        );
+
+        let commands = app.update(Action::RequestFetch);
+        match commands.as_slice() {
+            [Command::Fetch(_, remote)] => assert_eq!(remote, "upstream"),
+            other => panic!("expected exactly one Fetch command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pull_confirms_then_dispatches_against_the_resolved_remote_and_current_branch() {
+        let (mut app, _port) = new_app();
+        open_with_branches_and_remotes(
+            &mut app,
+            vec![sample_branch("main", true)],
+            vec![sample_remote("origin")],
+        );
+
+        app.update(Action::RequestPull);
+        assert!(matches!(
+            app.operation(),
+            OperationState::Confirming(OperationKind::Pull { .. })
+        ));
+
+        let commands = app.update(Action::Activate);
+        match commands.as_slice() {
+            [Command::Pull(_, remote, branch)] => {
+                assert_eq!(remote, "origin");
+                assert_eq!(branch.as_str(), "main");
+            }
+            other => panic!("expected exactly one Pull command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn push_confirms_then_dispatches_against_the_resolved_remote_and_current_branch() {
+        let (mut app, _port) = new_app();
+        open_with_branches_and_remotes(
+            &mut app,
+            vec![sample_branch("main", true)],
+            vec![sample_remote("origin")],
+        );
+
+        app.update(Action::RequestPush);
+        assert!(matches!(
+            app.operation(),
+            OperationState::Confirming(OperationKind::Push { .. })
+        ));
+
+        let commands = app.update(Action::Activate);
+        match commands.as_slice() {
+            [Command::Push(_, remote, branch)] => {
+                assert_eq!(remote, "origin");
+                assert_eq!(branch.as_str(), "main");
+            }
+            other => panic!("expected exactly one Push command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_successful_pull_records_its_outcome_and_refreshes() {
+        let (mut app, _port) = new_app();
+        open_with_branches_and_remotes(
+            &mut app,
+            vec![sample_branch("main", true)],
+            vec![sample_remote("origin")],
+        );
+        app.update(Action::RequestPull);
+        app.update(Action::Activate);
+
+        let commands = app.on_pull_finished(Ok(PullOutcome::AlreadyUpToDate));
+        assert!(
+            commands
+                .iter()
+                .any(|c| matches!(c, Command::RefreshStatus(_, _))),
+            "a successful pull must refresh"
+        );
+        assert_eq!(app.last_pull_outcome(), Some(&PullOutcome::AlreadyUpToDate));
+        assert!(matches!(app.operation(), OperationState::Succeeded(_)));
+    }
+
+    #[test]
+    fn a_rejected_pull_never_merges_rebases_or_refreshes() {
+        let (mut app, _port) = new_app();
+        open_with_branches_and_remotes(
+            &mut app,
+            vec![sample_branch("main", true)],
+            vec![sample_remote("origin")],
+        );
+        app.update(Action::RequestPull);
+        app.update(Action::Activate);
+
+        let commands = app.on_pull_finished(Err(GitSailError::new(
+            ErrorCode::OperationConflict,
+            "branches have diverged",
+        )));
+        assert!(commands.is_empty(), "a rejected pull must never refresh");
+        assert!(matches!(app.operation(), OperationState::Failed(_, _)));
+        assert!(app.last_pull_outcome().is_none());
+    }
+
+    // -- US-050: inspect tags, remotes and stash --------------------------
+
+    fn sample_tag(name: &str) -> Tag {
+        Tag {
+            name: name.to_string(),
+            target: CommitHash::new("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef").unwrap(),
+            kind: gitsail_domain::TagKind::Lightweight,
+        }
+    }
+
+    fn sample_stash(index: u32) -> Stash {
+        Stash {
+            index,
+            commit: CommitHash::new("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef").unwrap(),
+            message: format!("WIP on main: stash {index}"),
+            date: gitsail_domain::GitTimestamp::new(0, 0),
+        }
+    }
+
+    #[test]
+    fn tags_remotes_and_stash_are_listed_after_loading() {
+        let (mut app, _port) = new_app();
+        app.on_repository_opened(Ok(sample_repository()));
+        let generation = app.session().unwrap().generation();
+
+        app.on_tags_loaded(generation, Ok(vec![sample_tag("v1.0")]));
+        app.on_remotes_loaded(generation, Ok(vec![sample_remote("origin")]));
+        app.on_stash_entries_loaded(generation, Ok(vec![sample_stash(0)]));
+
+        assert_eq!(app.tags().len(), 1);
+        assert_eq!(app.remotes().len(), 1);
+        assert_eq!(app.stashes().len(), 1);
+    }
+
+    #[test]
+    fn a_stale_tags_result_is_discarded() {
+        let (mut app, _port) = new_app();
+        app.on_repository_opened(Ok(sample_repository()));
+        let stale_generation = app.session().unwrap().generation();
+
+        app.update(Action::Refresh);
+
+        app.on_tags_loaded(stale_generation, Ok(vec![sample_tag("stale-only")]));
+
+        assert!(
+            app.tags().is_empty(),
+            "a tags result computed for an old generation must not populate the panel"
+        );
+    }
+
+    #[test]
+    fn empty_reference_lists_are_a_legitimate_state_not_an_error() {
+        let (mut app, _port) = new_app();
+        app.on_repository_opened(Ok(sample_repository()));
+        let generation = app.session().unwrap().generation();
+
+        app.on_tags_loaded(generation, Ok(vec![]));
+        app.on_remotes_loaded(generation, Ok(vec![]));
+        app.on_stash_entries_loaded(generation, Ok(vec![]));
+
+        assert!(app.tags().is_empty());
+        assert!(app.remotes().is_empty());
+        assert!(app.stashes().is_empty());
+    }
+
+    #[test]
+    fn cycling_the_reference_view_only_applies_when_the_references_panel_is_focused() {
+        let (mut app, _port) = new_app();
+        assert_eq!(app.focus(), Panel::Sidebar);
+
+        app.update(Action::CycleReferenceView);
+        assert_eq!(
+            app.reference_view(),
+            ReferenceView::Tags,
+            "cycling must be a no-op while a different panel is focused"
+        );
+
+        for _ in 0..4 {
+            app.update(Action::FocusNext);
+        }
+        assert_eq!(app.focus(), Panel::References);
+
+        app.update(Action::CycleReferenceView);
+        assert_eq!(app.reference_view(), ReferenceView::Remotes);
+        app.update(Action::CycleReferenceView);
+        assert_eq!(app.reference_view(), ReferenceView::Stash);
+        app.update(Action::CycleReferenceView);
+        assert_eq!(app.reference_view(), ReferenceView::Tags);
+    }
+
+    #[test]
+    fn activating_a_reference_entry_opens_its_details_overlay() {
+        let (mut app, _port) = new_app();
+        app.on_repository_opened(Ok(sample_repository()));
+        let generation = app.session().unwrap().generation();
+        app.on_tags_loaded(generation, Ok(vec![sample_tag("v1.0")]));
+
+        for _ in 0..4 {
+            app.update(Action::FocusNext);
+        }
+        assert_eq!(app.focus(), Panel::References);
+
+        app.update(Action::Activate);
+        assert!(app.reference_details_open());
+
+        app.update(Action::Dismiss);
+        assert!(!app.reference_details_open());
+    }
+
+    #[test]
+    fn activating_an_empty_reference_list_never_opens_a_details_overlay() {
+        let (mut app, _port) = new_app();
+        app.on_repository_opened(Ok(sample_repository()));
+        let generation = app.session().unwrap().generation();
+        app.on_tags_loaded(generation, Ok(vec![]));
+
+        for _ in 0..4 {
+            app.update(Action::FocusNext);
+        }
+        app.update(Action::Activate);
+        assert!(!app.reference_details_open());
     }
 }

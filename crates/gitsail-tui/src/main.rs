@@ -147,6 +147,19 @@ fn run(
             }
             Message::OperationFinished(result) => app.on_operation_finished(result),
             Message::CommitCreated(result) => app.on_commit_created(result),
+            Message::TagsLoaded(generation, result) => {
+                app.on_tags_loaded(generation, result);
+                Vec::new()
+            }
+            Message::RemotesLoaded(generation, result) => {
+                app.on_remotes_loaded(generation, result);
+                Vec::new()
+            }
+            Message::StashEntriesLoaded(generation, result) => {
+                app.on_stash_entries_loaded(generation, result);
+                Vec::new()
+            }
+            Message::PullFinished(result) => app.on_pull_finished(result),
         };
         worker::dispatch(commands, &read_port, &write_port, &tx);
 

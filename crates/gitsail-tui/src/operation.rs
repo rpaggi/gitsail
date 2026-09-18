@@ -49,6 +49,19 @@ pub enum OperationKind {
     SwitchBranch { target: String },
     CreateBranch { name: String },
     DeleteBranch { name: String, force: bool },
+    /// T-182/US-049: `RepositoryWritePort::fetch`. `Safe` per SAD §20's own
+    /// named example — see [`Self::risk`].
+    Fetch { remote: String },
+    /// T-182/US-049: `RepositoryWritePort::pull` — this version's
+    /// fast-forward-only policy (see that method's doc); divergence comes
+    /// back as an ordinary [`OperationState::Failed`], never an automatic
+    /// merge/rebase.
+    Pull { remote: String, branch: String },
+    /// T-182/US-049: `RepositoryWritePort::push` — a plain, non-force push.
+    /// `RepositoryWritePort::force_push_with_lease` (US-099) is deliberately
+    /// out of scope for this operation set; see this crate's module docs
+    /// for why.
+    Push { remote: String, branch: String },
 }
 
 impl OperationKind {
@@ -71,6 +84,14 @@ impl OperationKind {
                     OperationRisk::Moderate
                 }
             }
+            // Mirrors `gitsail_application::MutationKind`'s canonical
+            // classification (SAD §20's own named examples: fetch is
+            // explicitly `Safe`; a fast-forward-only pull and a plain,
+            // non-force push both only ever move refs forward along
+            // history everyone already agrees on, the same character
+            // `SwitchBranch`/`CreateCommit` already have).
+            OperationKind::Fetch { .. } => OperationRisk::Safe,
+            OperationKind::Pull { .. } | OperationKind::Push { .. } => OperationRisk::Moderate,
         }
     }
 
@@ -84,6 +105,13 @@ impl OperationKind {
             OperationKind::SwitchBranch { target } => format!("branch '{target}'"),
             OperationKind::CreateBranch { name } => format!("branch '{name}'"),
             OperationKind::DeleteBranch { name, .. } => format!("branch '{name}'"),
+            OperationKind::Fetch { remote } => format!("remote '{remote}'"),
+            OperationKind::Pull { remote, branch } => {
+                format!("branch '{branch}' from remote '{remote}'")
+            }
+            OperationKind::Push { remote, branch } => {
+                format!("branch '{branch}' to remote '{remote}'")
+            }
         }
     }
 }
@@ -186,6 +214,35 @@ mod tests {
             OperationKind::DeleteBranch {
                 name: "x".into(),
                 force: false
+            }
+            .risk(),
+            OperationRisk::Moderate
+        );
+    }
+
+    /// T-182: mirrors `gitsail_application::mutation`'s canonical
+    /// classification for the same three operations.
+    #[test]
+    fn remote_sync_operations_classify_per_sad_section_20() {
+        assert_eq!(
+            OperationKind::Fetch {
+                remote: "origin".into()
+            }
+            .risk(),
+            OperationRisk::Safe
+        );
+        assert_eq!(
+            OperationKind::Pull {
+                remote: "origin".into(),
+                branch: "main".into()
+            }
+            .risk(),
+            OperationRisk::Moderate
+        );
+        assert_eq!(
+            OperationKind::Push {
+                remote: "origin".into(),
+                branch: "main".into()
             }
             .risk(),
             OperationRisk::Moderate

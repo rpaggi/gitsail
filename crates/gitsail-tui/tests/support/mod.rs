@@ -66,6 +66,39 @@ pub fn init_repo_with_initial_commit(dir: &Path) {
     git(dir, &["commit", "--quiet", "-m", "initial commit"]);
 }
 
+/// A bare repository standing in for a real remote (T-182's DoD: "E2E com
+/// remote fixture", mirroring `gitsail-git`'s own EPIC-19 integration tests
+/// — never a real network). Bare because a non-bare repository refuses a
+/// push to its checked-out branch by default; a real Git hosting service's
+/// repositories are bare for the same reason.
+pub fn init_bare_remote(label: &str) -> TempDir {
+    let dir = TempDir::new(label);
+    git(
+        dir.path(),
+        &["init", "--quiet", "--bare", "--initial-branch=main"],
+    );
+    dir
+}
+
+/// Clones `remote` into a fresh temporary directory, configuring a test
+/// identity so commits made in the clone succeed.
+pub fn clone_repo(remote: &Path, label: &str) -> TempDir {
+    let dir = TempDir::new(label);
+    git(
+        dir.path().parent().unwrap(),
+        &[
+            "clone",
+            "--quiet",
+            "--",
+            remote.to_str().unwrap(),
+            dir.path().to_str().unwrap(),
+        ],
+    );
+    git(dir.path(), &["config", "user.name", "Test User"]);
+    git(dir.path(), &["config", "user.email", "test@example.com"]);
+    dir
+}
+
 pub fn read_port() -> Arc<dyn RepositoryReadPort> {
     let runner = GitProcessRunner::new(GitProcessRunnerConfig::default()).expect("git runner");
     Arc::new(GitCliProvider::new(runner))

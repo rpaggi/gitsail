@@ -2,9 +2,10 @@
 //! a terminal input event or the outcome of a background [`crate::worker::Command`]
 //! (SAD §18: "... return typed messages/events").
 
-use gitsail_application::{Page, RefreshTicket};
+use gitsail_application::{Page, PullOutcome, RefreshTicket};
 use gitsail_domain::{
-    Blame, Branch, Commit, CommitHash, Diff, GitSailError, Repository, RepositoryStatus,
+    Blame, Branch, Commit, CommitHash, Diff, GitSailError, Remote, Repository, RepositoryStatus,
+    Stash, Tag,
 };
 
 #[derive(Debug)]
@@ -41,4 +42,21 @@ pub enum Message {
     OperationFinished(Result<(), GitSailError>),
     /// [`crate::worker::Command::CreateCommit`] completed (US-047).
     CommitCreated(Result<CommitHash, GitSailError>),
+    /// [`crate::worker::Command::LoadTags`] completed (US-050), tagged with
+    /// the session generation active when it was requested, matching
+    /// [`Self::BranchesLoaded`].
+    TagsLoaded(u64, Result<Vec<Tag>, GitSailError>),
+    /// [`crate::worker::Command::LoadRemotes`] completed (US-050), tagged
+    /// like [`Self::TagsLoaded`].
+    RemotesLoaded(u64, Result<Vec<Remote>, GitSailError>),
+    /// [`crate::worker::Command::LoadStashEntries`] completed (US-050),
+    /// tagged like [`Self::TagsLoaded`].
+    StashEntriesLoaded(u64, Result<Vec<Stash>, GitSailError>),
+    /// [`crate::worker::Command::Pull`] completed (US-049). Carries the
+    /// [`PullOutcome`] on success — distinct from
+    /// [`Self::OperationFinished`] so "already up to date" and
+    /// "fast-forwarded to `<hash>`" can both be shown explicitly rather than
+    /// collapsed into a bare success (criterion 1: "divergência ou conflito
+    /// é mostrado claramente").
+    PullFinished(Result<PullOutcome, GitSailError>),
 }

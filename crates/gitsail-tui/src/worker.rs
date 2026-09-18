@@ -21,9 +21,9 @@ use std::sync::Arc;
 use std::thread;
 
 use gitsail_application::{
-    BlameRequest, CommitQuery, CreateBranch, CreateCommit, DeleteBranch, DiffRequest,
+    BlameRequest, CommitQuery, CreateBranch, CreateCommit, DeleteBranch, DiffRequest, Fetch,
     GetCommitHistory, GetDiff, GetFileBlame, GetRepositoryStatus, ListBranches, OpenRepository,
-    RefreshTicket, RepositoryReadPort, RepositoryWritePort, StageFiles, SwitchBranch,
+    Pull, Push, RefreshTicket, RepositoryReadPort, RepositoryWritePort, StageFiles, SwitchBranch,
     UnstageFiles,
 };
 use gitsail_domain::{BranchName, CancellationToken, CommitHash, Repository};
@@ -59,6 +59,21 @@ pub enum Command {
     SwitchBranch(Repository, BranchName),
     CreateBranch(Repository, BranchName, Option<CommitHash>),
     DeleteBranch(Repository, BranchName, bool),
+    /// Loads local tags (US-050), tagged with the session generation active
+    /// when it was requested, matching [`Self::LoadBranches`].
+    LoadTags(u64, Repository),
+    /// Loads configured remotes (US-050), tagged like [`Self::LoadTags`].
+    LoadRemotes(u64, Repository),
+    /// Loads stash entries (US-050), tagged like [`Self::LoadTags`].
+    LoadStashEntries(u64, Repository),
+    /// Fetches `remote` (US-049). `Safe`, so `App` dispatches this
+    /// immediately without a confirmation step.
+    Fetch(Repository, String),
+    /// Pulls `remote`'s tracked `branch` into the current branch (US-049),
+    /// fast-forward only (see `RepositoryWritePort::pull`'s own doc).
+    Pull(Repository, String, BranchName),
+    /// Pushes the current `branch` to `remote` (US-049), never forcing.
+    Push(Repository, String, BranchName),
 }
 
 /// Spawns one background thread per command in `commands`, each reporting
@@ -140,6 +155,32 @@ fn spawn_one(
             }
             Command::DeleteBranch(repo, name, force) => {
                 let result = DeleteBranch::new(write_port).execute(&repo, &name, force);
+                Message::OperationFinished(result)
+            }
+            Command::LoadTags(generation, repo) => {
+                let result = read_port.list_tags(&repo);
+                Message::TagsLoaded(generation, result)
+            }
+            Command::LoadRemotes(generation, repo) => {
+                let result = read_port.list_remotes(&repo);
+                Message::RemotesLoaded(generation, result)
+            }
+            Command::LoadStashEntries(generation, repo) => {
+                let result = read_port.list_stash_entries(&repo);
+                Message::StashEntriesLoaded(generation, result)
+            }
+            Command::Fetch(repo, remote) => {
+                let result = Fetch::new(write_port).execute(&repo, &remote, &CancellationToken::new());
+                Message::OperationFinished(result)
+            }
+            Command::Pull(repo, remote, branch) => {
+                let result =
+                    Pull::new(write_port).execute(&repo, &remote, &branch, &CancellationToken::new());
+                Message::PullFinished(result)
+            }
+            Command::Push(repo, remote, branch) => {
+                let result =
+                    Push::new(write_port).execute(&repo, &remote, &branch, &CancellationToken::new());
                 Message::OperationFinished(result)
             }
         };

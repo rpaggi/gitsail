@@ -60,6 +60,18 @@ fn run_mutation(app: &mut App, commands: Vec<Command>) {
                 app.on_branches_loaded(generation, result);
                 Vec::new()
             }
+            Command::LoadTags(generation, repo) => {
+                app.on_tags_loaded(generation, read.list_tags(&repo));
+                Vec::new()
+            }
+            Command::LoadRemotes(generation, repo) => {
+                app.on_remotes_loaded(generation, read.list_remotes(&repo));
+                Vec::new()
+            }
+            Command::LoadStashEntries(generation, repo) => {
+                app.on_stash_entries_loaded(generation, read.list_stash_entries(&repo));
+                Vec::new()
+            }
             other => panic!("unexpected command: {other:?}"),
         };
         queue.extend(follow_up);

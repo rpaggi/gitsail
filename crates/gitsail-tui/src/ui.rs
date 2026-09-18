@@ -6,7 +6,8 @@
 //! reaching a widget (SAD §33) — this module is the render boundary that
 //! rule applies at; `App` itself always holds the raw value.
 
-use gitsail_domain::{BlameOrigin, BranchKind, Commit, DiffLineOrigin, GitTimestamp};
+use gitsail_application::PullOutcome;
+use gitsail_domain::{BlameOrigin, BranchKind, Commit, DiffLineOrigin, GitTimestamp, TagKind};
 use crate::graph_view;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -14,7 +15,7 @@ use ratatui::text::Line;
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
 use ratatui::Frame;
 
-use crate::app::{App, DiffViewMode, Panel, PatchExportOutcome, ViewPhase};
+use crate::app::{App, DiffViewMode, Panel, PatchExportOutcome, ReferenceView, ViewPhase};
 use crate::operation::OperationState;
 use crate::sanitize;
 use crate::status_view::DiffScope;
@@ -48,15 +49,23 @@ pub fn render(frame: &mut Frame, app: &App) {
         .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
         .split(main[1]);
 
+    // Three columns rather than the original two (US-050 adds the
+    // References panel alongside Details/Diff): even thirds keep each one
+    // legible without shrinking Details/Diff dramatically.
     let lower = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .constraints([
+            Constraint::Percentage(34),
+            Constraint::Percentage(33),
+            Constraint::Percentage(33),
+        ])
         .split(content[1]);
 
     render_sidebar(frame, main[0], app);
     render_graph_panel(frame, content[0], app);
     render_status_panel(frame, lower[0], app);
     render_diff_panel(frame, lower[1], app);
+    render_references_panel(frame, lower[2], app);
     render_shortcuts(frame, outer[1], app);
 
     render_overlays(frame, area, app);
@@ -504,9 +513,112 @@ fn blame_lines(app: &App) -> Vec<Line<'static>> {
         .collect()
 }
 
+/// Renders the References panel: whichever of Tags/Remotes/Stash
+/// [`ReferenceView`] currently selects (US-050 criterion 1), with an
+/// explicit empty state per sub-view (criterion 3) rather than a single
+/// generic "nothing here" for all three.
+fn render_references_panel(frame: &mut Frame, rect: Rect, app: &App) {
+    let title = format!(
+        "{} — {}",
+        Panel::References.title(),
+        app.reference_view().title()
+    );
+    let block = panel_block(&title, app.focus() == Panel::References, app.low_color());
+
+    if app.view_phase() != ViewPhase::Loaded {
+        let text = phase_placeholder_text(app.view_phase(), Panel::References);
+        frame.render_widget(
+            Paragraph::new(text).wrap(Wrap { trim: true }).block(block),
+            rect,
+        );
+        return;
+    }
+
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+
+    let lines: Vec<String> = match app.reference_view() {
+        ReferenceView::Tags => {
+            if app.tags().is_empty() {
+                vec!["No tags.".to_string()]
+            } else {
+                app.tags()
+                    .iter()
+                    .map(|tag| {
+                        let kind = match &tag.kind {
+                            TagKind::Lightweight => "lightweight".to_string(),
+                            TagKind::Annotated { .. } => "annotated".to_string(),
+                        };
+                        format!(
+                            "{} -> {} [{kind}]",
+                            sanitize::safe_line(&tag.name),
+                            tag.target.to_short(8).as_str()
+                        )
+                    })
+                    .collect()
+            }
+        }
+        ReferenceView::Remotes => {
+            if app.remotes().is_empty() {
+                vec!["No remotes configured.".to_string()]
+            } else {
+                app.remotes()
+                    .iter()
+                    .map(|remote| {
+                        // `Remote`'s URLs render already-redacted via their
+                        // own `Display` (SAD §11, §28) — never the raw
+                        // credential-bearing string.
+                        format!(
+                            "{}  fetch={} push={}",
+                            sanitize::safe_line(&remote.name),
+                            sanitize::safe_line(&remote.fetch_url.to_string()),
+                            sanitize::safe_line(&remote.push_url.to_string())
+                        )
+                    })
+                    .collect()
+            }
+        }
+        ReferenceView::Stash => {
+            if app.stashes().is_empty() {
+                vec!["No stash entries.".to_string()]
+            } else {
+                app.stashes()
+                    .iter()
+                    .map(|stash| {
+                        format!(
+                            "stash@{{{}}} {} {}",
+                            stash.index,
+                            stash.commit.to_short(8).as_str(),
+                            sanitize::safe_line(&stash.message)
+                        )
+                    })
+                    .collect()
+            }
+        }
+    };
+
+    let has_entries = app.reference_len() > 0;
+    let items: Vec<ListItem> = lines
+        .into_iter()
+        .enumerate()
+        .map(|(i, text)| {
+            let style = if has_entries && app.focus() == Panel::References && i == app.reference_cursor()
+            {
+                Style::default().add_modifier(Modifier::REVERSED)
+            } else {
+                Style::default()
+            };
+            ListItem::new(text).style(style)
+        })
+        .collect();
+    frame.render_widget(List::new(items), inner);
+}
+
 fn render_shortcuts(frame: &mut Frame, rect: Rect, app: &App) {
     let text = if app.commit_details_open() {
         "Esc/q closes commit details".to_string()
+    } else if app.reference_details_open() {
+        "Esc/q closes reference details".to_string()
     } else if app.commit_search().is_some() {
         "Type message/author:/branch:/hash · Enter searches · Esc cancels".to_string()
     } else if app.search().is_some() {
@@ -533,12 +645,16 @@ fn render_shortcuts(frame: &mut Frame, rect: Rect, app: &App) {
 fn render_overlays(frame: &mut Frame, area: Rect, app: &App) {
     if app.commit_details_open() {
         render_commit_details(frame, area, app);
+    } else if app.reference_details_open() {
+        render_reference_details(frame, area, app);
     } else if app.commit_message().is_some() {
         render_commit_composer(frame, area, app);
     } else if !app.operation().is_idle() {
         render_operation_overlay(frame, area, app);
     } else if app.branch_input().is_some() {
         render_branch_name_prompt(frame, area, app);
+    } else if app.sync_error().is_some() {
+        render_sync_error(frame, area, app);
     }
 
     if app.help_visible() {
@@ -622,6 +738,108 @@ fn format_timestamp(ts: &GitTimestamp) -> String {
     )
 }
 
+/// Shows the reference-details overlay for the entry currently under the
+/// References panel's cursor (US-050 criterion 2: selecting an item shows
+/// its target/message and every metadata field available for that kind —
+/// an annotated tag's message/tagger/date, a lightweight tag's bare target,
+/// a remote's fetch/push URLs, or a stash entry's commit/message/date).
+/// Mirrors [`render_commit_details`]: reads data already loaded for the
+/// panel, never issuing a fresh read.
+fn render_reference_details(frame: &mut Frame, area: Rect, app: &App) {
+    let index = app.reference_cursor();
+    let lines: Vec<Line<'static>> = match app.reference_view() {
+        ReferenceView::Tags => match app.tags().get(index) {
+            Some(tag) => {
+                let mut lines = vec![
+                    Line::from(format!("tag {}", sanitize::safe_line(&tag.name))),
+                    Line::from(format!("target: {}", tag.target.as_str())),
+                ];
+                match &tag.kind {
+                    TagKind::Lightweight => lines.push(Line::from("kind: lightweight")),
+                    TagKind::Annotated { message, tagger, date } => {
+                        lines.push(Line::from("kind: annotated"));
+                        lines.push(Line::from(format!(
+                            "tagger: {} <{}>",
+                            sanitize::safe_line(&tagger.name),
+                            sanitize::safe_line(&tagger.email)
+                        )));
+                        lines.push(Line::from(format!("date: {}", format_timestamp(date))));
+                        lines.push(Line::from(""));
+                        for line in message.lines() {
+                            lines.push(Line::from(sanitize::safe_line(line)));
+                        }
+                    }
+                }
+                lines
+            }
+            None => return,
+        },
+        ReferenceView::Remotes => match app.remotes().get(index) {
+            Some(remote) => vec![
+                Line::from(format!("remote {}", sanitize::safe_line(&remote.name))),
+                Line::from(format!(
+                    "fetch: {}",
+                    sanitize::safe_line(&remote.fetch_url.to_string())
+                )),
+                Line::from(format!(
+                    "push:  {}",
+                    sanitize::safe_line(&remote.push_url.to_string())
+                )),
+            ],
+            None => return,
+        },
+        ReferenceView::Stash => match app.stashes().get(index) {
+            Some(stash) => vec![
+                Line::from(format!("stash@{{{}}}", stash.index)),
+                Line::from(format!("commit: {}", stash.commit.as_str())),
+                Line::from(format!("date: {}", format_timestamp(&stash.date))),
+                Line::from(""),
+                Line::from(sanitize::safe_line(&stash.message)),
+            ],
+            None => return,
+        },
+    };
+    let mut lines = lines;
+    lines.push(Line::from(""));
+    lines.push(Line::from("Esc/q closes"));
+
+    let popup = centered_rect(70, 60, area);
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: true })
+            .block(Block::default().title("Reference Details").borders(Borders::ALL)),
+        popup,
+    );
+}
+
+/// Shows a remote/branch resolution failure from a fetch/pull/push request
+/// (US-049 criterion 1) — e.g. no remote configured, or an ambiguous choice
+/// this app deliberately refuses to guess. Distinct from
+/// [`render_operation_overlay`]: nothing was ever confirmed or dispatched
+/// here, so there is no operation to show progress for.
+fn render_sync_error(frame: &mut Frame, area: Rect, app: &App) {
+    let Some(error) = app.sync_error() else {
+        return;
+    };
+    let mut lines = vec![Line::from(sanitize::safe_line(error.message()))];
+    if let Some(remediation) = error.remediation() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(sanitize::safe_line(remediation)));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from("Esc dismisses"));
+
+    let popup = centered_rect(60, 40, area);
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: true })
+            .block(Block::default().title("Remote Sync").borders(Borders::ALL)),
+        popup,
+    );
+}
+
 /// Shows a pending/running/finished mutation (US-047, US-048): what it
 /// targets, its SAD §20 risk tier, and — for `SwitchBranch`/`DeleteBranch`
 /// — the branch's current target as the "ref de origem" criterion 2 asks
@@ -657,6 +875,21 @@ fn render_operation_overlay(frame: &mut Frame, area: Rect, app: &App) {
                 "ref: {}",
                 branch.target.to_short(8).as_str()
             )));
+        }
+    }
+
+    // US-049 criterion 1: a pull's exact outcome — already up to date, or
+    // fast-forwarded to a specific commit — is shown explicitly rather than
+    // a bare "Done", so it is never mistaken for a merge/rebase result.
+    if matches!(kind, OperationKind::Pull { .. }) {
+        if let Some(outcome) = app.last_pull_outcome() {
+            let text = match outcome {
+                PullOutcome::AlreadyUpToDate => "already up to date".to_string(),
+                PullOutcome::FastForwarded { new_head } => {
+                    format!("fast-forwarded to {}", new_head.to_short(8).as_str())
+                }
+            };
+            lines.push(Line::from(text));
         }
     }
 
@@ -759,6 +992,11 @@ fn render_help(frame: &mut Frame, area: Rect) {
         Line::from("n                 create a branch"),
         Line::from("c                 checkout the highlighted branch"),
         Line::from("d                 delete the highlighted branch"),
+        Line::from("f                 fetch the resolved remote"),
+        Line::from("p                 pull (fast-forward only)"),
+        Line::from("P                 push the current branch"),
+        Line::from("t (References)    cycle Tags/Remotes/Stash"),
+        Line::from("Enter (References) view the highlighted entry's details"),
         Line::from("r                 refresh status and branches"),
         Line::from("?                 toggle this help"),
         Line::from("q, Ctrl+C         quit"),

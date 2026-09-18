@@ -8,7 +8,7 @@
 //! the `git` CLI (never a mock), following the same fixture convention as
 //! `gitsail-git`'s and `gitsail-cli`'s integration tests. The buffer
 //! assertions below *are* the recorded visual reference: any future
-//! layout change that drops one of the five required regions, the branch
+//! layout change that drops one of the required panel regions, the branch
 //! name, or the loading/empty/error indicators breaks a test here.
 
 mod support;
@@ -35,6 +35,10 @@ fn initial_frame_shows_all_five_regions_in_the_loading_phase() {
     assert!(text.contains("Graph"), "missing graph region:\n{text}");
     assert!(text.contains("Details"), "missing details region:\n{text}");
     assert!(text.contains("Diff"), "missing diff region:\n{text}");
+    assert!(
+        text.contains("References"),
+        "missing references region:\n{text}"
+    );
     assert!(
         text.contains("loading"),
         "loading state not visible:\n{text}"
