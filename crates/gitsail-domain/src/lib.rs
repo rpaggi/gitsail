@@ -17,6 +17,7 @@ pub mod file_content;
 pub mod graph;
 pub mod ids;
 pub mod line_history;
+pub mod operation;
 pub mod redact;
 pub mod remote;
 pub mod repository;
@@ -36,6 +37,10 @@ pub use file_content::{FileContentAtRevision, FileContentKind};
 pub use graph::{CommitGraph, GraphCommit, GraphEdge, GraphRow, OpenLane};
 pub use ids::{BranchName, CommitHash, ShortHash};
 pub use line_history::{LineHistory, LineHistoryEntry};
+pub use operation::{
+    BisectOperation, ConflictStage, ConflictedFile, InProgressOperation, MergeOperation,
+    OperationCapability, RebaseOperation, SequencerOperation,
+};
 pub use remote::{Remote, RemoteUrl};
 pub use repository::{HeadState, Repository, RepositoryId};
 pub use stash::Stash;

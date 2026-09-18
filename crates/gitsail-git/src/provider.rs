@@ -25,11 +25,13 @@ use gitsail_application::{
     StashApplyOutcome, StashScope, TagAnnotation, WorktreeBranchSpec,
 };
 use gitsail_domain::{
-    Blame, BlameLine, BlameOrigin, Branch, BranchKind, BranchName, ChangeType, Commit, CommitHash,
-    Decoration, Diff, DiffHunk, DiffLine, DiffLineOrigin, ErrorCode, FileChange,
-    FileContentAtRevision, FileContentKind, FileDiff, FileStatusCode, GitSailError, GitTimestamp,
-    HeadState, LineHistory, LineHistoryEntry, Remote, RemoteUrl, Repository, RepositoryId,
-    RepositoryStatus, ShortHash, Signature, Stash, Tag, TagKind, Worktree, WorktreeHead,
+    BisectOperation, Blame, BlameLine, BlameOrigin, Branch, BranchKind, BranchName, ChangeType,
+    Commit, CommitHash, ConflictStage, ConflictedFile, Decoration, Diff, DiffHunk, DiffLine,
+    DiffLineOrigin, ErrorCode, FileChange, FileContentAtRevision, FileContentKind, FileDiff,
+    FileStatusCode, GitSailError, GitTimestamp, HeadState, InProgressOperation, LineHistory,
+    LineHistoryEntry, MergeOperation, OperationCapability, RebaseOperation, Remote, RemoteUrl,
+    Repository, RepositoryId, RepositoryStatus, SequencerOperation, ShortHash, Signature, Stash,
+    Tag, TagKind, Worktree, WorktreeHead,
 };
 
 use crate::runner::{CancellationToken, GitProcessRunner, ProcessOutput, ProcessRequest};
@@ -204,6 +206,73 @@ impl GitCliProvider {
         let hash = Self::stdout_string(&hash_output)?.trim().to_string();
         let commit = CommitHash::new(hash)?;
         Ok(HeadState::Detached { commit })
+    }
+
+    /// Resolves the real, shared `.git` directory via `git rev-parse
+    /// --git-common-dir` (ADR-019; T-227/US-116 criterion 1), so two linked
+    /// worktrees of the same repository — which report distinct
+    /// [`Repository::root_path`]s but share one object database/refs/index
+    /// lock namespace — resolve to the same directory instead of two
+    /// independent ones. Falls back to `--absolute-git-dir` for older Git
+    /// versions that lack `--git-common-dir` (added in Git 2.5), which is
+    /// at least correct for a repository with no linked worktrees (the
+    /// common case). Shared by [`RepositoryReadPort::lock_key`] (T-227/
+    /// US-116) and [`RepositoryReadPort::detect_in_progress_operation`]
+    /// (T-230/US-078), which both need the one real, shared Git directory
+    /// rather than `repo.root_path`.
+    fn git_common_dir(&self, repo: &Repository) -> Result<PathBuf, GitSailError> {
+        let cwd = repo.worktree_path.as_deref().unwrap_or(&repo.root_path);
+        let args = vec![
+            "rev-parse".to_string(),
+            "--path-format=absolute".to_string(),
+            "--git-common-dir".to_string(),
+        ];
+        let output = match self.try_run(args, cwd)? {
+            Some(output) => output,
+            None => self
+                .try_run(
+                    vec![
+                        "rev-parse".to_string(),
+                        "--path-format=absolute".to_string(),
+                        "--absolute-git-dir".to_string(),
+                    ],
+                    cwd,
+                )?
+                .ok_or_else(|| {
+                    GitSailError::new(
+                        ErrorCode::RepositoryNotFound,
+                        "could not resolve the repository's Git directory",
+                    )
+                })?,
+        };
+        let stdout = Self::stdout_string(&output)?;
+        let path = stdout
+            .lines()
+            .next()
+            .ok_or_else(|| parse_err("git rev-parse did not report a Git common directory"))?;
+        Ok(PathBuf::from(path))
+    }
+
+    /// The paths `git status` currently reports as unmerged (conflicted),
+    /// with each one's [`ConflictStage`] derived from its index/worktree
+    /// status pair (T-230/US-078 criterion 1). Reuses [`Self::status`]
+    /// (`git status --porcelain=v2`) rather than a second, separate `git
+    /// diff --name-only --diff-filter=U` call — both are equally valid per
+    /// this story's acceptance criteria, and this avoids a redundant
+    /// subprocess when a caller is about to fetch full status anyway.
+    fn conflicted_files(&self, repo: &Repository) -> Result<Vec<ConflictedFile>, GitSailError> {
+        let status = self.status(repo)?;
+        status
+            .files
+            .into_iter()
+            .filter(|file| file.change_type == ChangeType::Unmerged)
+            .map(|file| {
+                Ok(ConflictedFile {
+                    stage: conflict_stage(file.index_status, file.worktree_status)?,
+                    path: file.path,
+                })
+            })
+            .collect()
     }
 }
 
@@ -676,46 +745,17 @@ impl RepositoryReadPort for GitCliProvider {
         })
     }
 
-    /// Resolves the real, shared `.git` directory via `git rev-parse
-    /// --git-common-dir` (ADR-019; T-227/US-116 criterion 1), so two linked
+    /// Resolves the real, shared `.git` directory (ADR-019; T-227/US-116
+    /// criterion 1; T-230/US-078: also the directory
+    /// [`Self::detect_in_progress_operation`] reads `MERGE_HEAD`/
+    /// `rebase-merge`/`CHERRY_PICK_HEAD`/etc. from), so two linked
     /// worktrees of the same repository — which report distinct
     /// [`Repository::root_path`]s but share one object database/refs/index
-    /// lock namespace — resolve to the same mutation-serialization lock key
-    /// instead of two independent ones. Falls back to `--absolute-git-dir`
-    /// for older Git versions that lack `--git-common-dir` (added in Git
-    /// 2.5), which is at least correct for a repository with no linked
-    /// worktrees (the common case).
+    /// lock namespace, and the same in-progress-operation state — resolve
+    /// to the same directory instead of two independent ones. See
+    /// [`Self::git_common_dir`] for the actual resolution.
     fn lock_key(&self, repo: &Repository) -> Result<PathBuf, GitSailError> {
-        let cwd = repo.worktree_path.as_deref().unwrap_or(&repo.root_path);
-        let args = vec![
-            "rev-parse".to_string(),
-            "--path-format=absolute".to_string(),
-            "--git-common-dir".to_string(),
-        ];
-        let output = match self.try_run(args, cwd)? {
-            Some(output) => output,
-            None => self
-                .try_run(
-                    vec![
-                        "rev-parse".to_string(),
-                        "--path-format=absolute".to_string(),
-                        "--absolute-git-dir".to_string(),
-                    ],
-                    cwd,
-                )?
-                .ok_or_else(|| {
-                    GitSailError::new(
-                        ErrorCode::RepositoryNotFound,
-                        "could not resolve the repository's Git directory",
-                    )
-                })?,
-        };
-        let stdout = Self::stdout_string(&output)?;
-        let path = stdout
-            .lines()
-            .next()
-            .ok_or_else(|| parse_err("git rev-parse did not report a Git common directory"))?;
-        Ok(PathBuf::from(path))
+        self.git_common_dir(repo)
     }
 
     /// Lists local tags via `git for-each-ref refs/tags` (EPIC-18/T-216/
@@ -814,6 +854,113 @@ impl RepositoryReadPort for GitCliProvider {
         let output = self.run(args, &repo.root_path)?;
         let stdout = Self::stdout_string(&output)?;
         parse_worktree_records(&stdout)
+    }
+
+    /// Detects a merge, rebase, cherry-pick, revert, or bisect currently in
+    /// progress (T-230/US-078) by re-reading the marker files/directories
+    /// Git itself keeps under the real, shared `.git` directory (never any
+    /// in-memory GitSail state — criterion 2), checked in the fixed
+    /// precedence below. Git guarantees at most one of these is present at
+    /// a time in ordinary use (e.g. a rebase's own conflict handling uses
+    /// `CHERRY_PICK_HEAD`-like sequencer state under `rebase-merge`, never
+    /// a top-level `MERGE_HEAD`), so this returns the first match rather
+    /// than trying to detect an inconsistent combination.
+    ///
+    /// Known gap, documented rather than silently mis-detected: a plain
+    /// `git am` (mailbox patch application, not a rebase) also creates
+    /// `.git/rebase-apply`, distinguished from a rebase only by the
+    /// presence of `rebase-apply/rebasing` (rebase) vs `rebase-apply/
+    /// applying` (`am`). An `am` session in progress is therefore reported
+    /// as [`InProgressOperation::None`] here — `git am` is not one of the
+    /// operations this story's acceptance criteria list, and the type has
+    /// no variant for it yet.
+    fn detect_in_progress_operation(
+        &self,
+        repo: &Repository,
+    ) -> Result<InProgressOperation, GitSailError> {
+        require_worktree(repo, "detect in-progress operation")?;
+        let git_dir = self.git_common_dir(repo)?;
+
+        if git_dir.join("MERGE_HEAD").is_file() {
+            let heads = read_commit_hashes(&git_dir.join("MERGE_HEAD"));
+            let conflicted_files = self.conflicted_files(repo)?;
+            return Ok(InProgressOperation::Merge(MergeOperation {
+                heads,
+                conflicted_files,
+                capabilities: vec![OperationCapability::Continue, OperationCapability::Abort],
+            }));
+        }
+
+        let rebase_merge = git_dir.join("rebase-merge");
+        if rebase_merge.is_dir() {
+            let interactive = rebase_merge.join("interactive").is_file();
+            let onto = read_commit_hash(&rebase_merge.join("onto"));
+            let conflicted_files = self.conflicted_files(repo)?;
+            return Ok(InProgressOperation::Rebase(RebaseOperation {
+                interactive,
+                onto,
+                conflicted_files,
+                capabilities: vec![
+                    OperationCapability::Continue,
+                    OperationCapability::Skip,
+                    OperationCapability::Abort,
+                ],
+            }));
+        }
+
+        let rebase_apply = git_dir.join("rebase-apply");
+        if rebase_apply.is_dir() && rebase_apply.join("rebasing").is_file() {
+            let onto = read_commit_hash(&rebase_apply.join("onto"));
+            let conflicted_files = self.conflicted_files(repo)?;
+            return Ok(InProgressOperation::Rebase(RebaseOperation {
+                interactive: false,
+                onto,
+                conflicted_files,
+                capabilities: vec![
+                    OperationCapability::Continue,
+                    OperationCapability::Skip,
+                    OperationCapability::Abort,
+                ],
+            }));
+        }
+
+        if git_dir.join("CHERRY_PICK_HEAD").is_file() {
+            let target = read_commit_hash(&git_dir.join("CHERRY_PICK_HEAD"));
+            let conflicted_files = self.conflicted_files(repo)?;
+            return Ok(InProgressOperation::CherryPick(SequencerOperation {
+                target,
+                conflicted_files,
+                capabilities: vec![
+                    OperationCapability::Continue,
+                    OperationCapability::Skip,
+                    OperationCapability::Abort,
+                ],
+            }));
+        }
+
+        if git_dir.join("REVERT_HEAD").is_file() {
+            let target = read_commit_hash(&git_dir.join("REVERT_HEAD"));
+            let conflicted_files = self.conflicted_files(repo)?;
+            return Ok(InProgressOperation::Revert(SequencerOperation {
+                target,
+                conflicted_files,
+                capabilities: vec![
+                    OperationCapability::Continue,
+                    OperationCapability::Skip,
+                    OperationCapability::Abort,
+                ],
+            }));
+        }
+
+        if git_dir.join("BISECT_LOG").is_file() {
+            let conflicted_files = self.conflicted_files(repo)?;
+            return Ok(InProgressOperation::BisectRun(BisectOperation {
+                conflicted_files,
+                capabilities: vec![OperationCapability::Skip, OperationCapability::Abort],
+            }));
+        }
+
+        Ok(InProgressOperation::None)
     }
 }
 
@@ -2475,6 +2622,64 @@ fn require_worktree(repo: &Repository, operation: &str) -> Result<(), GitSailErr
         .with_remediation("open a non-bare repository, or a worktree of this bare repository"))
     } else {
         Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------
+// T-230/US-078: in-progress-operation detection helpers.
+// ---------------------------------------------------------------------
+
+/// Reads a single commit hash from a `.git/` state file (e.g.
+/// `CHERRY_PICK_HEAD`, `REVERT_HEAD`, `rebase-merge/onto`), taking only its
+/// first line. Best-effort: a missing file, an I/O error, or content that
+/// does not parse as a hex commit hash all report `None` rather than a
+/// [`GitSailError`] — this is supplementary information, not something
+/// that should ever block detecting *that* an operation is in progress.
+fn read_commit_hash(path: &Path) -> Option<CommitHash> {
+    let contents = std::fs::read_to_string(path).ok()?;
+    let first_line = contents.lines().next()?.trim();
+    CommitHash::new(first_line.to_string()).ok()
+}
+
+/// Reads zero or more commit hashes from a `.git/` state file, one per
+/// line (`MERGE_HEAD` records more than one line for an octopus merge).
+/// Best-effort per line, mirroring [`read_commit_hash`]: a missing file
+/// reports an empty list, and a line that fails to parse as a commit hash
+/// is skipped rather than failing the whole read.
+fn read_commit_hashes(path: &Path) -> Vec<CommitHash> {
+    match std::fs::read_to_string(path) {
+        Ok(contents) => contents
+            .lines()
+            .filter_map(|line| CommitHash::new(line.trim().to_string()).ok())
+            .collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// Maps an unmerged path's `(index_status, worktree_status)` pair to its
+/// [`ConflictStage`], mirroring Git's own seven unmerged `XY` status codes
+/// (`git status --porcelain=v2`'s `u` line; see `git-status(1)`): `DD`
+/// (both deleted), `AU` (added by us), `UD` (deleted by them), `UA` (added
+/// by them), `DU` (deleted by us), `AA` (both added), `UU` (both
+/// modified). Any other combination would mean Git itself emitted an
+/// unmerged entry this adapter does not recognize — reported as
+/// [`ErrorCode::ParseFailure`] rather than silently guessed.
+fn conflict_stage(
+    index: FileStatusCode,
+    worktree: FileStatusCode,
+) -> Result<ConflictStage, GitSailError> {
+    use FileStatusCode::{Added, Deleted, UpdatedButUnmerged};
+    match (index, worktree) {
+        (Deleted, Deleted) => Ok(ConflictStage::BothDeleted),
+        (Added, UpdatedButUnmerged) => Ok(ConflictStage::AddedByUs),
+        (UpdatedButUnmerged, Deleted) => Ok(ConflictStage::DeletedByThem),
+        (UpdatedButUnmerged, Added) => Ok(ConflictStage::AddedByThem),
+        (Deleted, UpdatedButUnmerged) => Ok(ConflictStage::DeletedByUs),
+        (Added, Added) => Ok(ConflictStage::BothAdded),
+        (UpdatedButUnmerged, UpdatedButUnmerged) => Ok(ConflictStage::BothModified),
+        (other_index, other_worktree) => Err(parse_err(format!(
+            "unrecognized unmerged status combination ({other_index:?}, {other_worktree:?})"
+        ))),
     }
 }
 

@@ -8,8 +8,8 @@ use std::path::{Path, PathBuf};
 
 use gitsail_domain::{
     Blame, Branch, BranchName, CancellationToken, Commit, CommitHash, Diff, FileContentAtRevision,
-    GitSailError, LineHistory, LineRange, Remote, Repository, RepositoryStatus, Stash, Tag,
-    Worktree,
+    GitSailError, InProgressOperation, LineHistory, LineRange, Remote, Repository,
+    RepositoryStatus, Stash, Tag, Worktree,
 };
 
 /// A single page of results plus continuation metadata (SAD §25).
@@ -240,5 +240,36 @@ pub trait RepositoryReadPort: Send + Sync {
     fn list_worktrees(&self, repo: &Repository) -> Result<Vec<Worktree>, GitSailError> {
         let _ = repo;
         Ok(Vec::new())
+    }
+
+    // -------------------------------------------------------------------
+    // T-230/US-078: detecting an in-progress merge/rebase/cherry-pick/
+    // revert/bisect, the shared foundation EPIC-16/EPIC-17 build on.
+    // -------------------------------------------------------------------
+
+    /// Detects a merge, rebase, cherry-pick, revert, or bisect currently in
+    /// progress by re-reading real `.git/` state (US-078 criterion 2) —
+    /// never from any in-memory GitSail state, so an operation started in
+    /// another terminal/editor is recognized on the very next call, exactly
+    /// like [`Self::status`] already does for the working tree.
+    ///
+    /// Any future mutation that must refuse to start "on top of" another
+    /// operation already in progress (US-078 criterion 3 — e.g. a new
+    /// merge/rebase while one is already pending) calls this first; this
+    /// method only detects state, it never touches `.git/`'s operation
+    /// metadata as a side effect of checking it.
+    ///
+    /// Default: [`InProgressOperation::None`] — correct for any test
+    /// double/adapter that predates this story, mirroring
+    /// [`Self::list_tags`]'s "empty is a legitimate state" convention.
+    /// [`crate::RepositoryReadPort`]'s only real implementation
+    /// (`gitsail_git::GitCliProvider`) overrides this with a real
+    /// filesystem/`git status` implementation.
+    fn detect_in_progress_operation(
+        &self,
+        repo: &Repository,
+    ) -> Result<InProgressOperation, GitSailError> {
+        let _ = repo;
+        Ok(InProgressOperation::None)
     }
 }

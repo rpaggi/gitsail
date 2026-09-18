@@ -32,9 +32,9 @@ pub use recent_repositories::{
 };
 pub use session::{RefreshReason, RefreshTicket, RepositorySession, Selection};
 pub use use_cases::{
-    AmendPreview, CommitDiff, CompareRevisions, GetCommit, GetCommitDiff, GetCommitHistory,
-    GetDiff, GetFileBlame, GetFileContent, GetLineHistory, GetRepositoryStatus, ListBranches,
-    OpenRepository, PreviewAmend, RevisionComparison,
+    AmendPreview, CommitDiff, CompareRevisions, DetectInProgressOperation, GetCommit,
+    GetCommitDiff, GetCommitHistory, GetDiff, GetFileBlame, GetFileContent, GetLineHistory,
+    GetRepositoryStatus, ListBranches, OpenRepository, PreviewAmend, RevisionComparison,
 };
 pub use write_ports::{
     ApplyPatchResult, PatchPreview, PullOutcome, RepositoryWritePort, StashApplyOutcome,

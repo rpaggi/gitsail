@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use gitsail_domain::{
     Blame, Branch, CancellationToken, Commit, CommitHash, Diff, FileContentAtRevision,
-    GitSailError, LineHistory, Repository, RepositoryStatus,
+    GitSailError, InProgressOperation, LineHistory, Repository, RepositoryStatus,
 };
 
 use crate::blame_cache::{BlameCache, BlameCacheKey};
@@ -44,6 +44,26 @@ impl GetRepositoryStatus {
 
     pub fn execute(&self, repo: &Repository) -> Result<RepositoryStatus, GitSailError> {
         self.port.status(repo)
+    }
+}
+
+/// Detects a merge/rebase/cherry-pick/revert/bisect currently in progress
+/// (T-230/US-078) — a thin wrapper over
+/// [`RepositoryReadPort::detect_in_progress_operation`], mirroring
+/// [`GetRepositoryStatus`]'s own shape, so callers (CLI, TUI, Desktop, or a
+/// future mutation guard) depend on one use case rather than the port
+/// directly.
+pub struct DetectInProgressOperation {
+    port: Arc<dyn RepositoryReadPort>,
+}
+
+impl DetectInProgressOperation {
+    pub fn new(port: Arc<dyn RepositoryReadPort>) -> Self {
+        Self { port }
+    }
+
+    pub fn execute(&self, repo: &Repository) -> Result<InProgressOperation, GitSailError> {
+        self.port.detect_in_progress_operation(repo)
     }
 }
 
