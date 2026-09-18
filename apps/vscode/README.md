@@ -52,13 +52,16 @@ implements):
 | `src/desktopHandoff.ts` | US-077 | Builds/validates `--repo/--commit` arguments and launches GitSail Desktop, or reports a clear fallback when it is not configured/found. |
 | `src/historyHostTypes.ts` / `src/historyController.ts` | all six | The testable orchestration layer for decorations/hover/commands/quickpicks/diff/content-providers, decoupled from the real `vscode` module — the EPIC-15 sibling of `hostTypes.ts`/`controller.ts`. |
 
-### Configuration (EPIC-15)
+### Configuration (EPIC-15/EPIC-21 — T-250/US-108)
 
-- `gitsail.blame.enabled` (boolean, default `true`).
-- `gitsail.blame.mode` (`"currentLine"` | `"allVisibleLines"`, default `"currentLine"`).
-- `gitsail.blame.delayMs` (number, default `400`).
+- `gitsail.blame.enabled` (boolean, default `true`) — turns inline blame off entirely.
+- `gitsail.blame.mode` (`"currentLine"` | `"allVisibleLines"`, default `"currentLine"`) — range: current line only, or every visible line.
+- `gitsail.blame.delayMs` (number, default `400`; a negative value falls back to `400`) — inactivity delay before a decoration (re)appears.
 - `gitsail.blame.format` (string template — `${author}`, `${authorEmail}`, `${date}`, `${hash}`, `${shortHash}`, `${message}`).
+- `gitsail.blame.dateStyle` (`"absolute"` | `"relative"`, default `"absolute"`; an unrecognized value falls back to `"absolute"`) — controls `${date}` and the hover's date line: a fixed `YYYY-MM-DD`, or a relative duration like "3 days ago".
 - `gitsail.desktop.path` (string, default `""`) — see "Desktop handoff" below.
+
+Every one of the above is read once per decoration recompute via `readBlameDisplayConfig` (`blameFormat.ts`), which never throws on an invalid value — it always resolves to a documented default instead, so a bad setting can never turn into a broken decoration or a retry loop.
 
 ### Hover security (T-206 criterion 3)
 

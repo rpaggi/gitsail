@@ -9,6 +9,7 @@
 
 mod browser;
 mod commands;
+mod preferences_store;
 mod recent_repositories_store;
 mod state;
 

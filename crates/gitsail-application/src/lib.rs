@@ -13,6 +13,7 @@ pub mod graph_cache;
 pub mod mutation;
 pub mod patch;
 pub mod ports;
+pub mod preferences;
 pub mod privacy;
 pub mod pull_requests;
 pub mod recent_repositories;
@@ -32,6 +33,10 @@ pub use forge_links::GetForgeLink;
 pub use graph_cache::{GraphCache, GraphPageKey, DEFAULT_GRAPH_CACHE_CAPACITY};
 pub use mutation::{MutationKind, Precondition, RiskLevel};
 pub use patch::{export_patch, render_unified_diff, PatchExport};
+pub use preferences::{
+    LoadPreferences, Preferences, PreferencesLoadOutcome, PreferencesPort, SavePreferences,
+    SetThemePreference, ThemePreference,
+};
 pub use privacy::{CrashReportConsent, TelemetryPreference};
 pub use pull_requests::{
     ForgeRepositoryRef, ListPullRequests, ListPullRequestsOutcome, PullRequestPage,

@@ -1,12 +1,15 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  DEFAULT_BLAME_DATE_STYLE,
   DEFAULT_BLAME_DELAY_MS,
   DEFAULT_BLAME_FORMAT,
   DEFAULT_BLAME_MODE,
   ZERO_COMMIT_HASH,
   describeBlameLine,
+  formatBlameDate,
   formatGitTimestamp,
+  formatRelativeDate,
   readBlameDisplayConfig,
   renderBlameTemplate,
 } from "../src/blameFormat";
@@ -41,6 +44,44 @@ describe("formatGitTimestamp", () => {
   });
 });
 
+describe("formatRelativeDate (T-250/US-108 criterion 2)", () => {
+  const now = 1_700_000_000;
+
+  it("renders 'just now' for anything under a minute old", () => {
+    expect(formatRelativeDate(now, now)).toBe("just now");
+    expect(formatRelativeDate(now - 30, now)).toBe("just now");
+  });
+
+  it("pluralizes minutes/hours/days/months/years correctly, singular vs. plural", () => {
+    expect(formatRelativeDate(now - 60, now)).toBe("1 minute ago");
+    expect(formatRelativeDate(now - 60 * 5, now)).toBe("5 minutes ago");
+    expect(formatRelativeDate(now - 3600, now)).toBe("1 hour ago");
+    expect(formatRelativeDate(now - 3600 * 5, now)).toBe("5 hours ago");
+    expect(formatRelativeDate(now - 86400, now)).toBe("1 day ago");
+    expect(formatRelativeDate(now - 86400 * 5, now)).toBe("5 days ago");
+    expect(formatRelativeDate(now - 86400 * 60, now)).toBe("2 months ago");
+    expect(formatRelativeDate(now - 86400 * 400, now)).toBe("1 year ago");
+  });
+
+  it("clamps a commit that appears to be in the future to 'just now' rather than a negative duration", () => {
+    expect(formatRelativeDate(now + 1_000, now)).toBe("just now");
+  });
+});
+
+describe("formatBlameDate", () => {
+  const timestamp = { secondsSinceEpoch: 1_700_000_000, utcOffsetMinutes: -180 };
+
+  it("'absolute' delegates to formatGitTimestamp", () => {
+    expect(formatBlameDate(timestamp, "absolute", 1_700_000_000)).toBe(
+      formatGitTimestamp(timestamp),
+    );
+  });
+
+  it("'relative' delegates to formatRelativeDate", () => {
+    expect(formatBlameDate(timestamp, "relative", 1_700_000_000 + 3600)).toBe("1 hour ago");
+  });
+});
+
 describe("renderBlameTemplate", () => {
   it("substitutes every documented placeholder from the line's own fields", () => {
     const line = sampleLine({ content: "first line\nsecond line" });
@@ -60,10 +101,21 @@ describe("renderBlameTemplate", () => {
     // function only ever substitutes, never injects unrelated content.
     expect(renderBlameTemplate("static text", line)).toBe("static text");
   });
+
+  it("an explicit dateText overrides the default absolute rendering", () => {
+    const line = sampleLine();
+    expect(renderBlameTemplate("${date}", line, "3 days ago")).toBe("3 days ago");
+  });
 });
 
 describe("describeBlameLine (US-072/US-075 criterion 3: never invent an author)", () => {
-  const config = { enabled: true, format: DEFAULT_BLAME_FORMAT, mode: DEFAULT_BLAME_MODE, delayMs: 0 };
+  const config = {
+    enabled: true,
+    format: DEFAULT_BLAME_FORMAT,
+    mode: DEFAULT_BLAME_MODE,
+    delayMs: 0,
+    dateStyle: DEFAULT_BLAME_DATE_STYLE,
+  };
 
   it("a committed line uses the configured template and the real commit subject", () => {
     const line = sampleLine();
@@ -95,6 +147,18 @@ describe("describeBlameLine (US-072/US-075 criterion 3: never invent an author)"
     );
     expect(local.hoverLines.some((l) => /unsaved/i.test(l) && /disk/i.test(l))).toBe(true);
   });
+
+  it("dateStyle: 'relative' renders ${date} and the hover's date line as a relative duration", () => {
+    const relativeConfig = { ...config, dateStyle: "relative" as const };
+    const line = sampleLine({ timestamp: { secondsSinceEpoch: 1_700_000_000, utcOffsetMinutes: 0 } });
+    const now = 1_700_000_000 + 3600; // exactly one hour later.
+
+    const result = describeBlameLine(line, relativeConfig, undefined, false, now);
+
+    expect(result.contentText).toContain("1 hour ago");
+    expect(result.contentText).not.toContain("2023-11-14");
+    expect(result.hoverLines.some((l) => l.includes("1 hour ago"))).toBe(true);
+  });
 });
 
 describe("readBlameDisplayConfig", () => {
@@ -110,6 +174,7 @@ describe("readBlameDisplayConfig", () => {
       format: DEFAULT_BLAME_FORMAT,
       mode: DEFAULT_BLAME_MODE,
       delayMs: DEFAULT_BLAME_DELAY_MS,
+      dateStyle: DEFAULT_BLAME_DATE_STYLE,
     });
   });
 
@@ -136,5 +201,17 @@ describe("readBlameDisplayConfig", () => {
 
   it("honors enabled: false (US-072 criterion 2: can be turned off)", () => {
     expect(readBlameDisplayConfig(getFrom({ "blame.enabled": false })).enabled).toBe(false);
+  });
+
+  it("honors an explicit 'relative' dateStyle (T-250/US-108 criterion 2)", () => {
+    expect(readBlameDisplayConfig(getFrom({ "blame.dateStyle": "relative" })).dateStyle).toBe(
+      "relative",
+    );
+  });
+
+  it("falls back to the documented default dateStyle for an unrecognized value instead of throwing", () => {
+    expect(readBlameDisplayConfig(getFrom({ "blame.dateStyle": "yesterday-ish" })).dateStyle).toBe(
+      DEFAULT_BLAME_DATE_STYLE,
+    );
   });
 });

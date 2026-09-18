@@ -1,10 +1,16 @@
 import { describe, expect, it } from "vitest";
 
 import { distinctCommitHashesForTarget, planBlameDecorations } from "../src/blamePlan";
-import { DEFAULT_BLAME_FORMAT, DEFAULT_BLAME_MODE } from "../src/blameFormat";
+import { DEFAULT_BLAME_DATE_STYLE, DEFAULT_BLAME_FORMAT, DEFAULT_BLAME_MODE } from "../src/blameFormat";
 import { BlameLineDto } from "../src/dto";
 
-const config = { enabled: true, format: DEFAULT_BLAME_FORMAT, mode: DEFAULT_BLAME_MODE, delayMs: 0 };
+const config = {
+  enabled: true,
+  format: DEFAULT_BLAME_FORMAT,
+  mode: DEFAULT_BLAME_MODE,
+  delayMs: 0,
+  dateStyle: DEFAULT_BLAME_DATE_STYLE,
+};
 
 function line(finalLine: number, commit: string, origin: "committed" | "local" = "committed"): BlameLineDto {
   return {

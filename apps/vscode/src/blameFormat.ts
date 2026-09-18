@@ -14,6 +14,10 @@ import type { BlameLineDto, GitTimestampDto } from "./dto";
 
 export type BlameDisplayMode = "currentLine" | "allVisibleLines";
 
+/** T-250/US-108 criterion 2: relative ("3 days ago") vs. absolute
+ * (`YYYY-MM-DD`) date rendering for `${date}` and the hover's date line. */
+export type BlameDateStyle = "relative" | "absolute";
+
 export interface BlameDisplayConfig {
   enabled: boolean;
   /** A template string using `${author}`, `${authorEmail}`, `${date}`,
@@ -25,18 +29,30 @@ export interface BlameDisplayConfig {
   /** Inactivity delay, in milliseconds, before a decoration is (re)computed
    * after the cursor stops moving (US-072 criterion 2). */
   delayMs: number;
+  /** T-250/US-108 criterion 2: how `${date}` (and the hover's date line) is
+   * rendered. */
+  dateStyle: BlameDateStyle;
 }
 
 export const DEFAULT_BLAME_FORMAT = "${author}, ${date} • ${shortHash} • ${message}";
 export const DEFAULT_BLAME_DELAY_MS = 400;
 export const DEFAULT_BLAME_MODE: BlameDisplayMode = "currentLine";
+/** Absolute, not relative: matches T-205/US-072's originally shipped
+ * behavior (`formatGitTimestamp` was, until T-250, the *only* way a date
+ * was ever rendered) — opting into relative dates is a deliberate choice a
+ * person makes via settings, never a silent behavior change for existing
+ * users. */
+export const DEFAULT_BLAME_DATE_STYLE: BlameDateStyle = "absolute";
 
 /** Reads `gitsail.blame.*` settings into a typed, validated config —
  * matching `controller.ts`'s existing `ConfigurationLike.get(key,
  * defaultValue)` shape so no new host abstraction is needed just to read
- * settings. An unrecognized `mode` value (e.g. hand-edited settings.json
- * with a typo) falls back to the default rather than throwing, consistent
- * with VS Code configuration generally being untrusted, free-form JSON. */
+ * settings. An unrecognized `mode`/`dateStyle` value (e.g. hand-edited
+ * settings.json with a typo) falls back to the documented default rather
+ * than throwing, consistent with VS Code configuration generally being
+ * untrusted, free-form JSON — and specifically so a bad value can never
+ * turn into a retry loop or a broken decoration: reading configuration is
+ * synchronous and always succeeds with *some* valid `BlameDisplayConfig`. */
 export function readBlameDisplayConfig(get: <T>(key: string, defaultValue: T) => T): BlameDisplayConfig {
   const enabled = get<boolean>("blame.enabled", true);
   const format = get<string>("blame.format", DEFAULT_BLAME_FORMAT);
@@ -44,7 +60,15 @@ export function readBlameDisplayConfig(get: <T>(key: string, defaultValue: T) =>
   const mode: BlameDisplayMode = rawMode === "allVisibleLines" ? "allVisibleLines" : "currentLine";
   const rawDelay = get<number>("blame.delayMs", DEFAULT_BLAME_DELAY_MS);
   const delayMs = Number.isFinite(rawDelay) && rawDelay >= 0 ? rawDelay : DEFAULT_BLAME_DELAY_MS;
-  return { enabled, format: format.length > 0 ? format : DEFAULT_BLAME_FORMAT, mode, delayMs };
+  const rawDateStyle = get<string>("blame.dateStyle", DEFAULT_BLAME_DATE_STYLE);
+  const dateStyle: BlameDateStyle = rawDateStyle === "relative" ? "relative" : "absolute";
+  return {
+    enabled,
+    format: format.length > 0 ? format : DEFAULT_BLAME_FORMAT,
+    mode,
+    delayMs,
+    dateStyle,
+  };
 }
 
 /** Formats a `GitTimestampDto` as `YYYY-MM-DD` *in the commit's own
@@ -60,6 +84,56 @@ export function formatGitTimestamp(timestamp: GitTimestampDto): string {
   const month = String(date.getUTCMonth() + 1).padStart(2, "0");
   const day = String(date.getUTCDate()).padStart(2, "0");
   return `${year}-${month}-${day}`;
+}
+
+/** "3 days ago"-style rendering of the real-time gap between a commit's
+ * instant and `nowSecondsSinceEpoch` (T-250/US-108 criterion 2). Unlike
+ * {@link formatGitTimestamp}, the commit's own UTC offset is irrelevant
+ * here: a real elapsed-time gap between two instants never depends on
+ * either instant's *calendar* timezone. A commit that appears to be in the
+ * future (clock skew between machines) is clamped to `0` seconds — "just
+ * now" — rather than rendering a nonsensical negative duration. */
+export function formatRelativeDate(secondsSinceEpoch: number, nowSecondsSinceEpoch: number): string {
+  const diffSeconds = Math.max(0, Math.round(nowSecondsSinceEpoch - secondsSinceEpoch));
+
+  const unit = (value: number, singular: string): string => `${value} ${singular}${value === 1 ? "" : "s"} ago`;
+
+  const diffMinutes = Math.floor(diffSeconds / 60);
+  if (diffMinutes < 1) {
+    return "just now";
+  }
+  const diffHours = Math.floor(diffMinutes / 60);
+  if (diffHours < 1) {
+    return unit(diffMinutes, "minute");
+  }
+  const diffDays = Math.floor(diffHours / 24);
+  if (diffDays < 1) {
+    return unit(diffHours, "hour");
+  }
+  const diffMonths = Math.floor(diffDays / 30);
+  if (diffMonths < 1) {
+    return unit(diffDays, "day");
+  }
+  const diffYears = Math.floor(diffDays / 365);
+  if (diffYears < 1) {
+    return unit(diffMonths, "month");
+  }
+  return unit(diffYears, "year");
+}
+
+/** Renders a commit's timestamp per `dateStyle` (T-250/US-108 criterion
+ * 2). `nowSecondsSinceEpoch` defaults to the real wall clock but is always
+ * overridable, so every caller in this module stays pure/testable without
+ * mocking global `Date` (matching this file's own no-`vscode`-import,
+ * plain-data convention). */
+export function formatBlameDate(
+  timestamp: GitTimestampDto,
+  dateStyle: BlameDateStyle,
+  nowSecondsSinceEpoch: number = Date.now() / 1000,
+): string {
+  return dateStyle === "relative"
+    ? formatRelativeDate(timestamp.secondsSinceEpoch, nowSecondsSinceEpoch)
+    : formatGitTimestamp(timestamp);
 }
 
 /** The first line of a possibly multi-line commit subject/body, so a
@@ -82,12 +156,19 @@ export const ZERO_COMMIT_HASH = "0".repeat(40);
 
 /** Substitutes template placeholders with `line`'s own fields. Never
  * invents a value: every placeholder comes directly from the `BlameLineDto`
- * the CLI returned. */
-export function renderBlameTemplate(template: string, line: BlameLineDto): string {
+ * the CLI returned. `dateText` overrides `${date}`'s rendering (T-250/
+ * US-108 criterion 2: relative vs. absolute) — it defaults to
+ * {@link formatGitTimestamp}'s absolute rendering so existing callers that
+ * do not care about the distinction keep their original behavior. */
+export function renderBlameTemplate(
+  template: string,
+  line: BlameLineDto,
+  dateText: string = formatGitTimestamp(line.timestamp),
+): string {
   const replacements: Record<string, string> = {
     "${author}": line.author.name,
     "${authorEmail}": line.author.email,
-    "${date}": formatGitTimestamp(line.timestamp),
+    "${date}": dateText,
     "${hash}": line.commit,
     "${shortHash}": abbreviateHash(line.commit),
     "${message}": firstLine(line.content.length > 0 ? line.content : ""),
@@ -135,6 +216,7 @@ export function describeBlameLine(
   config: BlameDisplayConfig,
   commitSubject: string | undefined,
   documentDirty: boolean,
+  nowSecondsSinceEpoch: number = Date.now() / 1000,
 ): BlameDecorationText {
   if (line.origin === "local" || line.commit === ZERO_COMMIT_HASH) {
     const hoverLines = ["Uncommitted change — not yet part of any commit."];
@@ -146,15 +228,16 @@ export function describeBlameLine(
     return { contentText: "Uncommitted change", hoverLines };
   }
 
+  const dateText = formatBlameDate(line.timestamp, config.dateStyle, nowSecondsSinceEpoch);
   const template = commitSubject !== undefined ? config.format.split("${message}").join("${__subject__}") : config.format;
-  let contentText = renderBlameTemplate(template, line);
+  let contentText = renderBlameTemplate(template, line, dateText);
   if (commitSubject !== undefined) {
     contentText = contentText.split("${__subject__}").join(firstLine(commitSubject));
   }
 
   const hoverLines = [
     `${line.author.name} <${line.author.email}>`,
-    `${formatGitTimestamp(line.timestamp)} • ${line.commit}`,
+    `${dateText} • ${line.commit}`,
   ];
   if (commitSubject !== undefined && commitSubject.length > 0) {
     hoverLines.push(firstLine(commitSubject));

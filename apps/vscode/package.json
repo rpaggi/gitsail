@@ -51,13 +51,27 @@
           "type": "number",
           "default": 400,
           "minimum": 0,
-          "description": "Milliseconds of cursor inactivity before an inline blame decoration (re)appears (US-072 criterion 2).",
+          "description": "Milliseconds of cursor inactivity before an inline blame decoration (re)appears (US-072 criterion 2). A negative value is invalid and falls back to 400ms (US-108 criterion 3).",
           "scope": "resource"
         },
         "gitsail.blame.format": {
           "type": "string",
           "default": "${author}, ${date} • ${shortHash} • ${message}",
           "markdownDescription": "Template for inline blame text. Placeholders: `${author}`, `${authorEmail}`, `${date}`, `${hash}`, `${shortHash}`, `${message}` (US-072 criterion 1).",
+          "scope": "resource"
+        },
+        "gitsail.blame.dateStyle": {
+          "type": "string",
+          "enum": [
+            "absolute",
+            "relative"
+          ],
+          "enumDescriptions": [
+            "A fixed calendar date, e.g. 2024-03-02.",
+            "A relative duration, e.g. \"3 days ago\"."
+          ],
+          "default": "absolute",
+          "description": "How ${date} (in the inline blame format) and the hover's date line are rendered (US-108 criterion 2). An unrecognized value falls back to \"absolute\".",
           "scope": "resource"
         },
         "gitsail.desktop.path": {
