@@ -316,12 +316,14 @@ existed:
   limitation as `ci.yml`'s own Windows/macOS legs, per `ci-policy.md`).
 - **`.rpm` is not part of the release pipeline** — see "Why not `rpm`"
   above; a deliberate scope cut, not an oversight.
-- **No v1.0 release matrix/checklist** (T-261/US-128) remains on the
-  backlog, untouched by this change; see
-  `docs/manual/roadmap-and-open-decisions.md`. (T-260/US-127's Desktop
-  update-check mechanism, previously listed here as unimplemented, now
-  exists — see `docs/architecture/update-mechanism.md` and ADR-024. CLI,
-  TUI, and the VS Code extension still have no update check of any kind.)
+- **v1.0 release matrix/checklist** (T-261/US-128) is now delivered — see
+  `docs/architecture/v1-release-matrix.md`, which also lists this
+  document's own known gaps (macOS Intel, unverified AppImage/Windows/
+  macOS bundles) as part of its component/platform matrix. (T-260/US-127's
+  Desktop update-check mechanism, previously listed here as unimplemented,
+  now exists — see `docs/architecture/update-mechanism.md` and ADR-024.
+  CLI, TUI, and the VS Code extension still have no update check of any
+  kind.)
 
 ## See also
 

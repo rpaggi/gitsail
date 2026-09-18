@@ -19,6 +19,15 @@ five stories (T-257/T-258/T-259/T-260 — see below) were implemented and are
 in review/pushed. This page is about what was **not** part of that — see
 each linked item below for specifics.
 
+T-195/US-062 ("Query blame, tags, stash and remotes" in Desktop, EPIC-12)
+was previously listed on this page under "deliberately deferred, not
+started" — that has since been implemented (`apps/desktop/src/components/
+BlamePanel.vue`, `ReferencesPanel.vue`; commit `3c485be`) and is `review`
+in Takumi. T-261/US-128 ("publish the v1.0 release matrix/checklist",
+EPIC-25), also previously listed here as remaining on the backlog, is this
+same task — see `docs/architecture/v1-release-matrix.md` for the checklist
+it produces, including the full Must/Should/Could accounting for v1.0.
+
 ## Deliberately deferred, not started
 
 - **T-246 / US-104 — "Create a PR/MR"** (EPIC-20). Explicitly `Could`
@@ -27,12 +36,6 @@ each linked item below for specifics.
   exists for it. Only read-only PR/MR **listing** is implemented (Desktop
   only; see `desktop.md`). No interface can create, or offer to create, a
   pull/merge request.
-- **T-195 / US-062 — "Query blame, tags, stash and remotes" (Desktop)**
-  (EPIC-12). Still on the backlog (`todo`), not implemented this session.
-  Concretely: Desktop has no tags panel, no stash panel, and no blame view
-  today — only branches, remotes/sync, and pull/merge requests are queryable
-  from its sidebar (verified by reading every component under
-  `apps/desktop/src/components`).
 - **T-147 / US-014 — "Stage by line"**. Still on the backlog. Its own
   Definition of Done conditions enabling it on "approved patch-application
   regressions" — the prerequisite hunk-application test coverage
@@ -78,8 +81,8 @@ with a `SHA256SUMS.txt`, and Desktop's Settings → "Updates" can check that
 same GitHub Release feed and show whether a newer tag exists — see
 `docs/architecture/release-process.md` for the release pipeline and
 `docs/architecture/update-mechanism.md` for the update-check design. T-261
-(publish the v1.0 release matrix/checklist, US-128) remains on the backlog
-(`todo`), untouched by this change. Concretely, as of this writing:
+(publish the v1.0 release matrix/checklist, US-128) is now delivered — see
+`docs/architecture/v1-release-matrix.md`. Concretely, as of this writing:
 
 - No `vX.Y.Z` tag has actually been pushed against this repository yet, so
   no GitHub Release exists in practice — the pipeline is ready but has not
