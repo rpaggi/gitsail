@@ -16,28 +16,81 @@
 //! execution").
 
 use std::path::Path;
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use gitsail_application::{CommitQuery, GetCommitHistory, OpenRepository, RefreshReason};
-use gitsail_domain::{BranchName, GraphCommit};
+use gitsail_application::{
+    CommitQuery, ForgetRecentRepository, GetCommitHistory, ListRecentRepositories, OpenRepository,
+    RecordRecentRepository, RefreshReason,
+};
+use gitsail_domain::{BranchName, ErrorCode, GitSailError, GraphCommit};
 use gitsail_protocol::{
-    CommitGraphPageDto, CommitGraphRowDto, ErrorPayload, RepositoryDto, RepositoryStatusDto,
+    CommitGraphPageDto, CommitGraphRowDto, ErrorPayload, RecentRepositoryDto, RepositoryDto,
+    RepositoryStatusDto,
 };
 
 use crate::state::AppState;
+
+/// Seconds since the Unix epoch, used to timestamp a recent-repository
+/// entry (US-052 criterion 1). A clock read failure (the system clock set
+/// before 1970) falls back to `0` rather than panicking or failing the
+/// open — recording a recent is a best-effort convenience, never a
+/// precondition for opening a repository.
+fn now_unix_seconds() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// Maps the frontend's refresh-trigger string to [`RefreshReason`] (US-054
+/// criterion 2: manual, focus, and after-mutation refreshes are all wired
+/// through here to the one shared session refresh, rather than each
+/// inventing its own path). An unrecognized value defaults to `Manual`
+/// rather than failing the refresh over what is purely an observability
+/// tag — `RefreshReason` never changes refresh *behavior* (see
+/// `gitsail_application::session`).
+fn parse_refresh_reason(reason: &str) -> RefreshReason {
+    match reason {
+        "focus" => RefreshReason::Focus,
+        "after_mutation" => RefreshReason::AfterMutation,
+        _ => RefreshReason::Manual,
+    }
+}
 
 #[tauri::command]
 pub fn open_repository(
     path: String,
     state: tauri::State<AppState>,
 ) -> Result<RepositoryDto, ErrorPayload> {
-    open_repository_impl(&state, &path)
+    open_repository_impl(&state, &path).map_err(|err| ErrorPayload::from(&err))
 }
 
 #[tauri::command]
 pub fn get_repository_status(
+    reason: String,
     state: tauri::State<AppState>,
 ) -> Result<RepositoryStatusDto, ErrorPayload> {
-    get_repository_status_impl(&state)
+    get_repository_status_impl(&state, &reason).map_err(|err| ErrorPayload::from(&err))
+}
+
+/// Lists the recently opened repositories, most-recently-opened first
+/// (US-052 criterion 1).
+#[tauri::command]
+pub fn list_recent_repositories(
+    state: tauri::State<AppState>,
+) -> Result<Vec<RecentRepositoryDto>, ErrorPayload> {
+    list_recent_repositories_impl(&state).map_err(|err| ErrorPayload::from(&err))
+}
+
+/// Removes one entry from the recent-repositories list — the explicit
+/// confirmation US-052 criterion 2 requires before a moved/inaccessible
+/// entry disappears; nothing removes an entry automatically.
+#[tauri::command]
+pub fn forget_recent_repository(
+    path: String,
+    state: tauri::State<AppState>,
+) -> Result<Vec<RecentRepositoryDto>, ErrorPayload> {
+    forget_recent_repository_impl(&state, &path).map_err(|err| ErrorPayload::from(&err))
 }
 
 /// Loads one page of commit-graph rows (US-067). `reset: true` starts a
@@ -59,24 +112,46 @@ pub fn get_commit_graph_page(
         .map_err(|err| ErrorPayload::from(&err))
 }
 
-fn open_repository_impl(state: &AppState, path: &str) -> Result<RepositoryDto, ErrorPayload> {
-    let repository = OpenRepository::new(state.port())
-        .execute(Path::new(path))
-        .map_err(|err| ErrorPayload::from(&err))?;
+fn open_repository_impl(state: &AppState, path: &str) -> Result<RepositoryDto, GitSailError> {
+    let repository = OpenRepository::new(state.port()).execute(Path::new(path))?;
     let dto = RepositoryDto::from(&repository);
+    let root_path = repository.root_path.clone();
     state.open_session(repository);
+    // Recording a recent repository is a best-effort side effect (US-052
+    // criterion 1 is a UX shortcut, not a hard dependency of opening a
+    // repository): an unwritable config directory or a corrupted recents
+    // file must never turn an otherwise-successful open into a failure.
+    let _ = RecordRecentRepository::new(state.recent_repositories())
+        .execute(root_path, now_unix_seconds());
     Ok(dto)
 }
 
-fn get_repository_status_impl(state: &AppState) -> Result<RepositoryStatusDto, ErrorPayload> {
-    state
-        .with_session_mut(|session| {
-            session.refresh(RefreshReason::Manual)?;
-            Ok(RepositoryStatusDto::from(session.status().expect(
-                "status is always Some immediately after a successful refresh",
-            )))
-        })
-        .map_err(|err| ErrorPayload::from(&err))
+fn get_repository_status_impl(
+    state: &AppState,
+    reason: &str,
+) -> Result<RepositoryStatusDto, GitSailError> {
+    state.with_session_mut(|session| {
+        session.refresh(parse_refresh_reason(reason))?;
+        Ok(RepositoryStatusDto::from(session.status().expect(
+            "status is always Some immediately after a successful refresh",
+        )))
+    })
+}
+
+fn list_recent_repositories_impl(
+    state: &AppState,
+) -> Result<Vec<RecentRepositoryDto>, GitSailError> {
+    let recents = ListRecentRepositories::new(state.recent_repositories()).execute()?;
+    Ok(recents.entries().iter().map(RecentRepositoryDto::from).collect())
+}
+
+fn forget_recent_repository_impl(
+    state: &AppState,
+    path: &str,
+) -> Result<Vec<RecentRepositoryDto>, GitSailError> {
+    let recents =
+        ForgetRecentRepository::new(state.recent_repositories()).execute(Path::new(path))?;
+    Ok(recents.entries().iter().map(RecentRepositoryDto::from).collect())
 }
 
 fn get_commit_graph_page_impl(
@@ -85,8 +160,13 @@ fn get_commit_graph_page_impl(
     cursor: Option<String>,
     limit: Option<u32>,
     reset: bool,
-) -> Result<CommitGraphPageDto, gitsail_domain::GitSailError> {
-    let repository = state.repository()?;
+) -> Result<CommitGraphPageDto, GitSailError> {
+    // Repository and epoch are captured together (US-054 criterion 3): the
+    // `git log` below runs without holding any lock, so a repository
+    // switch — and its epoch bump — can freely happen while it is in
+    // flight. `epoch` is re-validated right before this page is applied to
+    // the shared commit graph, below.
+    let (repository, epoch) = state.repository_with_epoch()?;
     if reset {
         state.reset_commit_graph();
     }
@@ -101,8 +181,14 @@ fn get_commit_graph_page_impl(
     let page = GetCommitHistory::new(state.port()).execute(&repository, &query)?;
 
     let graph_commits: Vec<GraphCommit> = page.items.iter().map(GraphCommit::from).collect();
-    let rows = state.with_commit_graph_mut(|graph| graph.append_page(&graph_commits).to_vec());
-    let lane_count = state.with_commit_graph_mut(|graph| graph.lane_count());
+    let (rows, lane_count) = state
+        .append_commit_graph_page_if_current(epoch, &graph_commits)
+        .ok_or_else(|| {
+            GitSailError::new(
+                ErrorCode::Cancelled,
+                "the repository changed while this page was loading",
+            )
+        })?;
 
     let row_dtos: Vec<CommitGraphRowDto> = rows
         .iter()
@@ -122,14 +208,38 @@ fn get_commit_graph_page_impl(
 mod tests {
     use super::*;
     use std::path::PathBuf;
-    use std::sync::Arc;
+    use std::sync::mpsc;
+    use std::sync::{Arc, Mutex};
+    use std::thread;
 
-    use gitsail_application::{BlameRequest, CommitQuery, DiffRequest, LineHistoryRequest, Page};
+    use gitsail_application::{
+        BlameRequest, CommitQuery, DiffRequest, LineHistoryRequest, Page, RecentRepositories,
+        RecentRepositoriesPort,
+    };
     use gitsail_domain::{
         Blame, Branch, BranchName, CancellationToken, ChangeType, Commit, CommitHash, ErrorCode,
         FileChange, FileStatusCode, GitSailError, GitTimestamp, HeadState, LineHistory,
         Repository, RepositoryId, RepositoryStatus, Signature,
     };
+
+    /// An in-memory [`RecentRepositoriesPort`] double — `commands.rs` tests
+    /// care about the use-case wiring, never about disk persistence (that
+    /// is `recent_repositories_store`'s job).
+    struct InMemoryRecents(Mutex<RecentRepositories>);
+    impl InMemoryRecents {
+        fn shared() -> Arc<dyn RecentRepositoriesPort> {
+            Arc::new(Self(Mutex::new(RecentRepositories::new())))
+        }
+    }
+    impl RecentRepositoriesPort for InMemoryRecents {
+        fn load(&self) -> Result<RecentRepositories, GitSailError> {
+            Ok(self.0.lock().unwrap().clone())
+        }
+        fn save(&self, recents: &RecentRepositories) -> Result<(), GitSailError> {
+            *self.0.lock().unwrap() = recents.clone();
+            Ok(())
+        }
+    }
 
     /// A `RepositoryReadPort` double exercising `discover`, `status`, and
     /// (for this story) `commits` — every other method is unreachable from
@@ -274,7 +384,7 @@ mod tests {
             status: dirty_status(),
             history,
         });
-        AppState::new(port)
+        AppState::new(port, InMemoryRecents::shared())
     }
 
     #[test]
@@ -288,12 +398,35 @@ mod tests {
     }
 
     #[test]
+    fn open_repository_records_the_canonical_root_path_as_a_recent_repository() {
+        let state = state_with_fake_port();
+
+        open_repository_impl(&state, "/repo").unwrap();
+
+        let recents = list_recent_repositories_impl(&state).unwrap();
+        assert_eq!(recents.len(), 1);
+        assert_eq!(recents[0].path, "/repo");
+    }
+
+    #[test]
+    fn forget_recent_repository_removes_the_entry_and_persists_the_removal() {
+        let state = state_with_fake_port();
+        open_repository_impl(&state, "/repo").unwrap();
+        assert_eq!(list_recent_repositories_impl(&state).unwrap().len(), 1);
+
+        let remaining = forget_recent_repository_impl(&state, "/repo").unwrap();
+
+        assert!(remaining.is_empty());
+        assert!(list_recent_repositories_impl(&state).unwrap().is_empty());
+    }
+
+    #[test]
     fn get_repository_status_before_opening_fails_with_invalid_repository_state() {
         let state = state_with_fake_port();
 
-        let err = get_repository_status_impl(&state).unwrap_err();
+        let err = get_repository_status_impl(&state, "manual").unwrap_err();
 
-        assert_eq!(err.code, "invalid_repository_state");
+        assert_eq!(err.code(), ErrorCode::InvalidRepositoryState);
     }
 
     #[test]
@@ -301,9 +434,26 @@ mod tests {
         let state = state_with_fake_port();
         open_repository_impl(&state, "/repo").unwrap();
 
-        let status = get_repository_status_impl(&state).unwrap();
+        let status = get_repository_status_impl(&state, "manual").unwrap();
 
         assert_eq!(status.files.len(), 1);
+    }
+
+    #[test]
+    fn get_repository_status_accepts_focus_and_after_mutation_reasons() {
+        let state = state_with_fake_port();
+        open_repository_impl(&state, "/repo").unwrap();
+
+        assert!(get_repository_status_impl(&state, "focus").is_ok());
+        assert!(get_repository_status_impl(&state, "after_mutation").is_ok());
+    }
+
+    #[test]
+    fn parse_refresh_reason_maps_known_strings_and_defaults_unknown_ones_to_manual() {
+        assert_eq!(parse_refresh_reason("focus"), RefreshReason::Focus);
+        assert_eq!(parse_refresh_reason("after_mutation"), RefreshReason::AfterMutation);
+        assert_eq!(parse_refresh_reason("manual"), RefreshReason::Manual);
+        assert_eq!(parse_refresh_reason("something-unknown"), RefreshReason::Manual);
     }
 
     fn linear_history() -> Vec<Commit> {
@@ -405,6 +555,125 @@ mod tests {
             state.with_commit_graph_mut(|g| g.rows().len()),
             0,
             "re-opening a repository must never carry over the previous graph"
+        );
+    }
+
+    // -- US-052 criterion 3 / US-054 criterion 3: an in-flight read from a
+    // superseded session must never leak into whatever repository is now
+    // open. `BlockingPort` lets the test control, with real threads and no
+    // sleeps, exactly when the "slow git log" resumes relative to the
+    // repository switch — the DoD's "artificial delay + repository switch"
+    // scenario.
+
+    /// A `RepositoryReadPort` whose `commits()` call announces that it has
+    /// started (so the test knows the epoch has already been captured by
+    /// the caller) and then blocks until the test releases it.
+    struct BlockingPort {
+        history: Vec<Commit>,
+        started: mpsc::Sender<()>,
+        gate: Mutex<mpsc::Receiver<()>>,
+    }
+
+    impl gitsail_application::RepositoryReadPort for BlockingPort {
+        fn discover(&self, _path: &Path) -> Result<Repository, GitSailError> {
+            unimplemented!("not exercised by this test")
+        }
+        fn status(&self, _repo: &Repository) -> Result<RepositoryStatus, GitSailError> {
+            unimplemented!("not exercised by this test")
+        }
+        fn commits(
+            &self,
+            _repo: &Repository,
+            query: &CommitQuery,
+        ) -> Result<Page<Commit>, GitSailError> {
+            let _ = self.started.send(());
+            let _ = self.gate.lock().unwrap().recv();
+            let limit = query.limit.unwrap_or(50) as usize;
+            let items: Vec<Commit> = self.history.iter().take(limit).cloned().collect();
+            Ok(Page { items, next_cursor: None, has_more: false })
+        }
+        fn commit(&self, _repo: &Repository, _hash: &CommitHash) -> Result<Commit, GitSailError> {
+            unimplemented!("not exercised by this test")
+        }
+        fn branches(&self, _repo: &Repository) -> Result<Vec<Branch>, GitSailError> {
+            unimplemented!("not exercised by this test")
+        }
+        fn diff(
+            &self,
+            _repo: &Repository,
+            _request: &DiffRequest,
+            _cancel: &CancellationToken,
+        ) -> Result<gitsail_domain::Diff, GitSailError> {
+            unimplemented!("not exercised by this test")
+        }
+        fn resolve_revision(
+            &self,
+            _repo: &Repository,
+            _revision: &str,
+        ) -> Result<CommitHash, GitSailError> {
+            unimplemented!("not exercised by this test")
+        }
+        fn blame(
+            &self,
+            _repo: &Repository,
+            _request: &BlameRequest,
+            _cancel: &CancellationToken,
+        ) -> Result<Blame, GitSailError> {
+            unimplemented!("not exercised by this test")
+        }
+        fn line_history(
+            &self,
+            _repo: &Repository,
+            _request: &LineHistoryRequest,
+            _cancel: &CancellationToken,
+        ) -> Result<LineHistory, GitSailError> {
+            unimplemented!("not exercised by this test")
+        }
+    }
+
+    #[test]
+    fn a_repository_switch_while_a_commit_graph_read_is_in_flight_never_contaminates_the_new_repository()
+    {
+        let (started_tx, started_rx) = mpsc::channel();
+        let (gate_tx, gate_rx) = mpsc::channel();
+        let port: Arc<dyn gitsail_application::RepositoryReadPort> = Arc::new(BlockingPort {
+            history: linear_history(),
+            started: started_tx,
+            gate: Mutex::new(gate_rx),
+        });
+        let state = Arc::new(AppState::new(port, InMemoryRecents::shared()));
+        state.open_session(sample_repository());
+
+        let state_for_thread = Arc::clone(&state);
+        let handle = thread::spawn(move || {
+            get_commit_graph_page_impl(&state_for_thread, None, None, Some(10), false)
+        });
+
+        // Block until the background read has captured its (now current)
+        // epoch and reached the (blocked) "git log" call — guaranteed to
+        // happen only after `repository_with_epoch()` has already run, by
+        // program order inside that thread.
+        started_rx.recv().expect("the background read must reach the port call");
+
+        // The repository switch — and its epoch bump — happens while the
+        // background read is still blocked "in flight".
+        state.open_session(sample_repository());
+
+        // Only now let the stale read finish.
+        gate_tx.send(()).expect("the background read must still be waiting on the gate");
+
+        let result = handle.join().expect("the background thread must not panic");
+
+        let err = result.expect_err(
+            "a page computed against an epoch the session has since moved past must fail, \
+             never silently succeed with stale data",
+        );
+        assert_eq!(err.code(), ErrorCode::Cancelled);
+        assert_eq!(
+            state.with_commit_graph_mut(|g| g.rows().len()),
+            0,
+            "the new session's freshly reset graph must never be contaminated by the old \
+             session's stale page"
         );
     }
 }

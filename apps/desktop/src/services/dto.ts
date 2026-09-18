@@ -120,3 +120,13 @@ export interface CommitGraphPageDto {
   hasMore: boolean;
   nextCursor: string | null;
 }
+
+// -- Recent repositories (US-052) --------------------------------------
+//
+// Mirrors `crates/gitsail-protocol/src/dto.rs`'s `RecentRepositoryDto`,
+// itself built from `gitsail_application::RecentRepositoryEntry`.
+
+export interface RecentRepositoryDto {
+  path: string;
+  lastOpenedUnixSeconds: number;
+}

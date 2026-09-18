@@ -2,13 +2,11 @@
 import { ref } from "vue";
 import { open } from "@tauri-apps/plugin-dialog";
 
-import { getRepositoryStatus, openRepository } from "../services/repository";
-import { isErrorPayload } from "../services/errors";
+import { useAppDataStore } from "../stores/appData";
 import { useRepositorySessionStore } from "../stores/session";
-import { useViewStore } from "../stores/view";
 
-const view = useViewStore();
 const session = useRepositorySessionStore();
+const appData = useAppDataStore();
 const path = ref("");
 
 async function pickFolder(): Promise<void> {
@@ -22,22 +20,11 @@ async function openAndRefresh(): Promise<void> {
   if (!path.value) {
     return;
   }
-  view.lastError = null;
-  view.isOpeningRepository = true;
-  try {
-    session.repository = await openRepository(path.value);
-    view.isRefreshingStatus = true;
-    try {
-      session.status = await getRepositoryStatus();
-    } finally {
-      view.isRefreshingStatus = false;
-    }
-  } catch (err) {
-    view.lastError = isErrorPayload(err)
-      ? err
-      : { code: "internal", message: String(err) };
-  } finally {
-    view.isOpeningRepository = false;
+  const result = await session.openRepository(path.value);
+  if (result.status === "opened") {
+    // Opening also records/re-orders this path as a recent on the
+    // backend (US-052 criterion 1); keep the recents list in sync.
+    await appData.loadRecentRepositories();
   }
 }
 </script>
@@ -48,15 +35,15 @@ async function openAndRefresh(): Promise<void> {
       v-model="path"
       type="text"
       placeholder="/path/to/repository"
-      :disabled="view.isOpeningRepository"
+      :disabled="session.isOpening"
     />
-    <button :disabled="view.isOpeningRepository" @click="pickFolder">Browse…</button>
-    <button :disabled="view.isOpeningRepository || !path" @click="openAndRefresh">
-      {{ view.isOpeningRepository ? "Opening…" : "Open" }}
+    <button :disabled="session.isOpening" @click="pickFolder">Browse…</button>
+    <button :disabled="session.isOpening || !path" @click="openAndRefresh">
+      {{ session.isOpening ? "Opening…" : "Open" }}
     </button>
-    <p v-if="view.lastError" class="error">
-      {{ view.lastError.message }}
-      <span v-if="view.lastError.remediation"> — {{ view.lastError.remediation }}</span>
+    <p v-if="session.lastError" class="error">
+      {{ session.lastError.message }}
+      <span v-if="session.lastError.remediation"> — {{ session.lastError.remediation }}</span>
     </p>
   </div>
 </template>

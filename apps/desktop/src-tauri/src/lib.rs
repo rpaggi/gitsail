@@ -8,13 +8,15 @@
 #![forbid(unsafe_code)]
 
 mod commands;
+mod recent_repositories_store;
 mod state;
 
 use std::sync::Arc;
 
-use gitsail_application::RepositoryReadPort;
+use gitsail_application::{RecentRepositoriesPort, RepositoryReadPort};
 use gitsail_git::{GitCliProvider, GitProcessRunner, GitProcessRunnerConfig};
 
+use recent_repositories_store::JsonFileRecentRepositoriesStore;
 use state::AppState;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -27,13 +29,20 @@ pub fn run() {
     .expect("git executable discovery failed");
     let port: Arc<dyn RepositoryReadPort> = Arc::new(GitCliProvider::new(runner));
 
+    let recent_repositories_path = JsonFileRecentRepositoriesStore::default_location()
+        .expect("could not resolve the recent repositories file location");
+    let recent_repositories: Arc<dyn RecentRepositoriesPort> =
+        Arc::new(JsonFileRecentRepositoriesStore::new(recent_repositories_path));
+
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        .manage(AppState::new(port))
+        .manage(AppState::new(port, recent_repositories))
         .invoke_handler(tauri::generate_handler![
             commands::open_repository,
             commands::get_repository_status,
             commands::get_commit_graph_page,
+            commands::list_recent_repositories,
+            commands::forget_recent_repository,
         ])
         .run(tauri::generate_context!())
         .expect("error while running the GitSail Desktop application");

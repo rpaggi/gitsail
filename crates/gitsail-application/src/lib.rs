@@ -6,6 +6,7 @@
 
 pub mod blame_cache;
 pub mod ports;
+pub mod recent_repositories;
 pub mod session;
 pub mod use_cases;
 pub mod write_ports;
@@ -13,6 +14,10 @@ pub mod write_use_cases;
 
 pub use blame_cache::{BlameCache, BlameCacheKey, BlameQueryTicket};
 pub use ports::{BlameRequest, CommitQuery, DiffRequest, LineHistoryRequest, Page, RepositoryReadPort};
+pub use recent_repositories::{
+    ForgetRecentRepository, ListRecentRepositories, RecentRepositories, RecentRepositoriesPort,
+    RecentRepositoryEntry, RecordRecentRepository, MAX_RECENT_REPOSITORIES,
+};
 pub use session::{RefreshReason, RefreshTicket, RepositorySession, Selection};
 pub use use_cases::{
     CommitDiff, CompareRevisions, GetCommit, GetCommitDiff, GetCommitHistory, GetDiff,

@@ -12,6 +12,13 @@ export async function openRepository(path: string): Promise<RepositoryDto> {
   return invoke<RepositoryDto>("open_repository", { path });
 }
 
-export async function getRepositoryStatus(): Promise<RepositoryStatusDto> {
-  return invoke<RepositoryStatusDto>("get_repository_status");
+// Mirrors `gitsail_application::RefreshReason` (US-054 criterion 2): manual,
+// focus, and after-mutation refreshes are all the same command/read path —
+// this only tags *why* it ran, it never changes what is fetched.
+export type RefreshReason = "manual" | "focus" | "after_mutation";
+
+export async function getRepositoryStatus(
+  reason: RefreshReason = "manual",
+): Promise<RepositoryStatusDto> {
+  return invoke<RepositoryStatusDto>("get_repository_status", { reason });
 }

@@ -2,22 +2,60 @@
 //! §21, §22).
 //!
 //! [`AppState`] holds exactly one open repository's [`RepositorySession`] at
-//! a time behind a single [`Mutex`]. This is a deliberate simplification for
-//! this story: every command that touches the session, including reads,
-//! serializes behind that one lock. SAD §26 ("read operations may run
-//! concurrently") is intentionally not satisfied yet — moving to
-//! per-repository or lock-free concurrent reads is in scope for US-054
-//! ("keep GUI responsive"), not this story, whose acceptance criteria only
-//! require the shell/bridge layering to work end to end.
+//! a time, plus a session **epoch** (US-052 criterion 3; US-054 criterion
+//! 3): a counter bumped by every [`AppState::open_session`] call, including
+//! re-opening the very same path — that is deliberately still treated as a
+//! brand new session. Any command that starts a slow read (e.g.
+//! `get_commit_graph_page`'s `git log`) captures the epoch active when it
+//! started, alongside the repository snapshot, via
+//! [`AppState::repository_with_epoch`]; before applying its result to any
+//! shared state, it re-validates that epoch (see
+//! [`AppState::append_commit_graph_page_if_current`]). A result computed
+//! for an epoch that is no longer current — because the user switched
+//! repositories while the read was still in flight — is discarded rather
+//! than silently corrupting whatever repository is now open. This is the
+//! one mechanism both US-052 ("switching a project isolates selection, in
+//! flight operations and late results") and US-054 ("stale/cancelled query
+//! results never overwrite current data") share.
+//!
+//! `session` and `commit_graph` remain two separate [`Mutex`]es: every path
+//! through this type that ever needs both locks takes `session` first,
+//! `commit_graph` second (see
+//! [`AppState::append_commit_graph_page_if_current`]), and
+//! [`AppState::open_session`] never holds both at once — it fully releases
+//! `session`'s lock before taking `commit_graph`'s — so that ordering can
+//! never deadlock.
+//!
+//! Every command that touches the session, including reads, still
+//! serializes behind `session`'s lock for the duration of its own port
+//! call (e.g. `get_repository_status`'s `git status`). This was a
+//! deliberate simplification accepted by US-051 and re-examined for this
+//! story (US-054's "keep the GUI responsive"): moving to per-repository or
+//! lock-free concurrent reads would let two independent `git` calls run in
+//! parallel, but none of US-054's three acceptance criteria require that —
+//! the UI thread itself is never blocked (Tauri dispatches every command
+//! off it regardless, see `commands.rs`), a visible loading state is a
+//! frontend concern, and staleness is already handled by the epoch guard
+//! above. A full concurrent-reads redesign is left to a future story if
+//! throughput (not correctness or responsiveness) turns out to need it.
 
 use std::sync::{Arc, Mutex};
 
-use gitsail_application::{RepositoryReadPort, RepositorySession};
-use gitsail_domain::{CommitGraph, ErrorCode, GitSailError, Repository};
+use gitsail_application::{RecentRepositoriesPort, RepositoryReadPort, RepositorySession};
+use gitsail_domain::{CommitGraph, ErrorCode, GitSailError, GraphCommit, GraphRow, Repository};
+
+/// The active session together with the epoch it was opened at, guarded by
+/// one [`Mutex`] so a switch and its epoch bump are always observed
+/// together (never a torn read where a caller sees the new repository but
+/// the old epoch, or vice versa).
+struct SessionSlot {
+    session: Option<RepositorySession>,
+    epoch: u64,
+}
 
 pub struct AppState {
     port: Arc<dyn RepositoryReadPort>,
-    session: Mutex<Option<RepositorySession>>,
+    session: Mutex<SessionSlot>,
     /// The commit graph accumulated for the active repository (US-067),
     /// separate from `session`: a session tracks HEAD/status/selection
     /// (SAD §21), while this is presentation-facing paginated layout state
@@ -25,14 +63,24 @@ pub struct AppState {
     /// repository is opened, or explicitly when a filter change means the
     /// previously accumulated lanes no longer apply (US-067 criterion 3).
     commit_graph: Mutex<CommitGraph>,
+    /// Persists the recently-opened-repositories list (US-052). Desktop's
+    /// concrete adapter (a JSON file under the OS config directory) lives
+    /// in `recent_repositories_store`; `AppState` only depends on the
+    /// port, matching every other `gitsail-application` abstraction it
+    /// holds.
+    recent_repositories: Arc<dyn RecentRepositoriesPort>,
 }
 
 impl AppState {
-    pub fn new(port: Arc<dyn RepositoryReadPort>) -> Self {
+    pub fn new(
+        port: Arc<dyn RepositoryReadPort>,
+        recent_repositories: Arc<dyn RecentRepositoriesPort>,
+    ) -> Self {
         Self {
             port,
-            session: Mutex::new(None),
+            session: Mutex::new(SessionSlot { session: None, epoch: 0 }),
             commit_graph: Mutex::new(CommitGraph::new()),
+            recent_repositories,
         }
     }
 
@@ -40,15 +88,25 @@ impl AppState {
         self.port.clone()
     }
 
+    pub fn recent_repositories(&self) -> Arc<dyn RecentRepositoriesPort> {
+        self.recent_repositories.clone()
+    }
+
     /// Replaces the active session with a fresh one over `repository`,
-    /// discarding any previously open repository's session state, and
-    /// starts a brand new commit graph (a graph accumulated for the
-    /// previous repository must never be appended to as if it were the new
-    /// one's history).
-    pub fn open_session(&self, repository: Repository) {
+    /// discarding any previously open repository's session state, bumps
+    /// the session epoch, and starts a brand new commit graph (a graph
+    /// accumulated for the previous repository must never be appended to
+    /// as if it were the new one's history). Returns the new epoch.
+    pub fn open_session(&self, repository: Repository) -> u64 {
         let session = RepositorySession::new(self.port.clone(), repository);
-        *self.session.lock().expect("session mutex poisoned") = Some(session);
+        let epoch = {
+            let mut guard = self.session.lock().expect("session mutex poisoned");
+            guard.session = Some(session);
+            guard.epoch += 1;
+            guard.epoch
+        };
         self.reset_commit_graph();
+        epoch
     }
 
     /// Runs `f` against the active session, or fails with
@@ -60,7 +118,7 @@ impl AppState {
         f: impl FnOnce(&mut RepositorySession) -> Result<T, GitSailError>,
     ) -> Result<T, GitSailError> {
         let mut guard = self.session.lock().expect("session mutex poisoned");
-        match guard.as_mut() {
+        match guard.session.as_mut() {
             Some(session) => f(session),
             None => Err(GitSailError::new(
                 ErrorCode::InvalidRepositoryState,
@@ -69,21 +127,32 @@ impl AppState {
         }
     }
 
-    /// The active repository, or the same [`ErrorCode::InvalidRepositoryState`]
-    /// failure [`Self::with_session_mut`] uses. A read-only counterpart to
-    /// it for commands (like the commit graph) that need the repository but
-    /// never mutate the session itself.
-    pub fn repository(&self) -> Result<Repository, GitSailError> {
+    /// The active repository together with the session epoch active at the
+    /// moment of this read, or the same
+    /// [`ErrorCode::InvalidRepositoryState`] failure
+    /// [`Self::with_session_mut`] uses. A caller doing slow work outside
+    /// any lock (a `git log`, a diff, ...) must carry the epoch forward
+    /// and re-validate it before mutating shared state with the result —
+    /// see [`Self::append_commit_graph_page_if_current`].
+    pub fn repository_with_epoch(&self) -> Result<(Repository, u64), GitSailError> {
         let guard = self.session.lock().expect("session mutex poisoned");
-        guard
-            .as_ref()
-            .map(|session| session.repository().clone())
-            .ok_or_else(|| {
-                GitSailError::new(
-                    ErrorCode::InvalidRepositoryState,
-                    "no repository is open; call open_repository first",
-                )
-            })
+        let session = guard.session.as_ref().ok_or_else(|| {
+            GitSailError::new(
+                ErrorCode::InvalidRepositoryState,
+                "no repository is open; call open_repository first",
+            )
+        })?;
+        Ok((session.repository().clone(), guard.epoch))
+    }
+
+    /// The session's current epoch, independent of whether a repository is
+    /// open (epoch `0` before the first [`Self::open_session`] call).
+    /// Test-only: production code always carries an epoch forward from
+    /// [`Self::repository_with_epoch`]/[`Self::open_session`] rather than
+    /// reading it independently.
+    #[cfg(test)]
+    pub fn current_epoch(&self) -> u64 {
+        self.session.lock().expect("session mutex poisoned").epoch
     }
 
     /// Discards the accumulated commit graph, starting the next
@@ -94,9 +163,223 @@ impl AppState {
         *self.commit_graph.lock().expect("commit graph mutex poisoned") = CommitGraph::new();
     }
 
-    /// Runs `f` against the accumulated commit graph.
+    /// Runs `f` against the accumulated commit graph. Test-only:
+    /// production code only ever reads the graph through
+    /// [`Self::append_commit_graph_page_if_current`], which folds the
+    /// epoch check into the same access.
+    #[cfg(test)]
     pub fn with_commit_graph_mut<T>(&self, f: impl FnOnce(&mut CommitGraph) -> T) -> T {
         let mut guard = self.commit_graph.lock().expect("commit graph mutex poisoned");
         f(&mut guard)
+    }
+
+    /// Appends `commits` to the accumulated commit graph, but only if
+    /// `epoch` still matches the session's current epoch (US-054 criterion
+    /// 3) — otherwise a page computed for a repository the caller has
+    /// since switched away from would silently corrupt the *new*
+    /// repository's graph. Returns `None` when `epoch` is stale; the caller
+    /// (`commands::get_commit_graph_page`) turns that into an
+    /// [`ErrorCode::Cancelled`] error rather than a page of wrong data.
+    ///
+    /// Locks `session` before `commit_graph`, the same order every other
+    /// path through this type uses, so this can never deadlock against
+    /// [`Self::open_session`] (which never holds both locks at once).
+    pub fn append_commit_graph_page_if_current(
+        &self,
+        epoch: u64,
+        commits: &[GraphCommit],
+    ) -> Option<(Vec<GraphRow>, usize)> {
+        let session_guard = self.session.lock().expect("session mutex poisoned");
+        if session_guard.epoch != epoch {
+            return None;
+        }
+        let mut graph_guard = self.commit_graph.lock().expect("commit graph mutex poisoned");
+        let rows = graph_guard.append_page(commits).to_vec();
+        let lane_count = graph_guard.lane_count();
+        Some((rows, lane_count))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gitsail_application::{RecentRepositories, RecentRepositoriesPort};
+    use gitsail_domain::{BranchName, CommitHash, HeadState, RepositoryId};
+    use std::path::{Path, PathBuf};
+
+    struct UnimplementedPort;
+    impl RepositoryReadPort for UnimplementedPort {
+        fn discover(&self, _path: &Path) -> Result<Repository, GitSailError> {
+            unimplemented!()
+        }
+        fn status(&self, _repo: &Repository) -> Result<gitsail_domain::RepositoryStatus, GitSailError> {
+            unimplemented!()
+        }
+        fn commits(
+            &self,
+            _repo: &Repository,
+            _query: &gitsail_application::CommitQuery,
+        ) -> Result<gitsail_application::Page<gitsail_domain::Commit>, GitSailError> {
+            unimplemented!()
+        }
+        fn commit(&self, _repo: &Repository, _hash: &CommitHash) -> Result<gitsail_domain::Commit, GitSailError> {
+            unimplemented!()
+        }
+        fn branches(&self, _repo: &Repository) -> Result<Vec<gitsail_domain::Branch>, GitSailError> {
+            unimplemented!()
+        }
+        fn diff(
+            &self,
+            _repo: &Repository,
+            _request: &gitsail_application::DiffRequest,
+            _cancel: &gitsail_domain::CancellationToken,
+        ) -> Result<gitsail_domain::Diff, GitSailError> {
+            unimplemented!()
+        }
+        fn resolve_revision(&self, _repo: &Repository, _revision: &str) -> Result<CommitHash, GitSailError> {
+            unimplemented!()
+        }
+        fn blame(
+            &self,
+            _repo: &Repository,
+            _request: &gitsail_application::BlameRequest,
+            _cancel: &gitsail_domain::CancellationToken,
+        ) -> Result<gitsail_domain::Blame, GitSailError> {
+            unimplemented!()
+        }
+        fn line_history(
+            &self,
+            _repo: &Repository,
+            _request: &gitsail_application::LineHistoryRequest,
+            _cancel: &gitsail_domain::CancellationToken,
+        ) -> Result<gitsail_domain::LineHistory, GitSailError> {
+            unimplemented!()
+        }
+    }
+
+    /// An in-memory [`RecentRepositoriesPort`] double: `AppState`'s own
+    /// tests care about session/epoch/commit-graph behavior, never about
+    /// how recents are persisted (that is `recent_repositories_store`'s
+    /// job), so this never touches disk.
+    struct InMemoryRecents(Mutex<RecentRepositories>);
+    impl InMemoryRecents {
+        fn new() -> Self {
+            Self(Mutex::new(RecentRepositories::new()))
+        }
+    }
+    impl RecentRepositoriesPort for InMemoryRecents {
+        fn load(&self) -> Result<RecentRepositories, GitSailError> {
+            Ok(self.0.lock().unwrap().clone())
+        }
+        fn save(&self, recents: &RecentRepositories) -> Result<(), GitSailError> {
+            *self.0.lock().unwrap() = recents.clone();
+            Ok(())
+        }
+    }
+
+    fn state() -> AppState {
+        AppState::new(Arc::new(UnimplementedPort), Arc::new(InMemoryRecents::new()))
+    }
+
+    fn sample_repository(root: &str) -> Repository {
+        Repository {
+            id: RepositoryId::from_canonical_root(Path::new(root)),
+            root_path: PathBuf::from(root),
+            worktree_path: Some(PathBuf::from(root)),
+            is_bare: false,
+            head_state: HeadState::Attached { branch: BranchName::new("main").unwrap() },
+            current_branch: Some(BranchName::new("main").unwrap()),
+        }
+    }
+
+    fn sample_graph_commit(hash: &str) -> GraphCommit {
+        GraphCommit {
+            hash: CommitHash::new(hash).unwrap(),
+            parents: vec![],
+            decorations: vec![],
+        }
+    }
+
+    #[test]
+    fn no_repository_open_reports_invalid_repository_state_and_epoch_zero() {
+        let state = state();
+
+        assert_eq!(state.current_epoch(), 0);
+        let err = state.repository_with_epoch().unwrap_err();
+        assert_eq!(err.code(), ErrorCode::InvalidRepositoryState);
+    }
+
+    #[test]
+    fn opening_a_repository_bumps_the_epoch_every_time_including_the_same_path() {
+        let state = state();
+
+        let epoch1 = state.open_session(sample_repository("/repo"));
+        let epoch2 = state.open_session(sample_repository("/repo"));
+
+        assert_eq!(epoch1, 1);
+        assert_eq!(epoch2, 2, "re-opening the same path must still start a brand new session/epoch");
+        assert_eq!(state.current_epoch(), 2);
+    }
+
+    #[test]
+    fn repository_with_epoch_reports_the_epoch_active_at_the_time_of_the_read() {
+        let state = state();
+        let epoch = state.open_session(sample_repository("/repo"));
+
+        let (repository, read_epoch) = state.repository_with_epoch().unwrap();
+
+        assert_eq!(repository.root_path, PathBuf::from("/repo"));
+        assert_eq!(read_epoch, epoch);
+    }
+
+    #[test]
+    fn append_commit_graph_page_if_current_succeeds_for_the_current_epoch() {
+        let state = state();
+        let epoch = state.open_session(sample_repository("/repo"));
+
+        let (rows, lane_count) = state
+            .append_commit_graph_page_if_current(epoch, &[sample_graph_commit(&"a".repeat(40))])
+            .expect("the epoch just opened must still be current");
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(lane_count, 1);
+        assert_eq!(state.with_commit_graph_mut(|g| g.rows().len()), 1);
+    }
+
+    #[test]
+    fn append_commit_graph_page_if_current_discards_a_stale_epoch_without_mutating_the_graph() {
+        let state = state();
+        let stale_epoch = state.open_session(sample_repository("/repo-a"));
+
+        // Simulates a slow read for repo-a that is still in flight when the
+        // user switches to repo-b: the switch happens first...
+        state.open_session(sample_repository("/repo-b"));
+        // ...then repo-a's now-stale read finally tries to append its page.
+        let result = state.append_commit_graph_page_if_current(
+            stale_epoch,
+            &[sample_graph_commit(&"a".repeat(40))],
+        );
+
+        assert!(result.is_none(), "a stale epoch must never be allowed to append");
+        assert_eq!(
+            state.with_commit_graph_mut(|g| g.rows().len()),
+            0,
+            "repo-b's freshly reset graph must never be contaminated by repo-a's stale page"
+        );
+    }
+
+    #[test]
+    fn recent_repositories_port_is_reachable_from_state() {
+        let state = state();
+        let port = state.recent_repositories();
+
+        port.save(&{
+            let mut r = RecentRepositories::new();
+            r.touch(PathBuf::from("/repo"), 1);
+            r
+        })
+        .unwrap();
+
+        assert_eq!(port.load().unwrap().entries().len(), 1);
     }
 }

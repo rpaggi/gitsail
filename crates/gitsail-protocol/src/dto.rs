@@ -12,6 +12,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
+use gitsail_application::RecentRepositoryEntry;
 use gitsail_domain::{
     Blame, BlameLine, BlameOrigin, Branch, BranchKind, ChangeType, Commit, Decoration, Diff,
     DiffHunk, DiffLine, DiffLineOrigin, FileChange, FileDiff, FileStatusCode, GitTimestamp,
@@ -351,6 +352,29 @@ pub struct CommitGraphPageDto {
 }
 
 // ---------------------------------------------------------------------
+// Recent repositories (US-052). Mirrors
+// `gitsail_application::RecentRepositoryEntry` — the generic list logic
+// lives there (reusable by any future frontend), this crate only adds the
+// wire shape.
+// ---------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecentRepositoryDto {
+    pub path: String,
+    pub last_opened_unix_seconds: i64,
+}
+
+impl From<&RecentRepositoryEntry> for RecentRepositoryDto {
+    fn from(entry: &RecentRepositoryEntry) -> Self {
+        Self {
+            path: path_to_string(&entry.path),
+            last_opened_unix_seconds: entry.last_opened_unix_seconds,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------
 // Branches.
 // ---------------------------------------------------------------------
 
@@ -674,6 +698,20 @@ mod tests {
         let json = serde_json::to_value(&page).unwrap();
         assert!(json.get("nextCursor").is_none());
         assert_eq!(json["hasMore"], false);
+    }
+
+    #[test]
+    fn recent_repository_dto_maps_path_and_timestamp() {
+        let entry = RecentRepositoryEntry {
+            path: PathBuf::from("/repo"),
+            last_opened_unix_seconds: 1_700_000_000,
+        };
+
+        let dto = RecentRepositoryDto::from(&entry);
+        let json = serde_json::to_value(&dto).unwrap();
+
+        assert_eq!(dto.path, "/repo");
+        assert_eq!(json["lastOpenedUnixSeconds"], 1_700_000_000);
     }
 
     #[test]
