@@ -275,6 +275,14 @@ export type MergeResultDto =
   | { outcome: "mergeCommitCreated"; hash: string }
   | { outcome: "conflict"; conflictedFiles: ConflictedFileDto[] };
 
+/** A rebase's exact outcome (T-235/US-083 criterion 3): completion and a
+ * conflict are always two distinct, explicit variants — a conflict is never
+ * collapsed into a bare success, mirroring `MergeResultDto`'s own
+ * convention. */
+export type RebaseResultDto =
+  | { outcome: "completed"; newHead: string }
+  | { outcome: "conflict"; conflictedFiles: ConflictedFileDto[] };
+
 /** One conflict side's content (T-232/US-080 criterion 2) — `"absent"` is a
  * legitimate, expected outcome (e.g. no common ancestor for a file added
  * independently on both sides), never an error. */

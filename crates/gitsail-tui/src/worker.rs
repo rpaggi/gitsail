@@ -24,9 +24,9 @@ use gitsail_application::{
     AbortOperation, ApplyPatch, BlameRequest, CommitQuery, ContinueOperation, CreateBranch,
     CreateCommit, DeleteBranch, DetectInProgressOperation, DiffRequest, Fetch, GetCommitHistory,
     GetConflictSides, GetDiff, GetFileBlame, GetRepositoryStatus, ListBranches,
-    MarkConflictResolved, Merge, OpenRepository, PreviewPatchApplication, Pull, Push,
-    RefreshTicket, RenameBranch, RepositoryReadPort, RepositoryWritePort, StageFiles,
-    SwitchBranch, TakeConflictSide, UnstageFiles,
+    MarkConflictResolved, Merge, OpenRepository, PreviewPatchApplication, Pull, Push, Rebase,
+    RefreshTicket, RenameBranch, RepositoryReadPort, RepositoryWritePort, SkipOperation,
+    StageFiles, SwitchBranch, TakeConflictSide, UnstageFiles,
 };
 use gitsail_domain::{BranchName, CancellationToken, CommitHash, ConflictSide, Repository};
 
@@ -107,6 +107,11 @@ pub enum Command {
     ContinueOperation(Repository),
     /// Abandons whichever operation is currently pending (T-233/US-081).
     AbortOperation(Repository),
+    /// Rebases the current branch onto the given revision (T-235/US-083).
+    Rebase(Repository, String),
+    /// Skips the current step of whichever operation is pending (T-235/
+    /// US-083).
+    SkipOperation(Repository),
 }
 
 /// Spawns one background thread per command in `commands`, each reporting
@@ -254,6 +259,14 @@ fn spawn_one(
             }
             Command::AbortOperation(repo) => {
                 let result = AbortOperation::new(write_port).execute(&repo);
+                Message::OperationResolutionFinished(result)
+            }
+            Command::Rebase(repo, onto_revision) => {
+                let result = Rebase::new(write_port).execute(&repo, &onto_revision);
+                Message::RebaseFinished(result)
+            }
+            Command::SkipOperation(repo) => {
+                let result = SkipOperation::new(write_port).execute(&repo);
                 Message::OperationResolutionFinished(result)
             }
         };

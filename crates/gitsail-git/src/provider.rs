@@ -16,13 +16,16 @@
 //! all Git text parsing lives in this crate, never in `gitsail-application`
 //! or `gitsail-domain`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use gitsail_application::{
     ApplyPatchResult, BlameRequest, CommitQuery, DiffRequest, LineHistoryRequest, MergeResult,
-    Page, PatchPreview, Precondition, PullOutcome, RepositoryReadPort, RepositoryWritePort,
-    StashApplyOutcome, StashScope, TagAnnotation, WorktreeBranchSpec,
+    Page, PatchPreview, Precondition, PullOutcome, RebaseAction, RebasePlan, RebasePlanEntry,
+    RebaseResult, RepositoryReadPort, RepositoryWritePort, StashApplyOutcome, StashScope,
+    TagAnnotation, WorktreeBranchSpec,
 };
 use gitsail_domain::{
     BisectOperation, Blame, BlameLine, BlameOrigin, Branch, BranchKind, BranchName, ChangeType,
@@ -94,6 +97,18 @@ const STASH_FORMAT: &str = "%H\u{1f}%gs\u{1f}%ad\u{1e}";
 
 /// Number of `FIELD_SEP`-delimited fields in [`STASH_FORMAT`].
 const STASH_FIELD_COUNT: usize = 3;
+
+/// `git log --reverse --pretty=format:` string producing one
+/// `RECORD_SEP`-terminated record per candidate commit for
+/// [`RepositoryWritePort::plan_rebase`] (EPIC-17/T-236/US-084): full hash,
+/// abbreviated hash, subject — everything [`RebasePlanEntry`] needs for
+/// display, nothing more. Mirrors [`LOG_FORMAT`]/[`TAG_FORMAT`]'s own
+/// `RECORD_SEP`-per-record convention (a subject can, in principle, contain
+/// characters a plain one-line-per-record format would mishandle).
+const REBASE_PLAN_FORMAT: &str = "%H\u{1f}%h\u{1f}%s\u{1e}";
+
+/// Number of `FIELD_SEP`-delimited fields in [`REBASE_PLAN_FORMAT`].
+const REBASE_PLAN_FIELD_COUNT: usize = 3;
 
 /// Default page size for [`RepositoryReadPort::commits`] when the caller
 /// does not specify one. History must never assume the full log fits in
@@ -295,6 +310,121 @@ impl GitCliProvider {
                 FileContentKind::Missing => ConflictSideContent::Absent,
             },
         })
+    }
+
+    /// Like [`Self::run`], but merges `extra_env` on top of
+    /// [`Self::locale_env`] instead of the locale pinning alone — used by
+    /// [`Self::execute_rebase_plan`] to hand the controlled sequence-editor
+    /// helper its `GIT_SEQUENCE_EDITOR`/`GITSAIL_REBASE_TODO_FILE`
+    /// coordinates (T-236/US-084 criterion 3).
+    fn run_with_env(
+        &self,
+        args: Vec<String>,
+        cwd: &Path,
+        extra_env: Vec<(String, String)>,
+    ) -> Result<ProcessOutput, GitSailError> {
+        let mut env = Self::locale_env();
+        env.extend(extra_env);
+        let request = ProcessRequest::new(args, cwd.to_path_buf()).with_env(env);
+        self.runner
+            .run(request, &CancellationToken::new())
+            .map_err(classify_index_lock_conflict)
+    }
+
+    /// Refuses `action` up front, with an explicit, clear error, when the
+    /// working tree has any uncommitted change (T-235/US-083 criterion 2):
+    /// this is the "blocked, never silently stashed" half of that
+    /// criterion — a caller that wants to proceed anyway is expected to
+    /// commit, or create an *explicit*, visible stash first
+    /// ([`RepositoryWritePort::create_stash`], EPIC-18), never something
+    /// this port does on its own behind the scenes.
+    fn require_clean_worktree(&self, repo: &Repository, action: &str) -> Result<(), GitSailError> {
+        let status = RepositoryReadPort::status(self, repo)?;
+        if !status.is_clean() {
+            return Err(GitSailError::new(
+                ErrorCode::InvalidRepositoryState,
+                format!("cannot {action}: the working tree has uncommitted changes"),
+            )
+            .with_remediation(
+                "commit your changes, or create an explicit stash first (RepositoryWritePort::create_stash), then retry — this is never done automatically",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Refuses to start a new rebase-shaped mutation when another
+    /// [`InProgressOperation`] is already pending, mirroring [`Self::merge`]'s
+    /// own check exactly (T-230/US-078 criterion 3).
+    fn require_no_pending_operation(&self, repo: &Repository) -> Result<(), GitSailError> {
+        let existing = RepositoryReadPort::detect_in_progress_operation(self, repo)?;
+        if !existing.is_none() {
+            return Err(GitSailError::new(
+                ErrorCode::OperationConflict,
+                format!(
+                    "a {} is already in progress",
+                    existing.kind_label().unwrap_or("operation")
+                ),
+            )
+            .with_remediation(
+                "continue or abort the in-progress operation before starting a new rebase",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Locates the `gitsail-sequence-editor` helper binary (T-236/US-084
+    /// criterion 3): the program `GIT_SEQUENCE_EDITOR` points at so
+    /// [`Self::execute_rebase_plan`] never has to open a real interactive
+    /// editor. Checked, in order:
+    ///
+    /// 1. `GITSAIL_SEQUENCE_EDITOR_BIN`, an explicit override for a packaged
+    ///    deployment that ships this helper at a fixed, known location.
+    /// 2. Next to the currently running executable
+    ///    ([`std::env::current_exe`]) — where Cargo places a `[[bin]]`
+    ///    target's own output, and thus where every consumer of this crate
+    ///    (`gitsail-cli`, `gitsail-tui`, the Desktop sidecar) finds it
+    ///    alongside itself in an ordinary `cargo build`.
+    /// 3. One directory up from that — `cargo test` binaries live in
+    ///    `target/<profile>/deps/`, one level *below* where `[[bin]]`
+    ///    targets like this helper land (`target/<profile>/`).
+    ///
+    /// Fails clearly, rather than falling back to anything resembling a
+    /// shell, when none of these resolve to a real file.
+    fn sequence_editor_path() -> Result<PathBuf, GitSailError> {
+        if let Some(path) = std::env::var_os("GITSAIL_SEQUENCE_EDITOR_BIN") {
+            return Ok(PathBuf::from(path));
+        }
+        let exe_name = if cfg!(windows) {
+            "gitsail-sequence-editor.exe"
+        } else {
+            "gitsail-sequence-editor"
+        };
+        let current = std::env::current_exe().map_err(|err| {
+            GitSailError::new(
+                ErrorCode::Internal,
+                "could not determine the current executable's path",
+            )
+            .with_source(err)
+        })?;
+        let mut candidates = Vec::new();
+        if let Some(dir) = current.parent() {
+            candidates.push(dir.join(exe_name));
+            if let Some(parent_dir) = dir.parent() {
+                candidates.push(parent_dir.join(exe_name));
+            }
+        }
+        candidates
+            .into_iter()
+            .find(|candidate| candidate.is_file())
+            .ok_or_else(|| {
+                GitSailError::new(
+                    ErrorCode::Internal,
+                    "could not locate the gitsail-sequence-editor helper binary",
+                )
+                .with_remediation(
+                    "build the workspace so gitsail-sequence-editor compiles alongside this binary, or set GITSAIL_SEQUENCE_EDITOR_BIN to its path",
+                )
+            })
     }
 }
 
@@ -1915,6 +2045,322 @@ impl RepositoryWritePort for GitCliProvider {
             .map_err(classify_abort_failure)?;
         Ok(())
     }
+
+    /// See [`RepositoryWritePort::rebase`]. A plain `git rebase <onto>`
+    /// (T-235/US-083): refuses up front when another operation is already
+    /// pending ([`Self::require_no_pending_operation`], mirroring
+    /// [`Self::merge`]'s own check) or when the working tree is dirty
+    /// ([`Self::require_clean_worktree`], US-083 criterion 2 — never an
+    /// automatic, hidden `git stash`). A conflict is reported as
+    /// [`RebaseResult::Conflict`], never a generic process failure, by
+    /// re-inspecting real `.git/` state exactly like [`Self::merge`] already
+    /// does for its own conflict case.
+    fn rebase(&self, repo: &Repository, onto_revision: &str) -> Result<RebaseResult, GitSailError> {
+        require_worktree(repo, "rebase")?;
+        self.require_no_pending_operation(repo)?;
+        self.require_clean_worktree(repo, "rebase")?;
+
+        // `-c core.editor=true`: a plain rebase never needs a commit-message
+        // editor for an ordinary pick (each replayed commit keeps its
+        // original message), but this stays consistent with every other
+        // multi-step mutation in this file that could, in principle, be
+        // asked to combine commits (`--autosquash` is never passed here,
+        // but nothing about this call assumes a caller cannot reconfigure
+        // that) — matches [`Self::merge`]/[`Self::continue_operation`]'s own
+        // rationale.
+        let args = vec![
+            "-c".to_string(),
+            "core.editor=true".to_string(),
+            "rebase".to_string(),
+            "--end-of-options".to_string(),
+            onto_revision.to_string(),
+        ];
+
+        match self.run(args, &repo.root_path) {
+            Ok(_) => {
+                let new_head = RepositoryReadPort::resolve_revision(self, repo, "HEAD")?;
+                Ok(RebaseResult::Completed { new_head })
+            }
+            Err(err) => {
+                if err.code() == ErrorCode::ProcessFailure {
+                    if let InProgressOperation::Rebase(rebase_op) =
+                        RepositoryReadPort::detect_in_progress_operation(self, repo)?
+                    {
+                        if !rebase_op.conflicted_files.is_empty() {
+                            return Ok(RebaseResult::Conflict {
+                                files: rebase_op.conflicted_files,
+                            });
+                        }
+                    }
+                }
+                Err(classify_rebase_failure(err))
+            }
+        }
+    }
+
+    /// See [`RepositoryWritePort::skip_operation`]. Dispatches on whatever
+    /// [`RepositoryReadPort::detect_in_progress_operation`] currently
+    /// detects, mirroring [`Self::continue_operation`]/[`Self::abort_operation`]'s
+    /// own rationale (T-235/US-083 criterion 3). A merge never offers `Skip`
+    /// (T-230/US-078's own domain modeling — a merge has no further step to
+    /// skip past), so this refuses it with a clear message containing
+    /// "unsupported" rather than ever attempting `git merge --skip` (which
+    /// does not exist). `git bisect skip` is a positional subcommand, not an
+    /// `--skip` flag, hence its own arm below.
+    fn skip_operation(&self, repo: &Repository) -> Result<(), GitSailError> {
+        require_worktree(repo, "skip operation")?;
+        let current = RepositoryReadPort::detect_in_progress_operation(self, repo)?;
+        if current.is_none() {
+            return Err(GitSailError::new(
+                ErrorCode::InvalidRepositoryState,
+                "no merge, rebase, cherry-pick, or revert is currently in progress",
+            )
+            .with_remediation("there is nothing to skip"));
+        }
+        if !current.supports(OperationCapability::Skip) {
+            return Err(GitSailError::new(
+                ErrorCode::InvalidRepositoryState,
+                format!(
+                    "skip is unsupported for a {} in progress",
+                    current.kind_label().unwrap_or("operation")
+                ),
+            ));
+        }
+
+        let args: Vec<String> = match &current {
+            InProgressOperation::Rebase(_) => vec!["rebase".to_string(), "--skip".to_string()],
+            InProgressOperation::CherryPick(_) => {
+                vec!["cherry-pick".to_string(), "--skip".to_string()]
+            }
+            InProgressOperation::Revert(_) => vec!["revert".to_string(), "--skip".to_string()],
+            InProgressOperation::BisectRun(_) => vec!["bisect".to_string(), "skip".to_string()],
+            InProgressOperation::Merge(_) | InProgressOperation::None => {
+                unreachable!("already refused above: no Skip capability / nothing pending")
+            }
+        };
+        self.run(args, &repo.root_path)
+            .map_err(classify_skip_failure)?;
+        Ok(())
+    }
+
+    /// See [`RepositoryWritePort::plan_rebase`]. Reads the candidate commit
+    /// range (`onto..HEAD`, oldest first) via a plain `git log --reverse`
+    /// (T-236/US-084 criterion 1) — never mutates anything. `onto_revision`
+    /// and `HEAD` are both resolved to concrete commit hashes up front and
+    /// used exclusively as the range boundaries from then on, so the actual
+    /// `git log` invocation never depends on a ref still resolving the same
+    /// way (that is exactly what [`Self::execute_rebase_plan`] revalidates
+    /// before ever applying the result).
+    fn plan_rebase(&self, repo: &Repository, onto_revision: &str) -> Result<RebasePlan, GitSailError> {
+        require_worktree(repo, "plan rebase")?;
+        let onto = RepositoryReadPort::resolve_revision(self, repo, onto_revision)?;
+        let branch_head = RepositoryReadPort::resolve_revision(self, repo, "HEAD")?;
+
+        let args = vec![
+            "log".to_string(),
+            "--reverse".to_string(),
+            format!("--pretty=format:{REBASE_PLAN_FORMAT}"),
+            "--date=raw".to_string(),
+            "--no-color".to_string(),
+            format!("{}..{}", onto.as_str(), branch_head.as_str()),
+        ];
+        let output = self.run(args, &repo.root_path)?;
+        let stdout = Self::stdout_string(&output)?;
+        let entries = parse_rebase_plan_entries(&stdout)?;
+
+        Ok(RebasePlan {
+            onto_revision: onto_revision.to_string(),
+            onto,
+            branch_head,
+            entries,
+        })
+    }
+
+    /// See [`RepositoryWritePort::execute_rebase_plan`]. Full mechanism
+    /// (T-236/US-084 criterion 3; T-237/US-085):
+    ///
+    /// 1. [`RebasePlan::validate`] — position/action invariants, pure, no
+    ///    I/O.
+    /// 2. Refuses when another operation is pending, or the working tree is
+    ///    dirty (mirrors [`Self::rebase`]).
+    /// 3. Revalidates `plan.onto`/`plan.branch_head` are still what
+    ///    `plan.onto_revision`/`HEAD` resolve to right now (T-236/US-084
+    ///    criterion 2) — refuses with
+    ///    [`gitsail_domain::ErrorCode::OperationConflict`] otherwise, never
+    ///    silently executing a plan built against an older state.
+    /// 4. An empty plan (`onto` already contains every commit) is exactly
+    ///    [`Self::rebase`]'s own degenerate no-op case — delegated to it
+    ///    directly rather than duplicated.
+    /// 5. Otherwise, renders the plan into Git's own todo-list syntax
+    ///    ([`render_rebase_todo`]) into a fresh temporary file, points
+    ///    `GIT_SEQUENCE_EDITOR` at the `gitsail-sequence-editor` helper
+    ///    binary with `GITSAIL_REBASE_TODO_FILE` naming that file, and runs
+    ///    `git rebase -i --onto <onto> <onto>`. Every [`RebaseAction::Reword`]
+    ///    entry is translated to Git's own `edit` command rather than
+    ///    `reword`: Git stops cleanly right after applying that commit,
+    ///    without ever opening a message editor, and this method itself
+    ///    then runs `git commit --amend -m <message>` (the message reaching
+    ///    Git purely as a `-m` argv element — the same mechanism
+    ///    [`Self::create_commit`]/[`Self::amend_commit`] already use, never
+    ///    a shell) before resuming via [`Self::continue_operation`]. A loop
+    ///    re-inspects real `.git/` state after every step (never presumes
+    ///    success, matching [`Self::continue_operation`]'s own discipline)
+    ///    to tell apart: the whole plan finished; a real conflict (returned
+    ///    as [`RebaseResult::Conflict`], leaving `InProgressOperation::Rebase`
+    ///    for continue/skip/abort); or another clean `edit` pause.
+    ///
+    /// Injection safety: nothing derived from repository content — a
+    /// commit's subject, a `Reword` message, a branch name — is ever
+    /// interpolated into a string a shell parses. The todo list's action
+    /// keyword and commit hash (the only two tokens Git's own sequencer
+    /// actually executes anything based on) come exclusively from this
+    /// method's own [`RebasePlanEntry::action`]/`commit` fields, never from
+    /// a subject or message; the subject is appended purely as a trailing,
+    /// never-executed comment; and `gitsail-sequence-editor` itself performs
+    /// nothing but a byte-for-byte file copy (see its own module doc). A
+    /// dedicated test (`tests/t235_237_rebase.rs`) exercises this against a
+    /// real commit whose subject is crafted to look like a shell injection
+    /// attempt.
+    fn execute_rebase_plan(
+        &self,
+        repo: &Repository,
+        plan: &RebasePlan,
+    ) -> Result<RebaseResult, GitSailError> {
+        require_worktree(repo, "rebase")?;
+        plan.validate()?;
+        self.require_no_pending_operation(repo)?;
+
+        let current_onto = RepositoryReadPort::resolve_revision(self, repo, &plan.onto_revision)?;
+        if current_onto != plan.onto {
+            return Err(GitSailError::new(
+                ErrorCode::OperationConflict,
+                format!(
+                    "'{}' now resolves to a different commit than when this rebase plan was built",
+                    plan.onto_revision
+                ),
+            )
+            .with_remediation("rebuild the rebase plan against the current state, then retry"));
+        }
+        let current_head = RepositoryReadPort::resolve_revision(self, repo, "HEAD")?;
+        if current_head != plan.branch_head {
+            return Err(GitSailError::new(
+                ErrorCode::OperationConflict,
+                "HEAD has moved since this rebase plan was built",
+            )
+            .with_remediation("rebuild the rebase plan against the current state, then retry"));
+        }
+
+        self.require_clean_worktree(repo, "rebase")?;
+
+        if plan.entries.is_empty() {
+            return RepositoryWritePort::rebase(self, repo, &plan.onto_revision);
+        }
+
+        let (todo_text, mut pending_rewords) = render_rebase_todo(&plan.entries);
+
+        let temp_dir = RebaseTodoTempDir::new()?;
+        std::fs::write(temp_dir.todo_path(), &todo_text).map_err(|err| {
+            GitSailError::new(
+                ErrorCode::Internal,
+                "failed to write the rebase plan to a temporary file",
+            )
+            .with_source(err)
+        })?;
+
+        let sequence_editor = Self::sequence_editor_path()?;
+        let extra_env = vec![
+            (
+                "GIT_SEQUENCE_EDITOR".to_string(),
+                sequence_editor.to_string_lossy().into_owned(),
+            ),
+            (
+                "GITSAIL_REBASE_TODO_FILE".to_string(),
+                temp_dir.todo_path().to_string_lossy().into_owned(),
+            ),
+        ];
+        let args = vec![
+            "-c".to_string(),
+            "core.editor=true".to_string(),
+            "rebase".to_string(),
+            "-i".to_string(),
+            "--onto".to_string(),
+            plan.onto.as_str().to_string(),
+            "--end-of-options".to_string(),
+            plan.onto.as_str().to_string(),
+        ];
+
+        let mut pending_err = self
+            .run_with_env(args, &repo.root_path, extra_env)
+            .err();
+
+        // Bounded defensively: at most one clean pause per entry in the
+        // plan (every pause is one of this plan's own `Reword` entries),
+        // plus one final iteration to observe completion — never an
+        // unbounded loop even if repository state somehow never converges.
+        let max_iterations = plan.entries.len() + 2;
+        for _ in 0..max_iterations {
+            if let Some(err) = pending_err.take() {
+                if err.code() != ErrorCode::ProcessFailure {
+                    return Err(classify_rebase_failure(err));
+                }
+                // Falls through: a `ProcessFailure` here never distinguishes
+                // "real conflict" from "paused cleanly at an edit step" by
+                // its exit code alone — real `.git/` state below does,
+                // exactly like `Self::merge`/`Self::rebase` already decide
+                // their own conflict case.
+            }
+
+            let current = RepositoryReadPort::detect_in_progress_operation(self, repo)?;
+            match current {
+                InProgressOperation::None => {
+                    let new_head = RepositoryReadPort::resolve_revision(self, repo, "HEAD")?;
+                    return Ok(RebaseResult::Completed { new_head });
+                }
+                InProgressOperation::Rebase(rebase_op) if !rebase_op.conflicted_files.is_empty() => {
+                    return Ok(RebaseResult::Conflict {
+                        files: rebase_op.conflicted_files,
+                    });
+                }
+                InProgressOperation::Rebase(_) => {
+                    // Paused with nothing conflicted: this plan's own
+                    // `Reword` -> `edit` translation is the only command
+                    // here that ever produces a clean pause, so the next
+                    // queued message is exactly the one this pause is for.
+                    let Some(message) = pending_rewords.pop_front() else {
+                        return Err(GitSailError::new(
+                            ErrorCode::Internal,
+                            "the rebase paused for an edit step this plan did not expect",
+                        ));
+                    };
+                    self.run(
+                        vec![
+                            "commit".to_string(),
+                            "--amend".to_string(),
+                            "-m".to_string(),
+                            message,
+                        ],
+                        &repo.root_path,
+                    )
+                    .map_err(classify_commit_failure)?;
+                    pending_err = RepositoryWritePort::continue_operation(self, repo).err();
+                }
+                other => {
+                    return Err(GitSailError::new(
+                        ErrorCode::Internal,
+                        format!(
+                            "unexpected {} in progress while executing a rebase plan",
+                            other.kind_label().unwrap_or("operation")
+                        ),
+                    ));
+                }
+            }
+        }
+
+        Err(GitSailError::new(
+            ErrorCode::Internal,
+            "rebase plan execution did not converge within the expected number of steps",
+        ))
+    }
 }
 
 /// Direction in which a reconstructed hunk patch is applied to the index:
@@ -2970,6 +3416,166 @@ fn classify_abort_failure(err: GitSailError) -> GitSailError {
     } else {
         err
     }
+}
+
+/// Reclassifies a failed `git rebase` (T-235/US-083) as
+/// [`ErrorCode::InvalidRepositoryState`] when Git's own refusal is exactly
+/// the dirty-working-tree case [`GitCliProvider::require_clean_worktree`]
+/// already checks for up front (defense in depth: a race between that check
+/// and this actual invocation, e.g. another process touching the working
+/// tree in between). Any other failure passes through unchanged.
+fn classify_rebase_failure(err: GitSailError) -> GitSailError {
+    if err.code() != ErrorCode::ProcessFailure {
+        return err;
+    }
+    let diagnostic_text = err.diagnostic().map(|d| d.to_string()).unwrap_or_default();
+    if diagnostic_text.contains("cannot rebase: You have unstaged changes")
+        || diagnostic_text.contains("cannot rebase: Your index contains uncommitted changes")
+        || diagnostic_text.contains("Please commit or stash them")
+    {
+        GitSailError::new(
+            ErrorCode::InvalidRepositoryState,
+            "the working tree has uncommitted changes",
+        )
+        .with_remediation(
+            "commit your changes, or create an explicit stash first, then retry — this is never done automatically",
+        )
+        .with_source(err)
+    } else {
+        err
+    }
+}
+
+/// Reclassifies a failed `git <op> --skip`/`git bisect skip` (T-235/US-083)
+/// as [`ErrorCode::InvalidRepositoryState`] when there is nothing to skip.
+/// Any other failure passes through unchanged.
+fn classify_skip_failure(err: GitSailError) -> GitSailError {
+    if err.code() != ErrorCode::ProcessFailure {
+        return err;
+    }
+    let diagnostic_text = err.diagnostic().map(|d| d.to_string()).unwrap_or_default();
+    if diagnostic_text.contains("no rebase in progress")
+        || diagnostic_text.contains("no cherry-pick in progress")
+        || diagnostic_text.contains("no revert in progress")
+        || diagnostic_text.contains("not currently")
+    {
+        GitSailError::new(
+            ErrorCode::InvalidRepositoryState,
+            "no operation is currently in progress",
+        )
+        .with_remediation("there is nothing to skip")
+        .with_source(err)
+    } else {
+        err
+    }
+}
+
+// ---------------------------------------------------------------------
+// EPIC-17/T-236/US-084: interactive rebase plan execution mechanics —
+// rendering the plan into a Git interactive-rebase todo list, and the
+// temporary file the controlled `GIT_SEQUENCE_EDITOR` helper copies it from.
+// See `gitsail_sequence_editor` (`src/bin/gitsail_sequence_editor.rs`) and
+// `GitCliProvider::execute_rebase_plan`'s own doc for the full mechanism and
+// why it is injection-safe.
+// ---------------------------------------------------------------------
+
+/// A freshly created, uniquely named temporary directory holding the
+/// rendered rebase todo list, removed on drop regardless of how
+/// [`GitCliProvider::execute_rebase_plan`] returns (success, conflict, or
+/// error) — this is disposable coordination state, never anything Git
+/// itself needs to keep.
+struct RebaseTodoTempDir(PathBuf);
+
+impl RebaseTodoTempDir {
+    fn new() -> Result<Self, GitSailError> {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let path = std::env::temp_dir().join(format!(
+            "gitsail-rebase-plan-{}-{nanos}-{n}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&path).map_err(|err| {
+            GitSailError::new(
+                ErrorCode::Internal,
+                "failed to create a temporary directory for the rebase plan",
+            )
+            .with_source(err)
+        })?;
+        Ok(Self(path))
+    }
+
+    fn todo_path(&self) -> PathBuf {
+        self.0.join("todo")
+    }
+}
+
+impl Drop for RebaseTodoTempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// Renders `entries` (in the exact order given — the plan's own order,
+/// after any reordering a person has already applied) into Git's
+/// interactive-rebase todo-list text, and separately collects every
+/// [`RebaseAction::Reword`] entry's message, in the same top-to-bottom
+/// order those entries appear — the order their `edit` stops actually occur
+/// in once Git runs the plan (see [`GitCliProvider::execute_rebase_plan`]'s
+/// doc for why `Reword` is translated to Git's own `edit` command rather
+/// than `reword` here).
+///
+/// Every commit is addressed by its full hash, never a branch/tag name, so
+/// nothing here depends on any ref still existing or meaning what it meant
+/// when the plan was built. The subject appended after it is inert,
+/// human-readable text as far as both this renderer and Git's own todo-list
+/// parser are concerned (see [`GitCliProvider::execute_rebase_plan`]'s
+/// module-level security doc) — still defensively flattened to a single
+/// line here, since Git's own todo format is one command per line.
+fn render_rebase_todo(entries: &[RebasePlanEntry]) -> (String, VecDeque<String>) {
+    let mut todo = String::new();
+    let mut reword_messages = VecDeque::new();
+    for entry in entries {
+        let command = match entry.action {
+            RebaseAction::Pick => "pick",
+            RebaseAction::Reword => "edit",
+            RebaseAction::Squash => "squash",
+            RebaseAction::Fixup => "fixup",
+            RebaseAction::Drop => "drop",
+        };
+        if entry.action == RebaseAction::Reword {
+            let message = entry
+                .message_override
+                .clone()
+                .expect("RebasePlan::validate guarantees a Reword entry carries a message_override");
+            reword_messages.push_back(message);
+        }
+        let safe_subject = entry.subject.replace(['\n', '\r'], " ");
+        todo.push_str(&format!("{command} {} {safe_subject}\n", entry.commit.as_str()));
+    }
+    (todo, reword_messages)
+}
+
+fn parse_rebase_plan_entries(raw: &str) -> Result<Vec<RebasePlanEntry>, GitSailError> {
+    split_record_sep_blocks(raw)
+        .map(parse_rebase_plan_entry)
+        .collect()
+}
+
+fn parse_rebase_plan_entry(record: &str) -> Result<RebasePlanEntry, GitSailError> {
+    let fields: Vec<&str> = record.split(FIELD_SEP).collect();
+    if fields.len() != REBASE_PLAN_FIELD_COUNT {
+        return Err(parse_err(
+            "malformed git log record for a rebase plan: unexpected field count",
+        ));
+    }
+    let commit = CommitHash::new(fields[0].to_string())?;
+    let short_hash = ShortHash::new(fields[1].to_string())?;
+    let subject = fields[2].to_string();
+    Ok(RebasePlanEntry::pick(commit, short_hash, subject))
 }
 
 // ---------------------------------------------------------------------
@@ -4310,6 +4916,78 @@ mod tests {
         let classified = classify_apply_failure(err);
 
         assert_eq!(classified.code(), ErrorCode::ProcessFailure);
+    }
+
+    /// T-235/US-083 criterion 2 (defense in depth): a real `git rebase`
+    /// refusal over a dirty working tree is reclassified clearly, distinct
+    /// from a genuine conflict or an unrelated process failure.
+    #[test]
+    fn classifies_a_dirty_working_tree_rebase_refusal_as_invalid_repository_state() {
+        let err = process_failure(
+            "cannot rebase: You have unstaged changes.\nPlease commit or stash them.\n",
+        );
+
+        let classified = classify_rebase_failure(err);
+
+        assert_eq!(classified.code(), ErrorCode::InvalidRepositoryState);
+        assert!(classified.remediation().unwrap().contains("stash"));
+    }
+
+    #[test]
+    fn leaves_an_unrelated_rebase_failure_unclassified() {
+        let err = process_failure("fatal: unrecognized input\n");
+
+        let classified = classify_rebase_failure(err);
+
+        assert_eq!(classified.code(), ErrorCode::ProcessFailure);
+    }
+
+    #[test]
+    fn classifies_a_skip_with_nothing_pending_as_invalid_repository_state() {
+        let err = process_failure("fatal: no rebase in progress?\n");
+
+        let classified = classify_skip_failure(err);
+
+        assert_eq!(classified.code(), ErrorCode::InvalidRepositoryState);
+    }
+
+    /// T-236/US-084 criterion 3: the todo list only ever carries the plan's
+    /// own action keyword and commit hash — a maliciously crafted subject
+    /// never becomes anything but a trailing, inert comment on its line.
+    #[test]
+    fn render_rebase_todo_treats_a_malicious_subject_as_inert_trailing_text() {
+        let commit = CommitHash::new("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").unwrap();
+        let short = ShortHash::new("aaaaaaa".to_string()).unwrap();
+        let entry = RebasePlanEntry::pick(commit, short, "evil\"; rm -rf / #\ninjected\r\nmore");
+
+        let (todo, rewords) = render_rebase_todo(&[entry]);
+
+        assert!(rewords.is_empty());
+        assert_eq!(
+            todo,
+            "pick aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa evil\"; rm -rf / # injected  more\n"
+        );
+        // Exactly one line: no embedded newline ever splits the todo list
+        // into a second, unintended line/command.
+        assert_eq!(todo.lines().count(), 1);
+    }
+
+    /// T-237/US-085 criterion 1: `Reword`'s message is queued in order and
+    /// never leaks into the todo line itself (it is applied later via a
+    /// dedicated `git commit --amend -m`, never through this file).
+    #[test]
+    fn render_rebase_todo_translates_reword_to_edit_and_queues_its_message() {
+        let commit = CommitHash::new("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb").unwrap();
+        let short = ShortHash::new("bbbbbbb".to_string()).unwrap();
+        let mut entry = RebasePlanEntry::pick(commit, short, "original subject");
+        entry.action = RebaseAction::Reword;
+        entry.message_override = Some("a new message; rm -rf /".to_string());
+
+        let (todo, mut rewords) = render_rebase_todo(&[entry]);
+
+        assert!(todo.starts_with("edit bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb "));
+        assert!(!todo.contains("rm -rf"));
+        assert_eq!(rewords.pop_front(), Some("a new message; rm -rf /".to_string()));
     }
 
     fn modified_file_diff() -> FileDiff {

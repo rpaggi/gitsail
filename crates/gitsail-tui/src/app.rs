@@ -17,7 +17,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use gitsail_application::{
     export_patch, ApplyPatchResult, BlameRequest, CommitQuery, DiffRequest, MergeResult, Page,
-    PatchPreview, PullOutcome, RefreshReason, RepositoryReadPort, RepositorySession,
+    PatchPreview, PullOutcome, RebaseResult, RefreshReason, RepositoryReadPort, RepositorySession,
 };
 use gitsail_domain::{
     Blame, Branch, BranchKind, BranchName, Commit, CommitGraph, CommitHash, ConflictSide,
@@ -367,6 +367,11 @@ pub struct App {
     /// always three distinct, explicit outcomes) — mirrors
     /// [`Self::last_pull_outcome`]'s own "transient banner" convention.
     last_merge_result: Option<MergeResult>,
+    /// The outcome of the last successful [`Action::RequestRebase`] (T-235/
+    /// US-083 criterion 3: completion and conflict are always two distinct,
+    /// explicit outcomes) — mirrors [`Self::last_merge_result`]'s own
+    /// "transient banner" convention.
+    last_rebase_result: Option<RebaseResult>,
 }
 
 impl App {
@@ -461,6 +466,7 @@ impl App {
             inspected_conflict: None,
             conflict_error: None,
             last_merge_result: None,
+            last_rebase_result: None,
         };
         (app, vec![Command::OpenRepository(repo_path)])
     }
@@ -528,6 +534,10 @@ impl App {
 
     pub fn last_merge_result(&self) -> Option<&MergeResult> {
         self.last_merge_result.as_ref()
+    }
+
+    pub fn last_rebase_result(&self) -> Option<&RebaseResult> {
+        self.last_rebase_result.as_ref()
     }
 
     pub fn should_quit(&self) -> bool {
@@ -965,6 +975,14 @@ impl App {
             }
             Action::RequestAbortOperation => {
                 self.request_abort_operation();
+                Vec::new()
+            }
+            Action::RequestRebase => {
+                self.request_rebase();
+                Vec::new()
+            }
+            Action::RequestSkipOperation => {
+                self.request_skip_operation();
                 Vec::new()
             }
         }
@@ -1654,6 +1672,47 @@ impl App {
         });
     }
 
+    /// Starts confirmation for rebasing the current branch onto the
+    /// highlighted reference (T-235/US-083 criterion 1: the current branch,
+    /// the chosen base, and the expected rewrite are all shown by the
+    /// resulting confirmation prompt before anything runs — the exact
+    /// commits to be reapplied are what [`OperationKind::Rebase`]'s own
+    /// target label, combined with [`Self::last_rebase_result`]'s prior
+    /// state, lets a presentation layer show). Reuses exactly the same
+    /// Sidebar branch search/selection mechanism [`Self::request_merge`]
+    /// already uses.
+    fn request_rebase(&mut self) {
+        if self.focus != Panel::Sidebar {
+            return;
+        }
+        let Some(branch) = self
+            .filtered_branches()
+            .get(self.sidebar_cursor)
+            .map(|b| (*b).clone())
+        else {
+            return;
+        };
+        self.last_rebase_result = None;
+        self.operation.begin(OperationKind::Rebase {
+            onto: branch.name.as_str().to_string(),
+        });
+    }
+
+    /// Starts confirmation to skip the current step of the pending operation
+    /// (T-235/US-083 criterion 3). A no-op when skip is not offered for
+    /// whatever is currently detected (e.g. a merge, which has no further
+    /// step to skip past) — mirrors [`Self::request_continue_operation`]/
+    /// [`Self::request_abort_operation`]'s own capability-gated convention.
+    fn request_skip_operation(&mut self) {
+        if !self
+            .in_progress_operation
+            .supports(OperationCapability::Skip)
+        {
+            return;
+        }
+        self.operation.begin(OperationKind::SkipOperation);
+    }
+
     /// Opens or closes the conflicts overlay (`M`, T-232/US-080 criterion 1;
     /// T-233/US-081). A no-op to open when nothing currently has conflicted
     /// files — there would be nothing to show.
@@ -1882,6 +1941,8 @@ impl App {
             OperationKind::Merge { target } => vec![Command::Merge(repo, target)],
             OperationKind::ContinueOperation => vec![Command::ContinueOperation(repo)],
             OperationKind::AbortOperation => vec![Command::AbortOperation(repo)],
+            OperationKind::Rebase { onto } => vec![Command::Rebase(repo, onto)],
+            OperationKind::SkipOperation => vec![Command::SkipOperation(repo)],
         }
     }
 
@@ -2194,6 +2255,29 @@ impl App {
             Ok(outcome) => {
                 self.operation.succeed();
                 self.last_merge_result = Some(outcome);
+                self.refresh_commands_for(RefreshReason::AfterMutation)
+            }
+            Err(error) => {
+                self.operation.fail(error);
+                Vec::new()
+            }
+        }
+    }
+
+    /// Handles [`crate::message::Message::RebaseFinished`] (T-235/US-083).
+    /// Success records the [`RebaseResult`] (criterion 3: completion and
+    /// conflict are always shown as two distinct, explicit outcomes — never
+    /// collapsed into a bare success, and a conflict is never reported as
+    /// one either) and refreshes, which is also what picks up the resulting
+    /// `InProgressOperation::Rebase` when the result was
+    /// [`RebaseResult::Conflict`]. A refused rebase (e.g. another operation
+    /// already in progress, or a dirty working tree) moves to `Failed` with
+    /// its message, exactly like [`Self::on_merge_finished`].
+    pub fn on_rebase_finished(&mut self, result: Result<RebaseResult, GitSailError>) -> Vec<Command> {
+        match result {
+            Ok(outcome) => {
+                self.operation.succeed();
+                self.last_rebase_result = Some(outcome);
                 self.refresh_commands_for(RefreshReason::AfterMutation)
             }
             Err(error) => {

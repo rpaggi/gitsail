@@ -9,5 +9,14 @@ gitsail-application = { path = "../gitsail-application" }
 gitsail-domain = { path = "../gitsail-domain" }
 tracing = "0.1"
 
+# T-236/US-084 criterion 3: a tiny, dedicated helper binary that
+# `GitCliProvider::execute_rebase_plan` points `GIT_SEQUENCE_EDITOR` at. It
+# takes no repository-derived input at all — see
+# `src/bin/gitsail_sequence_editor.rs`'s own doc for why that is exactly what
+# keeps the mechanism free of shell/command injection.
+[[bin]]
+name = "gitsail-sequence-editor"
+path = "src/bin/gitsail_sequence_editor.rs"
+
 [lints]
 workspace = true

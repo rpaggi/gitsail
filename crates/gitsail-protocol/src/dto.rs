@@ -13,7 +13,8 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use gitsail_application::{
-    AmendPreview, ApplyPatchResult, CommitDiff, MergeResult, PatchExport, PatchPreview, PullOutcome,
+    AmendPreview, ApplyPatchResult, CommitDiff, MergeResult, PatchExport, PatchPreview,
+    PullOutcome, RebaseResult,
     RecentRepositoryEntry,
 };
 use gitsail_domain::{
@@ -710,6 +711,37 @@ impl From<&MergeResult> for MergeResultDto {
                 hash: hash.as_str().to_string(),
             },
             MergeResult::Conflict { files } => Self::Conflict {
+                conflicted_files: conflicted_files_dto(files),
+            },
+        }
+    }
+}
+
+/// A rebase's exact outcome (T-235/US-083 criterion 3): completion and
+/// conflict are always two distinct, explicit variants — a conflict is
+/// never collapsed into a bare success or a generic error. Mirrors
+/// [`RebaseResult`] one-to-one, matching [`MergeResultDto`]'s own
+/// convention.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "outcome", rename_all = "camelCase")]
+pub enum RebaseResultDto {
+    Completed {
+        #[serde(rename = "newHead")]
+        new_head: String,
+    },
+    Conflict {
+        #[serde(rename = "conflictedFiles")]
+        conflicted_files: Vec<ConflictedFileDto>,
+    },
+}
+
+impl From<&RebaseResult> for RebaseResultDto {
+    fn from(result: &RebaseResult) -> Self {
+        match result {
+            RebaseResult::Completed { new_head } => Self::Completed {
+                new_head: new_head.as_str().to_string(),
+            },
+            RebaseResult::Conflict { files } => Self::Conflict {
                 conflicted_files: conflicted_files_dto(files),
             },
         }

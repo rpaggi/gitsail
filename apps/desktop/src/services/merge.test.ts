@@ -8,9 +8,16 @@ import {
   getConflictSides,
   markConflictResolved,
   merge,
+  rebase,
+  skipOperation,
   takeConflictSide,
 } from "./merge";
-import type { ConflictSidesDto, InProgressOperationDto, MergeResultDto } from "./dto";
+import type {
+  ConflictSidesDto,
+  InProgressOperationDto,
+  MergeResultDto,
+  RebaseResultDto,
+} from "./dto";
 
 describe("merge service", () => {
   afterEach(() => {
@@ -127,6 +134,38 @@ describe("merge service", () => {
     await abortOperation();
 
     expect(receivedCommand).toBe("abort_operation");
+    expect(receivedArgs).toEqual({});
+  });
+
+  it("rebase invokes the rebase command with the exact onto revision", async () => {
+    let receivedCommand = "";
+    let receivedArgs: unknown;
+    const outcome: RebaseResultDto = { outcome: "completed", newHead: "a".repeat(40) };
+    mockIPC((cmd, args) => {
+      receivedCommand = cmd;
+      receivedArgs = args;
+      return outcome;
+    });
+
+    const result = await rebase("main");
+
+    expect(receivedCommand).toBe("rebase");
+    expect(receivedArgs).toEqual({ ontoRevision: "main" });
+    expect(result).toEqual(outcome);
+  });
+
+  it("skipOperation invokes skip_operation with no arguments", async () => {
+    let receivedCommand = "";
+    let receivedArgs: unknown;
+    mockIPC((cmd, args) => {
+      receivedCommand = cmd;
+      receivedArgs = args;
+      return null;
+    });
+
+    await skipOperation();
+
+    expect(receivedCommand).toBe("skip_operation");
     expect(receivedArgs).toEqual({});
   });
 });

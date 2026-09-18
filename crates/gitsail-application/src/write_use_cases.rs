@@ -13,8 +13,8 @@ use gitsail_domain::{
 
 use crate::mutation::Precondition;
 use crate::write_ports::{
-    ApplyPatchResult, MergeResult, PatchPreview, PullOutcome, RepositoryWritePort,
-    StashApplyOutcome, StashScope, TagAnnotation, WorktreeBranchSpec,
+    ApplyPatchResult, MergeResult, PatchPreview, PullOutcome, RebasePlan, RebaseResult,
+    RepositoryWritePort, StashApplyOutcome, StashScope, TagAnnotation, WorktreeBranchSpec,
 };
 
 pub struct StageFiles {
@@ -532,6 +532,70 @@ impl AbortOperation {
 
     pub fn execute(&self, repo: &Repository) -> Result<(), GitSailError> {
         self.port.abort_operation(repo)
+    }
+}
+
+/// Reapplies the current branch's commits onto another base (T-235/US-083).
+/// See [`RepositoryWritePort::rebase`].
+pub struct Rebase {
+    port: Arc<dyn RepositoryWritePort>,
+}
+
+impl Rebase {
+    pub fn new(port: Arc<dyn RepositoryWritePort>) -> Self {
+        Self { port }
+    }
+
+    pub fn execute(&self, repo: &Repository, onto_revision: &str) -> Result<RebaseResult, GitSailError> {
+        self.port.rebase(repo, onto_revision)
+    }
+}
+
+/// Skips the current step of whichever operation is pending (T-235/US-083).
+/// See [`RepositoryWritePort::skip_operation`].
+pub struct SkipOperation {
+    port: Arc<dyn RepositoryWritePort>,
+}
+
+impl SkipOperation {
+    pub fn new(port: Arc<dyn RepositoryWritePort>) -> Self {
+        Self { port }
+    }
+
+    pub fn execute(&self, repo: &Repository) -> Result<(), GitSailError> {
+        self.port.skip_operation(repo)
+    }
+}
+
+/// Reads a non-mutating interactive rebase plan (T-236/US-084). See
+/// [`RepositoryWritePort::plan_rebase`].
+pub struct PlanRebase {
+    port: Arc<dyn RepositoryWritePort>,
+}
+
+impl PlanRebase {
+    pub fn new(port: Arc<dyn RepositoryWritePort>) -> Self {
+        Self { port }
+    }
+
+    pub fn execute(&self, repo: &Repository, onto_revision: &str) -> Result<RebasePlan, GitSailError> {
+        self.port.plan_rebase(repo, onto_revision)
+    }
+}
+
+/// Applies a previously built/edited interactive rebase plan (T-236/US-084;
+/// T-237/US-085). See [`RepositoryWritePort::execute_rebase_plan`].
+pub struct ExecuteRebasePlan {
+    port: Arc<dyn RepositoryWritePort>,
+}
+
+impl ExecuteRebasePlan {
+    pub fn new(port: Arc<dyn RepositoryWritePort>) -> Self {
+        Self { port }
+    }
+
+    pub fn execute(&self, repo: &Repository, plan: &RebasePlan) -> Result<RebaseResult, GitSailError> {
+        self.port.execute_rebase_plan(repo, plan)
     }
 }
 
@@ -1913,5 +1977,230 @@ mod tests {
             .unwrap_err();
 
         assert_eq!(err.code(), ErrorCode::InvalidRepositoryState);
+    }
+
+    // -----------------------------------------------------------------
+    // EPIC-17/T-235..T-237: Rebase, SkipOperation, PlanRebase,
+    // ExecuteRebasePlan. A dedicated, smaller fake — `FakeWritePort` above
+    // predates this epic and does not override these methods (they would
+    // just hit the trait's own `unsupported` default), so a fresh double
+    // exercises real delegation instead.
+    // -----------------------------------------------------------------
+
+    struct FakeRebasePort {
+        fail: bool,
+        received_rebase_onto: Mutex<Option<String>>,
+        rebase_result: RebaseResult,
+        received_skip: Mutex<bool>,
+        received_plan_onto: Mutex<Option<String>>,
+        plan: RebasePlan,
+        received_execute_plan: Mutex<Option<RebasePlan>>,
+        execute_result: RebaseResult,
+    }
+
+    fn sample_rebase_plan() -> RebasePlan {
+        RebasePlan {
+            onto_revision: "main".to_string(),
+            onto: CommitHash::new("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").unwrap(),
+            branch_head: CommitHash::new("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb").unwrap(),
+            entries: vec![],
+        }
+    }
+
+    impl FakeRebasePort {
+        fn new() -> Self {
+            Self {
+                fail: false,
+                received_rebase_onto: Mutex::new(None),
+                rebase_result: RebaseResult::Completed {
+                    new_head: CommitHash::new("cafef00dcafef00dcafef00dcafef00dcafef00").unwrap(),
+                },
+                received_skip: Mutex::new(false),
+                received_plan_onto: Mutex::new(None),
+                plan: sample_rebase_plan(),
+                received_execute_plan: Mutex::new(None),
+                execute_result: RebaseResult::Completed {
+                    new_head: CommitHash::new("cafef00dcafef00dcafef00dcafef00dcafef00").unwrap(),
+                },
+            }
+        }
+
+        fn failing() -> Self {
+            Self {
+                fail: true,
+                ..Self::new()
+            }
+        }
+    }
+
+    impl RepositoryWritePort for FakeRebasePort {
+        fn stage_files(&self, _repo: &Repository, _paths: &[PathBuf]) -> Result<(), GitSailError> {
+            unimplemented!("not exercised by these tests")
+        }
+        fn unstage_files(&self, _repo: &Repository, _paths: &[PathBuf]) -> Result<(), GitSailError> {
+            unimplemented!("not exercised by these tests")
+        }
+        fn create_commit(&self, _repo: &Repository, _message: &str) -> Result<CommitHash, GitSailError> {
+            unimplemented!("not exercised by these tests")
+        }
+        fn stage_hunks(&self, _repo: &Repository, _selection: &[FileDiff]) -> Result<(), GitSailError> {
+            unimplemented!("not exercised by these tests")
+        }
+        fn unstage_hunks(&self, _repo: &Repository, _selection: &[FileDiff]) -> Result<(), GitSailError> {
+            unimplemented!("not exercised by these tests")
+        }
+        fn switch_branch(&self, _repo: &Repository, _target: &BranchName) -> Result<(), GitSailError> {
+            unimplemented!("not exercised by these tests")
+        }
+        fn create_branch(
+            &self,
+            _repo: &Repository,
+            _name: &BranchName,
+            _start_point: Option<&CommitHash>,
+        ) -> Result<(), GitSailError> {
+            unimplemented!("not exercised by these tests")
+        }
+        fn delete_branch(
+            &self,
+            _repo: &Repository,
+            _name: &BranchName,
+            _force: bool,
+        ) -> Result<(), GitSailError> {
+            unimplemented!("not exercised by these tests")
+        }
+        fn rename_branch(
+            &self,
+            _repo: &Repository,
+            _old_name: &BranchName,
+            _new_name: &BranchName,
+        ) -> Result<(), GitSailError> {
+            unimplemented!("not exercised by these tests")
+        }
+        fn amend_commit(
+            &self,
+            _repo: &Repository,
+            _message: &str,
+            _expected_head: &CommitHash,
+        ) -> Result<CommitHash, GitSailError> {
+            unimplemented!("not exercised by these tests")
+        }
+
+        fn rebase(&self, _repo: &Repository, onto_revision: &str) -> Result<RebaseResult, GitSailError> {
+            *self.received_rebase_onto.lock().unwrap() = Some(onto_revision.to_string());
+            if self.fail {
+                return Err(GitSailError::new(ErrorCode::OperationConflict, "dirty working tree"));
+            }
+            Ok(self.rebase_result.clone())
+        }
+
+        fn skip_operation(&self, _repo: &Repository) -> Result<(), GitSailError> {
+            *self.received_skip.lock().unwrap() = true;
+            if self.fail {
+                return Err(GitSailError::new(
+                    ErrorCode::InvalidRepositoryState,
+                    "skip is unsupported for this operation",
+                ));
+            }
+            Ok(())
+        }
+
+        fn plan_rebase(&self, _repo: &Repository, onto_revision: &str) -> Result<RebasePlan, GitSailError> {
+            *self.received_plan_onto.lock().unwrap() = Some(onto_revision.to_string());
+            if self.fail {
+                return Err(GitSailError::new(ErrorCode::RepositoryNotFound, "bad revision"));
+            }
+            Ok(self.plan.clone())
+        }
+
+        fn execute_rebase_plan(
+            &self,
+            _repo: &Repository,
+            plan: &RebasePlan,
+        ) -> Result<RebaseResult, GitSailError> {
+            *self.received_execute_plan.lock().unwrap() = Some(plan.clone());
+            if self.fail {
+                return Err(GitSailError::new(ErrorCode::OperationConflict, "plan is stale"));
+            }
+            Ok(self.execute_result.clone())
+        }
+    }
+
+    #[test]
+    fn rebase_delegates_to_port_with_the_exact_onto_revision() {
+        let port = Arc::new(FakeRebasePort::new());
+        let use_case = Rebase::new(port.clone());
+
+        let result = use_case.execute(&sample_repository(), "main").unwrap();
+
+        assert_eq!(*port.received_rebase_onto.lock().unwrap(), Some("main".to_string()));
+        assert_eq!(result, port.rebase_result);
+    }
+
+    #[test]
+    fn rebase_propagates_a_port_error_without_a_false_success() {
+        let port = Arc::new(FakeRebasePort::failing());
+        let use_case = Rebase::new(port);
+
+        let err = use_case.execute(&sample_repository(), "main").unwrap_err();
+
+        assert_eq!(err.code(), ErrorCode::OperationConflict);
+    }
+
+    #[test]
+    fn skip_operation_delegates_to_port() {
+        let port = Arc::new(FakeRebasePort::new());
+        let use_case = SkipOperation::new(port.clone());
+
+        use_case.execute(&sample_repository()).unwrap();
+
+        assert!(*port.received_skip.lock().unwrap());
+    }
+
+    #[test]
+    fn skip_operation_propagates_an_unsupported_error_without_a_false_success() {
+        let port = Arc::new(FakeRebasePort::failing());
+        let use_case = SkipOperation::new(port);
+
+        let err = use_case.execute(&sample_repository()).unwrap_err();
+
+        assert_eq!(err.code(), ErrorCode::InvalidRepositoryState);
+    }
+
+    #[test]
+    fn plan_rebase_delegates_to_port_and_returns_its_plan() {
+        let port = Arc::new(FakeRebasePort::new());
+        let use_case = PlanRebase::new(port.clone());
+
+        let plan = use_case.execute(&sample_repository(), "develop").unwrap();
+
+        assert_eq!(
+            *port.received_plan_onto.lock().unwrap(),
+            Some("develop".to_string())
+        );
+        assert_eq!(plan, port.plan);
+    }
+
+    #[test]
+    fn execute_rebase_plan_delegates_to_port_with_the_exact_plan() {
+        let port = Arc::new(FakeRebasePort::new());
+        let use_case = ExecuteRebasePlan::new(port.clone());
+        let plan = sample_rebase_plan();
+
+        let result = use_case.execute(&sample_repository(), &plan).unwrap();
+
+        assert_eq!(*port.received_execute_plan.lock().unwrap(), Some(plan));
+        assert_eq!(result, port.execute_result);
+    }
+
+    #[test]
+    fn execute_rebase_plan_propagates_a_stale_plan_error_without_a_false_success() {
+        let port = Arc::new(FakeRebasePort::failing());
+        let use_case = ExecuteRebasePlan::new(port);
+
+        let err = use_case
+            .execute(&sample_repository(), &sample_rebase_plan())
+            .unwrap_err();
+
+        assert_eq!(err.code(), ErrorCode::OperationConflict);
     }
 }

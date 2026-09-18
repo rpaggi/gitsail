@@ -180,6 +180,7 @@ fn run(
             Message::OperationResolutionFinished(result) => {
                 app.on_operation_resolution_finished(result)
             }
+            Message::RebaseFinished(result) => app.on_rebase_finished(result),
         };
         worker::dispatch(commands, &read_port, &write_port, &tx);
 

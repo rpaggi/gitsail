@@ -197,6 +197,26 @@ pub enum MutationKind {
         path: PathBuf,
         side: ConflictSide,
     },
+    /// EPIC-17/T-235 (US-083): `RepositoryWritePort::rebase`. Carries the
+    /// target base so a confirmation prompt names it explicitly, never a
+    /// generic "rebase" (mirrors [`Self::Merge`]'s own rationale).
+    Rebase {
+        onto: String,
+    },
+    /// EPIC-17/T-235 (US-083): `RepositoryWritePort::skip_operation`.
+    /// Generic across whichever sequencer operation is actually detected
+    /// (the port method itself dispatches, mirroring
+    /// [`Self::ContinueOperation`]), so this carries no per-kind data.
+    SkipOperation,
+    /// EPIC-17/T-236/T-237 (US-084/US-085):
+    /// `RepositoryWritePort::execute_rebase_plan`. Carries the target base
+    /// and the number of commits the plan reapplies so a confirmation
+    /// prompt names concrete scope, never a generic "rebase" (mirrors
+    /// [`Self::ApplyPatch`]'s own `affected_file_count` convention).
+    ExecuteRebasePlan {
+        onto: String,
+        commit_count: usize,
+    },
 }
 
 impl MutationKind {
@@ -345,6 +365,25 @@ impl MutationKind {
             // via `conflict_sides` until continue/abort concludes the
             // operation), hence `Moderate` rather than `Destructive`.
             MutationKind::TakeConflictSide { .. } => RiskLevel::Moderate,
+            // SAD §20's own named `Moderate` example includes merge, and
+            // this task's own scope note classifies a plain rebase the same
+            // way: it mutates the current branch's history (every replayed
+            // commit gets a new hash), but a confirmed, non-conflicting
+            // rebase is the ordinary, expected case, and a conflict is never
+            // silently lost work either — it lands in `RebaseResult::Conflict`,
+            // fully recoverable via continue/skip/abort, not a "hard to
+            // reverse" `Destructive` outcome (Git's own `ORIG_HEAD`/reflog
+            // also keep the pre-rebase tip reachable for a real mistake).
+            MutationKind::Rebase { .. } => RiskLevel::Moderate,
+            // Mirrors `ContinueOperation`: deliberately advancing past the
+            // current step of an already-confirmed, in-progress operation.
+            MutationKind::SkipOperation => RiskLevel::Moderate,
+            // An interactive rebase plan (reorder/reword/squash/fixup/drop)
+            // is a richer rebase, not a different character of operation —
+            // see `MutationKind::Rebase`'s own rationale, which applies
+            // identically here (same recoverability via continue/skip/abort
+            // mid-flight, and via `ORIG_HEAD`/reflog once finished).
+            MutationKind::ExecuteRebasePlan { .. } => RiskLevel::Moderate,
         }
     }
 
@@ -403,6 +442,12 @@ impl MutationKind {
                 };
                 format!("'{}' (take {side_label})", path.display())
             }
+            MutationKind::Rebase { onto } => format!("rebasing the current branch onto '{onto}'"),
+            MutationKind::SkipOperation => "the current step of the in-progress operation".to_string(),
+            MutationKind::ExecuteRebasePlan { onto, commit_count } => format!(
+                "rebasing {commit_count} commit{} onto '{onto}'",
+                if *commit_count == 1 { "" } else { "s" }
+            ),
         }
     }
 }
@@ -720,6 +765,32 @@ mod tests {
         assert_eq!(take_ours.risk(), RiskLevel::Moderate);
         assert!(take_ours.target_label().contains("image.png"));
         assert!(take_ours.target_label().contains("ours"));
+    }
+
+    /// EPIC-17/T-235..T-237: `Rebase`/`SkipOperation`/`ExecuteRebasePlan` all
+    /// classify `Moderate` (mutates history/advances a sequencer step, but a
+    /// conflict is never silently lost work — see this module's own
+    /// rationale comments), and their labels always name the concrete base/
+    /// commit count rather than a generic "rebase".
+    #[test]
+    fn rebase_operations_classify_moderate_with_concrete_target_labels() {
+        let rebase = MutationKind::Rebase {
+            onto: "main".into(),
+        };
+        assert_eq!(rebase.risk(), RiskLevel::Moderate);
+        assert!(!rebase.risk().requires_reinforced_confirmation());
+        assert!(rebase.target_label().contains("main"));
+
+        assert_eq!(MutationKind::SkipOperation.risk(), RiskLevel::Moderate);
+
+        let plan = MutationKind::ExecuteRebasePlan {
+            onto: "develop".into(),
+            commit_count: 3,
+        };
+        assert_eq!(plan.risk(), RiskLevel::Moderate);
+        let label = plan.target_label();
+        assert!(label.contains("develop"));
+        assert!(label.contains('3'));
     }
 
     #[test]

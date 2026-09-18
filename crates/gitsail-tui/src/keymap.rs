@@ -106,6 +106,7 @@ pub fn action_for(key: KeyEvent, ctx: InputContext) -> Option<Action> {
             KeyCode::Char('t') => Some(Action::TakeConflictSideTheirs),
             KeyCode::Char('c') => Some(Action::RequestContinueOperation),
             KeyCode::Char('a') => Some(Action::RequestAbortOperation),
+            KeyCode::Char('s') => Some(Action::RequestSkipOperation),
             _ => None,
         },
         InputContext::Normal => match key.code {
@@ -136,6 +137,7 @@ pub fn action_for(key: KeyEvent, ctx: InputContext) -> Option<Action> {
             KeyCode::Char('t') => Some(Action::CycleReferenceView),
             KeyCode::Char('m') => Some(Action::RequestMerge),
             KeyCode::Char('M') => Some(Action::ToggleConflictsPanel),
+            KeyCode::Char('o') => Some(Action::RequestRebase),
             _ => None,
         },
     }
@@ -352,6 +354,21 @@ mod tests {
         assert_eq!(
             action_for(press(KeyCode::Char('M')), InputContext::Normal),
             Some(Action::ToggleConflictsPanel)
+        );
+    }
+
+    /// T-235/US-083: `o` requests a rebase in the Normal context (reusing
+    /// the same sidebar branch picker `m`/`RequestMerge` already uses), and
+    /// `s` requests skip within the conflicts overlay.
+    #[test]
+    fn rebase_and_skip_keys_map_in_their_own_contexts() {
+        assert_eq!(
+            action_for(press(KeyCode::Char('o')), InputContext::Normal),
+            Some(Action::RequestRebase)
+        );
+        assert_eq!(
+            action_for(press(KeyCode::Char('s')), InputContext::Conflicts),
+            Some(Action::RequestSkipOperation)
         );
     }
 

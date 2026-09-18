@@ -3,7 +3,7 @@
 //! (SAD §18: "... return typed messages/events").
 
 use gitsail_application::{
-    ApplyPatchResult, MergeResult, Page, PatchPreview, PullOutcome, RefreshTicket,
+    ApplyPatchResult, MergeResult, Page, PatchPreview, PullOutcome, RebaseResult, RefreshTicket,
 };
 use gitsail_domain::{
     Blame, Branch, Commit, CommitHash, ConflictSides, Diff, GitSailError, InProgressOperation,
@@ -101,4 +101,10 @@ pub enum Message {
     /// message only carries whether the Git command itself exited
     /// successfully, never a presumption that the operation fully concluded.
     OperationResolutionFinished(Result<(), GitSailError>),
+    /// [`crate::worker::Command::Rebase`] completed (T-235/US-083). Carries
+    /// the [`RebaseResult`] on success — distinct from
+    /// [`Self::OperationFinished`] so completion/conflict are always two
+    /// distinct, explicit outcomes, never collapsed into a bare
+    /// success/failure (mirrors [`Self::MergeFinished`]'s own reasoning).
+    RebaseFinished(Result<RebaseResult, GitSailError>),
 }

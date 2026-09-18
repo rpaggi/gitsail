@@ -1,14 +1,23 @@
 <script setup lang="ts">
-// Merge, conflict resolution, and continue/abort (EPIC-16/T-231..T-233).
-// Mirrors `gitsail-tui`'s own T-231/T-232/T-233 wiring: a merge target is
-// chosen through the same branch list `BranchPanel.vue` already lists (no
-// bespoke picker), the fast-forward/merge-commit/conflict outcome is always
-// shown as its own distinct, persistent banner (never collapsed into the
-// generic "Completed successfully" the shared `ConfirmationDialog.vue`
-// shows for every operation — mirrors how `SyncPanel.vue`'s own
-// `lastPullResult` banner already works for `pull`), and every mutation
-// goes through `stores/operation.ts`'s shared confirm/run/result flow —
-// this component never calls `services/merge.ts` directly.
+// Merge, conflict resolution, continue/abort (EPIC-16/T-231..T-233), and
+// rebase/skip (EPIC-17/T-235). Mirrors `gitsail-tui`'s own wiring: a merge/
+// rebase target is chosen through the same branch list `BranchPanel.vue`
+// already lists (no bespoke picker), the outcome is always shown as its own
+// distinct, persistent banner (never collapsed into the generic "Completed
+// successfully" the shared `ConfirmationDialog.vue` shows for every
+// operation — mirrors how `SyncPanel.vue`'s own `lastPullResult` banner
+// already works for `pull`), and every mutation goes through
+// `stores/operation.ts`'s shared confirm/run/result flow — this component
+// never calls `services/merge.ts` directly.
+//
+// Rebase is folded into this same panel rather than a separate
+// `RebasePanel.vue`: it reuses the identical conflicts-resolution section
+// below (a rebase conflict is inspected/resolved exactly like a merge
+// conflict) and the identical continue/abort block, now extended with
+// skip — splitting it into its own component would only duplicate that
+// markup and the `merge-panel__conflicts`/`merge-panel__actions` styling
+// for no distinct concern (see `stores/merge.ts`'s own note on why the
+// store itself stayed one store).
 
 import { computed, onMounted, ref } from "vue";
 
@@ -20,6 +29,7 @@ const branches = useBranchesStore();
 const merge = useMergeStore();
 
 const mergeTarget = ref("");
+const rebaseTarget = ref("");
 
 /** The path currently expanded for inspection (T-232/US-080 criterion 2) —
  * distinct from `merge.inspectedPath`, which is only set once the sides
@@ -69,6 +79,14 @@ function requestMerge(): void {
   void merge.requestMerge(target);
 }
 
+function requestRebase(): void {
+  const target = rebaseTarget.value.trim();
+  if (target.length === 0) {
+    return;
+  }
+  void merge.requestRebase(target);
+}
+
 async function toggleInspect(path: string): Promise<void> {
   if (expandedPath.value === path) {
     expandedPath.value = null;
@@ -110,6 +128,27 @@ onMounted(() => {
       </template>
     </p>
 
+    <h3>Rebase</h3>
+
+    <div class="merge-panel__request">
+      <select v-model="rebaseTarget">
+        <option value="" disabled>Choose a base…</option>
+        <option v-for="branch in branches.branches" :key="branch.name" :value="branch.name">
+          {{ branch.name }}{{ branch.isCurrent ? " (current)" : "" }}
+        </option>
+      </select>
+      <button :disabled="rebaseTarget.trim().length === 0" @click="requestRebase">Rebase current onto…</button>
+    </div>
+
+    <p v-if="merge.lastRebaseResult" class="merge-panel__result" :class="{ conflict: merge.lastRebaseResult.outcome === 'conflict' }">
+      <template v-if="merge.lastRebaseResult.outcome === 'completed'">
+        Rebased onto {{ merge.lastRebaseResult.newHead.slice(0, 8) }}.
+      </template>
+      <template v-else>
+        CONFLICT — {{ merge.lastRebaseResult.conflictedFiles.length }} file(s) need resolution below.
+      </template>
+    </p>
+
     <section v-if="merge.hasConflicts" class="merge-panel__conflicts">
       <h4>Conflicted files ({{ conflictedFiles.length }})</h4>
       <ul>
@@ -140,6 +179,7 @@ onMounted(() => {
 
     <div v-if="merge.inProgressOperation.kind !== 'none'" class="merge-panel__actions">
       <button :disabled="!merge.supportsContinue" @click="merge.requestContinue()">Continue</button>
+      <button :disabled="!merge.supportsSkip" @click="merge.requestSkip()">Skip</button>
       <button :disabled="!merge.supportsAbort" @click="merge.requestAbort()">Abort</button>
     </div>
   </div>

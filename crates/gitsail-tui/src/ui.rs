@@ -6,7 +6,7 @@
 //! reaching a widget (SAD §33) — this module is the render boundary that
 //! rule applies at; `App` itself always holds the raw value.
 
-use gitsail_application::{MergeResult, PullOutcome};
+use gitsail_application::{MergeResult, PullOutcome, RebaseResult};
 use gitsail_domain::{
     BlameOrigin, BranchKind, Commit, ConflictSideContent, ConflictStage, DiffLineOrigin,
     GitTimestamp, TagKind,
@@ -646,7 +646,7 @@ fn render_shortcuts(frame: &mut Frame, rect: Rect, app: &App) {
     } else if app.reference_details_open() {
         "Esc/q closes reference details".to_string()
     } else if app.conflicts_open() {
-        "j/k select · Enter inspects · r resolves · o/t take ours/theirs · c continue · a abort · Esc closes"
+        "j/k select · Enter inspects · r resolves · o/t take ours/theirs · c continue · a abort · s skip · Esc closes"
             .to_string()
     } else if app.in_progress_operation().has_conflicts() {
         format!(
@@ -954,6 +954,25 @@ fn render_operation_overlay(frame: &mut Frame, area: Rect, app: &App) {
         }
     }
 
+    // T-235/US-083 criterion 3: completion and conflict are always two
+    // distinct, explicit lines for a rebase too, mirroring the merge block
+    // above exactly.
+    if matches!(kind, OperationKind::Rebase { .. }) {
+        if let Some(outcome) = app.last_rebase_result() {
+            let text = match outcome {
+                RebaseResult::Completed { new_head } => {
+                    format!("rebased onto {}", new_head.to_short(8).as_str())
+                }
+                RebaseResult::Conflict { files } => format!(
+                    "CONFLICT — {} file{} need resolution (press 'M' once dismissed)",
+                    files.len(),
+                    if files.len() == 1 { "" } else { "s" }
+                ),
+            };
+            lines.push(Line::from(text));
+        }
+    }
+
     if let Some(error) = error_line {
         lines.push(Line::from(error));
     }
@@ -1032,6 +1051,9 @@ fn render_conflicts_overlay(frame: &mut Frame, area: Rect, app: &App) {
     }
     if operation.supports(gitsail_domain::OperationCapability::Abort) {
         actions.push("a aborts".to_string());
+    }
+    if operation.supports(gitsail_domain::OperationCapability::Skip) {
+        actions.push("s skips".to_string());
     }
     actions.push("Esc/q closes".to_string());
     lines.push(Line::from(actions.join(" · ")));

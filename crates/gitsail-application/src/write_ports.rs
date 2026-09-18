@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 
 use gitsail_domain::{
     BranchName, CancellationToken, CommitHash, ConflictSide, ConflictedFile, ErrorCode, FileDiff,
-    GitSailError, Repository, Stash, Worktree,
+    GitSailError, Repository, ShortHash, Stash, Worktree,
 };
 
 use crate::mutation::Precondition;
@@ -183,6 +183,196 @@ pub enum MergeResult {
     /// merge (`InProgressOperation::Merge`) for T-232/T-233's continue/abort
     /// flow to pick up.
     Conflict { files: Vec<ConflictedFile> },
+}
+
+/// Outcome of [`RepositoryWritePort::rebase`]/
+/// [`RepositoryWritePort::execute_rebase_plan`] (T-235/US-083 criterion 3;
+/// EPIC-17): completion and conflict are always reported as two distinct,
+/// explicit results — never collapsed into one another, and a conflict is
+/// never reported as a completed success (History Editing Rules #1, mirrors
+/// [`MergeResult`]'s own convention exactly).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RebaseResult {
+    /// The rebase (whether a plain [`RepositoryWritePort::rebase`] or a full
+    /// [`RepositoryWritePort::execute_rebase_plan`]) completed: `new_head` is
+    /// the current branch's resulting tip.
+    Completed { new_head: CommitHash },
+    /// The rebase could not proceed automatically: `files` are left unmerged
+    /// in the index, exactly as
+    /// [`crate::ports::RepositoryReadPort::detect_in_progress_operation`]
+    /// would also report them, and the repository is left with a pending
+    /// rebase ([`gitsail_domain::InProgressOperation::Rebase`]) for
+    /// continue/skip/abort to pick up (T-233's `continue_operation`/
+    /// `abort_operation`, and this epic's own
+    /// [`RepositoryWritePort::skip_operation`]).
+    Conflict { files: Vec<ConflictedFile> },
+}
+
+/// One action assignable to a commit in a [`RebasePlan`] (T-236/US-084
+/// criterion 1). `Edit` is deliberately not modeled — a documented scope cut
+/// (task note): every other action a person would actually reach for before
+/// sharing history — reorder, rename a message, fold two commits together
+/// (keeping both messages, or discarding the folded one), or drop a commit
+/// outright — is covered, and stopping mid-rebase to hand-edit a commit's
+/// *content* (rather than just its message) is a materially different,
+/// larger capability left for a future story.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RebaseAction {
+    Pick,
+    Reword,
+    Squash,
+    Fixup,
+    Drop,
+}
+
+/// One commit's position and assigned action within a [`RebasePlan`]
+/// (T-236/US-084).
+///
+/// `message_override` exists solely for [`RebaseAction::Reword`] — carrying
+/// the replacement message — and [`RebasePlan::validate`] rejects it being
+/// set for any other action (T-237/US-085 criterion 1): a squash keeps
+/// *both* commits' messages, combined by Git's own default combining, and a
+/// fixup discards the folded commit's message outright and keeps the
+/// earlier one — both are Git's own ordinary interactive-rebase behavior,
+/// selected by the plan's action keyword alone, never by supplying a message
+/// here. This is also exactly what keeps the execution mechanism
+/// injection-safe (see [`RepositoryWritePort::execute_rebase_plan`]'s doc):
+/// `message_override`'s text — like `subject` below, and like every commit
+/// message this workspace already handles via `create_commit`/
+/// `amend_commit` — only ever becomes a `-m <text>` argv element passed
+/// directly to a child process, never a string interpolated into a shell
+/// command.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RebasePlanEntry {
+    pub commit: CommitHash,
+    pub short_hash: ShortHash,
+    /// The commit's current subject line, for display only — inert data a
+    /// presentation layer shows next to the assigned action; never
+    /// interpreted as anything but text (see this struct's own doc on why
+    /// that holds even for a maliciously crafted subject).
+    pub subject: String,
+    pub action: RebaseAction,
+    pub message_override: Option<String>,
+}
+
+impl RebasePlanEntry {
+    /// A plain `Pick` entry for `commit`/`short_hash`/`subject`, the default
+    /// [`RepositoryWritePort::plan_rebase`] assigns to every candidate commit
+    /// before a person reassigns any of them (T-236/US-084 criterion 1).
+    pub fn pick(commit: CommitHash, short_hash: ShortHash, subject: impl Into<String>) -> Self {
+        Self {
+            commit,
+            short_hash,
+            subject: subject.into(),
+            action: RebaseAction::Pick,
+            message_override: None,
+        }
+    }
+}
+
+/// A non-mutating rebase plan built by [`RepositoryWritePort::plan_rebase`]
+/// (T-236/US-084 criterion 1): the candidate commit range the current branch
+/// would reapply onto `onto`, oldest first (matching Git's own interactive
+/// rebase todo-list order — the order its commands actually apply in), each
+/// defaulted to [`RebaseAction::Pick`] until a caller reassigns it, together
+/// with the exact state ([`Self::onto`]/[`Self::branch_head`]) the plan was
+/// built against.
+///
+/// [`RepositoryWritePort::execute_rebase_plan`] revalidates both
+/// [`Self::onto`] (re-resolving [`Self::onto_revision`]) and
+/// [`Self::branch_head`] (against the current `HEAD`) immediately before
+/// applying anything — the same [`crate::mutation::Precondition`] discipline
+/// [`RepositoryWritePort::amend_commit`]'s `expected_head` already applies to
+/// `HEAD` alone, extended here to the plan's base too (T-236/US-084
+/// criterion 2): a plan built against an old resolution of a moving ref (or
+/// an old `HEAD`) must never silently execute against a newer one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RebasePlan {
+    /// The revision text the plan was built against (e.g. a branch name),
+    /// kept so [`RepositoryWritePort::execute_rebase_plan`] can re-resolve it
+    /// for revalidation — see this struct's own doc.
+    pub onto_revision: String,
+    /// `onto_revision`'s resolved commit at the time this plan was built.
+    pub onto: CommitHash,
+    /// `HEAD`'s commit at the time this plan was built.
+    pub branch_head: CommitHash,
+    pub entries: Vec<RebasePlanEntry>,
+}
+
+impl RebasePlan {
+    /// Validates action/position/message invariants that must hold before
+    /// this plan can ever be executed (T-236/US-084 criterion 1; T-237/
+    /// US-085 criteria 1, 2) — pure and independent of any repository state,
+    /// so a presentation layer can call this the moment a person edits the
+    /// plan, without a round trip to [`RepositoryWritePort::execute_rebase_plan`].
+    ///
+    /// Rejects, with a clear [`gitsail_domain::ErrorCode::InvalidRepositoryState`]:
+    /// - [`RebaseAction::Squash`]/[`RebaseAction::Fixup`] at position 0
+    ///   (US-085 criterion 2: there is no preceding commit in the plan to
+    ///   combine it into).
+    /// - [`RebaseAction::Reword`] without a non-empty
+    ///   [`RebasePlanEntry::message_override`].
+    /// - `message_override` set for any action other than
+    ///   [`RebaseAction::Reword`] (US-085 criterion 1's own distinction —
+    ///   squash/fixup's message handling always comes from Git's own
+    ///   default combining, never a supplied override).
+    ///
+    /// Deliberately does not require `entries` to be non-empty: a plan with
+    /// nothing to reapply (`onto` already contains every commit) is a valid,
+    /// degenerate no-op, exactly like [`RepositoryWritePort::rebase`]'s own
+    /// "already up to date" case.
+    pub fn validate(&self) -> Result<(), GitSailError> {
+        for (index, entry) in self.entries.iter().enumerate() {
+            match entry.action {
+                RebaseAction::Squash | RebaseAction::Fixup => {
+                    if index == 0 {
+                        let action_name = if entry.action == RebaseAction::Squash {
+                            "squash"
+                        } else {
+                            "fixup"
+                        };
+                        return Err(GitSailError::new(
+                            ErrorCode::InvalidRepositoryState,
+                            format!(
+                                "the first commit in a rebase plan cannot be {action_name}: there is no preceding commit to combine it into"
+                            ),
+                        )
+                        .with_remediation(
+                            "assign pick, reword, or drop to the first commit, or move a different commit ahead of it",
+                        ));
+                    }
+                    if entry.message_override.is_some() {
+                        return Err(GitSailError::new(
+                            ErrorCode::InvalidRepositoryState,
+                            "a squash/fixup entry must not carry a message_override — Git combines the messages itself",
+                        ));
+                    }
+                }
+                RebaseAction::Reword => {
+                    let has_message = entry
+                        .message_override
+                        .as_deref()
+                        .is_some_and(|message| !message.trim().is_empty());
+                    if !has_message {
+                        return Err(GitSailError::new(
+                            ErrorCode::InvalidRepositoryState,
+                            "a reword entry requires a non-empty message_override",
+                        )
+                        .with_remediation("provide the new commit message before executing this plan"));
+                    }
+                }
+                RebaseAction::Pick | RebaseAction::Drop => {
+                    if entry.message_override.is_some() {
+                        return Err(GitSailError::new(
+                            ErrorCode::InvalidRepositoryState,
+                            "only a reword entry may carry a message_override",
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 /// The error every new-in-EPIC-18 mutation method below defaults to when a
@@ -687,5 +877,216 @@ pub trait RepositoryWritePort: Send + Sync {
     fn abort_operation(&self, repo: &Repository) -> Result<(), GitSailError> {
         let _ = repo;
         Err(unsupported("abort_operation"))
+    }
+
+    // -------------------------------------------------------------------
+    // EPIC-17/T-235..T-237 (US-083..085): rebase, interactive rebase
+    // planning, and squash/fixup. Defaulted the same way as the batches
+    // above, for the same reason (existing `RepositoryWritePort`
+    // implementers predating this epic keep compiling unchanged).
+    // [`gitsail_git::GitCliProvider`] overrides every one of these with a
+    // real `git` implementation.
+
+    /// Reapplies the current branch's commits onto `onto_revision` via a
+    /// plain `git rebase <onto>` (T-235/US-083). Refuses up front when
+    /// another [`gitsail_domain::InProgressOperation`] is already pending,
+    /// mirroring [`Self::merge`]'s own check, and never falls back to an
+    /// automatic `git stash`/restore around a dirty working tree (US-083
+    /// criterion 2: a dirty or otherwise incompatible state is refused with
+    /// a clear message, never silently stashed). See [`RebaseResult`] for
+    /// why completion/conflict are always two distinct, explicit outcomes.
+    fn rebase(&self, repo: &Repository, onto_revision: &str) -> Result<RebaseResult, GitSailError> {
+        let _ = (repo, onto_revision);
+        Err(unsupported("rebase"))
+    }
+
+    /// Skips the current step of whichever multi-step operation
+    /// [`crate::ports::RepositoryReadPort::detect_in_progress_operation`]
+    /// currently detects (`git <op> --skip`, or `git bisect skip`) and moves
+    /// to the next one (T-235/US-083 criterion 3). Only meaningful for a
+    /// sequencer-shaped operation — refuses with a clear "unsupported"
+    /// message when the detected operation's own
+    /// [`gitsail_domain::OperationCapability`] set does not offer `Skip`
+    /// (e.g. a merge, which [`Self::continue_operation`]/
+    /// [`Self::abort_operation`] already handle but which T-233 never gave a
+    /// `skip` step to, since a merge has no further step to skip past).
+    /// Never presumes success: a caller re-inspects
+    /// `detect_in_progress_operation` afterward, mirroring
+    /// [`Self::continue_operation`]'s own contract.
+    fn skip_operation(&self, repo: &Repository) -> Result<(), GitSailError> {
+        let _ = repo;
+        Err(unsupported("skip_operation"))
+    }
+
+    /// Reads the candidate commit range the current branch would reapply
+    /// onto `onto_revision`, oldest first, each defaulted to
+    /// [`RebaseAction::Pick`] (T-236/US-084 criterion 1) — a non-mutating
+    /// read: building this never touches the working tree, the index, or
+    /// any ref. See [`RebasePlan`] for the exact contract
+    /// [`Self::execute_rebase_plan`] revalidates against.
+    fn plan_rebase(&self, repo: &Repository, onto_revision: &str) -> Result<RebasePlan, GitSailError> {
+        let _ = (repo, onto_revision);
+        Err(unsupported("plan_rebase"))
+    }
+
+    /// Applies `plan` (T-236/US-084; T-237/US-085's squash/fixup are just
+    /// two of this same plan's actions). Always calls [`RebasePlan::validate`]
+    /// first, then revalidates `plan.onto`/`plan.branch_head` are still the
+    /// current state immediately before touching anything (T-236/US-084
+    /// criterion 2) — refusing with
+    /// [`gitsail_domain::ErrorCode::OperationConflict`] otherwise, the same
+    /// [`crate::mutation::Precondition`] discipline
+    /// [`Self::amend_commit`]'s `expected_head` already applies.
+    ///
+    /// Security-critical: this never opens a real interactive shell, and
+    /// nothing derived from repository content (a commit's subject/message,
+    /// a branch name, ...) is ever interpolated into a command string a
+    /// shell would parse. The reordering/action assignment itself is
+    /// communicated to Git through `GIT_SEQUENCE_EDITOR` pointed at a
+    /// GitSail-controlled helper program that only ever copies a
+    /// GitSail-written file's *bytes* onto the path Git hands it — it never
+    /// reads, parses, or executes anything from the repository itself. A
+    /// [`RebaseAction::Reword`]'s new message is applied the same way every
+    /// other commit message in this workspace already is
+    /// ([`Self::create_commit`]/[`Self::amend_commit`]): as a single `-m
+    /// <text>` argv element passed directly to a child process, never
+    /// through a shell. See `gitsail-git`'s `GitCliProvider::execute_rebase_plan`
+    /// for the concrete mechanism and its own dedicated injection test.
+    fn execute_rebase_plan(
+        &self,
+        repo: &Repository,
+        plan: &RebasePlan,
+    ) -> Result<RebaseResult, GitSailError> {
+        let _ = (repo, plan);
+        Err(unsupported("execute_rebase_plan"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn hash(s: &str) -> CommitHash {
+        CommitHash::new(s.to_string()).unwrap()
+    }
+
+    fn short(s: &str) -> ShortHash {
+        ShortHash::new(s.to_string()).unwrap()
+    }
+
+    fn sample_plan(entries: Vec<RebasePlanEntry>) -> RebasePlan {
+        RebasePlan {
+            onto_revision: "main".to_string(),
+            onto: hash("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+            branch_head: hash("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
+            entries,
+        }
+    }
+
+    fn pick(n: u8) -> RebasePlanEntry {
+        RebasePlanEntry::pick(
+            hash(&format!("{n:0>40}")),
+            short(&format!("{n:0>7}")),
+            format!("commit {n}"),
+        )
+    }
+
+    #[test]
+    fn a_plan_with_only_picks_validates() {
+        let plan = sample_plan(vec![pick(1), pick(2), pick(3)]);
+        assert!(plan.validate().is_ok());
+    }
+
+    #[test]
+    fn an_empty_plan_is_a_valid_no_op() {
+        let plan = sample_plan(vec![]);
+        assert!(plan.validate().is_ok());
+    }
+
+    /// T-237/US-085 criterion 2: squash/fixup at position 0 is refused with
+    /// a clear error, since there is no preceding commit to combine into.
+    #[test]
+    fn squash_or_fixup_at_the_first_position_is_rejected() {
+        let mut squash_first = sample_plan(vec![pick(1), pick(2)]);
+        squash_first.entries[0].action = RebaseAction::Squash;
+        let err = squash_first.validate().unwrap_err();
+        assert_eq!(err.code(), ErrorCode::InvalidRepositoryState);
+        assert!(err.to_string().contains("squash"));
+
+        let mut fixup_first = sample_plan(vec![pick(1), pick(2)]);
+        fixup_first.entries[0].action = RebaseAction::Fixup;
+        let err = fixup_first.validate().unwrap_err();
+        assert_eq!(err.code(), ErrorCode::InvalidRepositoryState);
+        assert!(err.to_string().contains("fixup"));
+    }
+
+    /// Squash/fixup are valid — and clearly distinguished in their effect on
+    /// the final message (US-085 criterion 1) — everywhere except the first
+    /// position.
+    #[test]
+    fn squash_and_fixup_after_the_first_position_validate() {
+        let mut plan = sample_plan(vec![pick(1), pick(2), pick(3)]);
+        plan.entries[1].action = RebaseAction::Squash;
+        plan.entries[2].action = RebaseAction::Fixup;
+        assert!(plan.validate().is_ok());
+    }
+
+    #[test]
+    fn reword_without_a_message_override_is_rejected() {
+        let plan = sample_plan(vec![{
+            let mut entry = pick(1);
+            entry.action = RebaseAction::Reword;
+            entry
+        }]);
+        let err = plan.validate().unwrap_err();
+        assert_eq!(err.code(), ErrorCode::InvalidRepositoryState);
+    }
+
+    #[test]
+    fn reword_with_a_blank_message_override_is_rejected() {
+        let plan = sample_plan(vec![{
+            let mut entry = pick(1);
+            entry.action = RebaseAction::Reword;
+            entry.message_override = Some("   ".to_string());
+            entry
+        }]);
+        assert!(plan.validate().is_err());
+    }
+
+    #[test]
+    fn reword_with_a_message_override_validates() {
+        let plan = sample_plan(vec![{
+            let mut entry = pick(1);
+            entry.action = RebaseAction::Reword;
+            entry.message_override = Some("a better message".to_string());
+            entry
+        }]);
+        assert!(plan.validate().is_ok());
+    }
+
+    /// US-085 criterion 1: squash/fixup's message handling always comes from
+    /// Git's own default combining, never a supplied override.
+    #[test]
+    fn a_message_override_on_a_non_reword_action_is_rejected() {
+        for action in [RebaseAction::Pick, RebaseAction::Squash, RebaseAction::Fixup] {
+            let mut entries = vec![pick(1), pick(2)];
+            let index = if matches!(action, RebaseAction::Pick) { 0 } else { 1 };
+            entries[index].action = action;
+            entries[index].message_override = Some("should not be here".to_string());
+            let plan = sample_plan(entries);
+            let err = plan.validate().unwrap_err();
+            assert_eq!(err.code(), ErrorCode::InvalidRepositoryState);
+        }
+    }
+
+    #[test]
+    fn drop_with_a_message_override_is_rejected() {
+        let plan = sample_plan(vec![{
+            let mut entry = pick(1);
+            entry.action = RebaseAction::Drop;
+            entry.message_override = Some("irrelevant".to_string());
+            entry
+        }]);
+        assert!(plan.validate().is_err());
     }
 }

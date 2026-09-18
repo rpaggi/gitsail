@@ -1,12 +1,22 @@
-// Merge, conflict resolution, and continue/abort state (EPIC-16/T-231..
-// T-233). Every mutation goes through `stores/operation.ts` (T-194/US-061),
-// mirroring `stores/sync.ts`/`stores/branches.ts`'s own convention: a merge/
-// continue/abort always shows its target and risk before running, and can
-// always be cancelled before it touches the repository.
+// Merge, conflict resolution, continue/abort, and rebase/skip state
+// (EPIC-16/T-231..T-233; EPIC-17/T-235). Every mutation goes through
+// `stores/operation.ts` (T-194/US-061), mirroring
+// `stores/sync.ts`/`stores/branches.ts`'s own convention: a merge/rebase/
+// continue/abort/skip always shows its target and risk before running, and
+// can always be cancelled before it touches the repository.
+//
+// Rebase is folded into this same store rather than a separate one: it
+// shares the exact same `inProgressOperation`/conflicts-resolution state
+// (a rebase conflict is resolved through the same `markResolved`/`takeSide`
+// flow a merge conflict already uses) and the same continue/abort actions
+// below already dispatch generically regardless of which operation is
+// actually pending — a second store would only duplicate that shared state,
+// not add a distinct concern.
 //
 // Risk classification mirrors `gitsail_application::mutation::MutationKind`/
 // `gitsail_tui::operation::OperationKind` exactly (SAD §20's own named
-// `Moderate` example includes merge): `merge`/`continueOperation` are
+// `Moderate` example includes merge and, per this epic's own scope note,
+// rebase): `merge`/`rebase`/`continueOperation`/`skipOperation` are
 // Moderate, `abortOperation` is Destructive (it discards the in-progress
 // operation's own changes), and marking a conflict resolved is Safe (it is
 // `git add`, mirroring `stageFiles`) — so it dispatches without a
@@ -15,9 +25,9 @@
 // `inProgressOperation` is never inferred from this store's own last
 // action — it is always freshly re-read via `refreshInProgressOperation`
 // after every mutation here, so an operation started outside GitSail, or
-// the real aftermath of a continue/abort this session just ran, is always
-// what is actually shown (US-078 criterion 2; US-081 criterion 3: "never
-// presume success without checking").
+// the real aftermath of a continue/abort/skip this session just ran, is
+// always what is actually shown (US-078 criterion 2; US-081 criterion 3;
+// US-083 criterion 3: "never presume success without checking").
 
 import { defineStore } from "pinia";
 
@@ -28,6 +38,8 @@ import {
   getConflictSides,
   markConflictResolved as markConflictResolvedCommand,
   merge as mergeCommand,
+  rebase as rebaseCommand,
+  skipOperation as skipOperationCommand,
   takeConflictSide as takeConflictSideCommand,
 } from "../services/merge";
 import type {
@@ -36,6 +48,7 @@ import type {
   InProgressOperationDto,
   MergeResultDto,
   OperationCapabilityDto,
+  RebaseResultDto,
 } from "../services/dto";
 import { isErrorPayload, type ErrorPayload } from "../services/errors";
 import { useOperationStore } from "./operation";
@@ -65,6 +78,10 @@ export const useMergeStore = defineStore("merge", {
     inProgressOperation: NONE as InProgressOperationDto,
     isLoadingOperation: false,
     lastMergeResult: null as MergeResultDto | null,
+    /** The outcome of the last successful `requestRebase` (T-235/US-083
+     * criterion 3: completion and conflict are always two distinct,
+     * explicit outcomes) — mirrors `lastMergeResult`'s own convention. */
+    lastRebaseResult: null as RebaseResultDto | null,
     /** The conflicted file most recently inspected (T-232/US-080 criterion
      * 2), or `null` before anything has been inspected, or once the
      * highlighted file/operation changes. */
@@ -88,6 +105,12 @@ export const useMergeStore = defineStore("merge", {
     },
     supportsAbort(): boolean {
       return this.capabilities.includes("abort");
+    },
+    /** T-235/US-083 criterion 3: a merge never offers this (it has no
+     * further step to skip past) — only a rebase/cherry-pick/revert/bisect
+     * sequencer step does. */
+    supportsSkip(): boolean {
+      return this.capabilities.includes("skip");
     },
   },
   actions: {
@@ -131,6 +154,30 @@ export const useMergeStore = defineStore("merge", {
         targetLabel: `merging '${targetRevision}' into the current branch`,
         run: async () => {
           this.lastMergeResult = await mergeCommand(targetRevision);
+          await session.refreshStatus("after_mutation");
+          await this.refreshInProgressOperation();
+        },
+      });
+    },
+
+    /** Requests rebasing the current branch onto `ontoRevision` (T-235/
+     * US-083 criterion 1: the current branch, the chosen base, and the
+     * fact that this reapplies the branch's own commits are all named by
+     * `targetLabel` before anything runs). Never silently stashes local
+     * changes — a dirty working tree comes back as an ordinary failure
+     * from `rebaseCommand` (US-083 criterion 2), reported the same way any
+     * other refused operation is. Completion and conflict are always two
+     * distinct, explicit `RebaseResultDto` outcomes (criterion 3), mirroring
+     * `requestMerge`'s own reasoning. */
+    async requestRebase(ontoRevision: string): Promise<void> {
+      const operation = useOperationStore();
+      const session = useRepositorySessionStore();
+      await operation.request({
+        kind: "rebase",
+        risk: "moderate",
+        targetLabel: `rebasing the current branch onto '${ontoRevision}'`,
+        run: async () => {
+          this.lastRebaseResult = await rebaseCommand(ontoRevision);
           await session.refreshStatus("after_mutation");
           await this.refreshInProgressOperation();
         },
@@ -245,6 +292,30 @@ export const useMergeStore = defineStore("merge", {
           "This restores HEAD to before the operation started and discards its own in-progress changes — unrelated local work is left untouched.",
         run: async () => {
           await abortOperationCommand();
+          await session.refreshStatus("after_mutation");
+          await this.refreshInProgressOperation();
+        },
+      });
+    },
+
+    /** Requests skipping the current step of the pending operation (T-235/
+     * US-083 criterion 3) — only offered when `supportsSkip` is true (a
+     * no-op otherwise, mirroring `requestContinue`/`requestAbort`'s own
+     * capability-gated convention). `Moderate` risk: deliberately advancing
+     * past an already-confirmed, in-progress operation's current step,
+     * the same character `requestContinue` already has. */
+    async requestSkip(): Promise<void> {
+      if (!this.supportsSkip) {
+        return;
+      }
+      const operation = useOperationStore();
+      const session = useRepositorySessionStore();
+      await operation.request({
+        kind: "skipOperation",
+        risk: "moderate",
+        targetLabel: "the current step of the in-progress operation",
+        run: async () => {
+          await skipOperationCommand();
           await session.refreshStatus("after_mutation");
           await this.refreshInProgressOperation();
         },

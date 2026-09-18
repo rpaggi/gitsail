@@ -23,8 +23,9 @@ use gitsail_application::{
     CreateCommit, DeleteBranch, DetectInProgressOperation, DiffRequest, Fetch,
     ForgetRecentRepository, GetCommit, GetCommitHistory, GetConflictSides, GetDiff, ListBranches,
     ListRecentRepositories, MarkConflictResolved, Merge, OpenRepository, PreviewAmend,
-    PreviewPatchApplication, Pull, Push, RecordRecentRepository, RefreshReason, RenameBranch,
-    StageFiles, StageHunks, SwitchBranch, TakeConflictSide, UnstageFiles, UnstageHunks,
+    PreviewPatchApplication, Pull, Push, Rebase, RecordRecentRepository, RefreshReason,
+    RenameBranch, SkipOperation, StageFiles, StageHunks, SwitchBranch, TakeConflictSide,
+    UnstageFiles, UnstageHunks,
 };
 use gitsail_domain::{
     Branch, BranchKind, BranchName, CancellationToken, CommitHash, ConflictSide, ErrorCode,
@@ -34,8 +35,8 @@ use gitsail_protocol::{
     AmendPreviewDto, ApplyPatchResultDto, BranchDto, CommitDto, CommitGraphPageDto,
     CommitGraphRowDto, CommitResultDto, ConflictSidesDto, DiffDto, ErrorPayload, FileDiffDto,
     InProgressOperationDto, MergeResultDto, PatchExportDto, PatchPreviewDto, PullOutcomeDto,
-    PullResultDto, RecentRepositoryDto, RemoteDto, RepositoryDto, RepositoryStatusDto,
-    SyncTargetDto,
+    PullResultDto, RebaseResultDto, RecentRepositoryDto, RemoteDto, RepositoryDto,
+    RepositoryStatusDto, SyncTargetDto,
 };
 
 use crate::state::{AppState, StartupIntent};
@@ -997,6 +998,50 @@ pub fn abort_operation(state: tauri::State<AppState>) -> Result<(), ErrorPayload
 fn abort_operation_impl(state: &AppState) -> Result<(), GitSailError> {
     run_mutation(state, |repository| {
         AbortOperation::new(state.write_port()).execute(repository)
+    })
+}
+
+// -- EPIC-17/T-235: rebase, skip -----------------------------------------
+//
+// Mirrors the merge wiring immediately above one-to-one (T-235/US-083):
+// `rebase` refuses up front when another operation is already pending or
+// the working tree is dirty (both enforced by
+// `RepositoryWritePort::rebase` itself, never a hidden `git stash`) and
+// reports completion/conflict as two distinct, explicit [`RebaseResultDto`]
+// outcomes (criterion 3) — never a generic success/failure.
+
+/// Rebases the current branch onto `onto_revision` (T-235/US-083).
+/// `onto_revision` is whatever reference the frontend's own search/
+/// selection UI resolved, mirroring [`merge`]'s own free-text contract.
+#[tauri::command]
+pub fn rebase(
+    onto_revision: String,
+    state: tauri::State<AppState>,
+) -> Result<RebaseResultDto, ErrorPayload> {
+    rebase_impl(&state, &onto_revision).map_err(|err| ErrorPayload::from(&err))
+}
+
+fn rebase_impl(state: &AppState, onto_revision: &str) -> Result<RebaseResultDto, GitSailError> {
+    let result = run_mutation(state, |repository| {
+        Rebase::new(state.write_port()).execute(repository, onto_revision)
+    })?;
+    Ok(RebaseResultDto::from(&result))
+}
+
+/// Skips the current step of whichever operation is pending (T-235/US-083
+/// criterion 3). Refuses with a clear error when the detected operation does
+/// not offer `skip` (e.g. a merge, which has no further step to skip past) —
+/// mirrors [`continue_operation`]/[`abort_operation`]'s own "never presumed,
+/// always reinspected" contract: the frontend re-calls
+/// `detect_in_progress_operation` afterward to see the real result.
+#[tauri::command]
+pub fn skip_operation(state: tauri::State<AppState>) -> Result<(), ErrorPayload> {
+    skip_operation_impl(&state).map_err(|err| ErrorPayload::from(&err))
+}
+
+fn skip_operation_impl(state: &AppState) -> Result<(), GitSailError> {
+    run_mutation(state, |repository| {
+        SkipOperation::new(state.write_port()).execute(repository)
     })
 }
 
@@ -3175,6 +3220,149 @@ mod tests {
             let err = merge_impl(&state, "feature").unwrap_err();
 
             assert_eq!(err.code(), ErrorCode::OperationConflict);
+        }
+
+        // -- EPIC-17/T-235: rebase, skip ---------------------------------
+
+        #[test]
+        fn rebase_reapplies_commits_and_detect_reports_nothing_pending() {
+            let dir = init_repo("rebase-clean");
+            std::fs::write(dir.path().join("a.txt"), "a\n").unwrap();
+            git(dir.path(), &["add", "-A"]);
+            git(dir.path(), &["commit", "--quiet", "-m", "base"]);
+            git(dir.path(), &["checkout", "-q", "-b", "feature"]);
+            std::fs::write(dir.path().join("feature.txt"), "feature\n").unwrap();
+            git(dir.path(), &["add", "-A"]);
+            git(dir.path(), &["commit", "--quiet", "-m", "feature change"]);
+            git(dir.path(), &["checkout", "-q", "main"]);
+            std::fs::write(dir.path().join("b.txt"), "b\n").unwrap();
+            git(dir.path(), &["add", "-A"]);
+            git(dir.path(), &["commit", "--quiet", "-m", "main advances"]);
+            git(dir.path(), &["checkout", "-q", "feature"]);
+
+            let state = real_app_state();
+            open_repository_impl(&state, dir.path().to_str().unwrap()).unwrap();
+
+            let result = rebase_impl(&state, "main").unwrap();
+
+            match result {
+                RebaseResultDto::Completed { new_head } => assert_eq!(new_head, head(dir.path())),
+                other => panic!("expected Completed, got {other:?}"),
+            }
+            assert_eq!(
+                detect_in_progress_operation_impl(&state).unwrap(),
+                InProgressOperationDto::None
+            );
+            assert!(dir.path().join("b.txt").exists());
+        }
+
+        #[test]
+        fn rebase_reports_a_conflict_and_the_full_resolve_continue_flow_completes_it() {
+            let dir = init_repo("rebase-conflict-flow");
+            setup_conflicting_divergence(dir.path());
+            git(dir.path(), &["checkout", "-q", "feature"]);
+
+            let state = real_app_state();
+            open_repository_impl(&state, dir.path().to_str().unwrap()).unwrap();
+
+            let result = rebase_impl(&state, "main").unwrap();
+            let files = match result {
+                RebaseResultDto::Conflict { conflicted_files } => conflicted_files,
+                other => panic!("a conflict must never be reported as {other:?}"),
+            };
+            assert_eq!(files.len(), 1);
+            assert_eq!(files[0].path, "f.txt");
+            assert!(matches!(
+                detect_in_progress_operation_impl(&state).unwrap(),
+                InProgressOperationDto::Rebase { .. }
+            ));
+
+            std::fs::write(dir.path().join("f.txt"), "line1\nRESOLVED\nline3\n").unwrap();
+            mark_conflict_resolved_impl(&state, "f.txt").unwrap();
+            continue_operation_impl(&state).unwrap();
+
+            assert_eq!(
+                detect_in_progress_operation_impl(&state).unwrap(),
+                InProgressOperationDto::None
+            );
+            assert_eq!(
+                std::fs::read_to_string(dir.path().join("f.txt")).unwrap(),
+                "line1\nRESOLVED\nline3\n"
+            );
+        }
+
+        #[test]
+        fn rebase_conflict_recovers_via_skip() {
+            let dir = init_repo("rebase-conflict-skip");
+            setup_conflicting_divergence(dir.path());
+            git(dir.path(), &["checkout", "-q", "feature"]);
+
+            let state = real_app_state();
+            open_repository_impl(&state, dir.path().to_str().unwrap()).unwrap();
+            assert!(matches!(
+                rebase_impl(&state, "main").unwrap(),
+                RebaseResultDto::Conflict { .. }
+            ));
+
+            skip_operation_impl(&state).unwrap();
+
+            assert_eq!(
+                detect_in_progress_operation_impl(&state).unwrap(),
+                InProgressOperationDto::None
+            );
+            assert_eq!(
+                std::fs::read_to_string(dir.path().join("f.txt")).unwrap(),
+                "line1\nCHANGED-main\nline3\n"
+            );
+        }
+
+        /// T-235/US-083 criterion 3: skip is refused with a clear error for
+        /// an operation that does not support it (a merge has no further
+        /// step to skip past).
+        #[test]
+        fn skip_operation_is_refused_for_a_pending_merge() {
+            let dir = init_repo("skip-refuses-merge");
+            setup_conflicting_divergence(dir.path());
+
+            let state = real_app_state();
+            open_repository_impl(&state, dir.path().to_str().unwrap()).unwrap();
+            assert!(matches!(
+                merge_impl(&state, "feature").unwrap(),
+                MergeResultDto::Conflict { .. }
+            ));
+
+            let err = skip_operation_impl(&state).unwrap_err();
+            assert_eq!(err.code(), ErrorCode::InvalidRepositoryState);
+
+            abort_operation_impl(&state).unwrap();
+        }
+
+        #[test]
+        fn rebasing_a_dirty_working_tree_is_refused_without_ever_stashing_automatically() {
+            let dir = init_repo("rebase-dirty");
+            std::fs::write(dir.path().join("a.txt"), "a\n").unwrap();
+            git(dir.path(), &["add", "-A"]);
+            git(dir.path(), &["commit", "--quiet", "-m", "base"]);
+            git(dir.path(), &["checkout", "-q", "-b", "feature"]);
+            std::fs::write(dir.path().join("feature.txt"), "feature\n").unwrap();
+            git(dir.path(), &["add", "-A"]);
+            git(dir.path(), &["commit", "--quiet", "-m", "feature change"]);
+            git(dir.path(), &["checkout", "-q", "main"]);
+            std::fs::write(dir.path().join("b.txt"), "b\n").unwrap();
+            git(dir.path(), &["add", "-A"]);
+            git(dir.path(), &["commit", "--quiet", "-m", "main advances"]);
+            git(dir.path(), &["checkout", "-q", "feature"]);
+            std::fs::write(dir.path().join("dirty.txt"), "uncommitted\n").unwrap();
+
+            let state = real_app_state();
+            open_repository_impl(&state, dir.path().to_str().unwrap()).unwrap();
+
+            let err = rebase_impl(&state, "main").unwrap_err();
+            assert_eq!(err.code(), ErrorCode::InvalidRepositoryState);
+            assert_eq!(
+                detect_in_progress_operation_impl(&state).unwrap(),
+                InProgressOperationDto::None
+            );
         }
     }
 }

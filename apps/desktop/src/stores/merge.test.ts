@@ -4,7 +4,12 @@ import { clearMocks, mockIPC } from "@tauri-apps/api/mocks";
 
 import { capabilitiesOf, conflictedFilesOf, useMergeStore } from "./merge";
 import { useOperationStore } from "./operation";
-import type { ConflictSidesDto, InProgressOperationDto, MergeResultDto } from "../services/dto";
+import type {
+  ConflictSidesDto,
+  InProgressOperationDto,
+  MergeResultDto,
+  RebaseResultDto,
+} from "../services/dto";
 
 function statusResponse() {
   return { branch: "main", headState: { state: "attached", branch: "main" }, files: [], isClean: true };
@@ -219,6 +224,106 @@ describe("merge store", () => {
     expect(operation.current?.impact).toBeTruthy();
     await operation.confirm();
     expect(received).toContain("abort_operation");
+    expect(store.inProgressOperation).toEqual({ kind: "none" });
+  });
+
+  // -- EPIC-17/T-235: rebase, skip --------------------------------------
+
+  it("requestRebase is Moderate risk, waits for confirmation, and reports completion distinctly", async () => {
+    const received: string[] = [];
+    const outcome: RebaseResultDto = { outcome: "completed", newHead: "c".repeat(40) };
+    mockIPC((cmd) => {
+      received.push(cmd);
+      if (cmd === "rebase") return outcome;
+      if (cmd === "get_repository_status") return statusResponse();
+      if (cmd === "detect_in_progress_operation") return { kind: "none" } satisfies InProgressOperationDto;
+      throw new Error(`unexpected command ${cmd}`);
+    });
+    const store = useMergeStore();
+
+    await store.requestRebase("main");
+    const operation = useOperationStore();
+    expect(operation.status).toBe("confirming");
+    expect(operation.current?.risk).toBe("moderate");
+    expect(operation.current?.targetLabel).toBe("rebasing the current branch onto 'main'");
+
+    await operation.confirm();
+
+    expect(received).toContain("rebase");
+    expect(operation.status).toBe("succeeded");
+    expect(store.lastRebaseResult).toEqual(outcome);
+    expect(store.inProgressOperation).toEqual({ kind: "none" });
+  });
+
+  it("a conflicting rebase never presents as a plain success — the conflict outcome is recorded distinctly", async () => {
+    const conflictOutcome: RebaseResultDto = {
+      outcome: "conflict",
+      conflictedFiles: [{ path: "f.txt", stage: "bothModified" }],
+    };
+    mockIPC((cmd) => {
+      if (cmd === "rebase") return conflictOutcome;
+      if (cmd === "get_repository_status") return statusResponse();
+      if (cmd === "detect_in_progress_operation") {
+        return {
+          kind: "rebase",
+          interactive: false,
+          onto: "a".repeat(40),
+          conflictedFiles: [{ path: "f.txt", stage: "bothModified" }],
+          capabilities: ["continue", "skip", "abort"],
+        } satisfies InProgressOperationDto;
+      }
+      throw new Error(`unexpected command ${cmd}`);
+    });
+    const store = useMergeStore();
+
+    await store.requestRebase("main");
+    await useOperationStore().confirm();
+
+    expect(store.lastRebaseResult).toEqual(conflictOutcome);
+    expect(store.hasConflicts).toBe(true);
+    expect(store.supportsSkip).toBe(true);
+    expect(useOperationStore().status).toBe("succeeded");
+  });
+
+  it("requestSkip is a no-op when the detected operation does not support it (a pending merge)", async () => {
+    mockIPC((cmd) => {
+      throw new Error(`unexpected command ${cmd}`);
+    });
+    const store = useMergeStore();
+    store.inProgressOperation = pendingMerge(false);
+
+    await store.requestSkip();
+
+    expect(useOperationStore().status).toBe("idle");
+  });
+
+  it("requestSkip begins confirmation when supported, dispatches, and reinspects afterward", async () => {
+    const received: string[] = [];
+    mockIPC((cmd) => {
+      received.push(cmd);
+      if (cmd === "skip_operation") return null;
+      if (cmd === "get_repository_status") return statusResponse();
+      if (cmd === "detect_in_progress_operation") return { kind: "none" } satisfies InProgressOperationDto;
+      throw new Error(`unexpected command ${cmd}`);
+    });
+    const store = useMergeStore();
+    store.inProgressOperation = {
+      kind: "rebase",
+      interactive: false,
+      onto: "a".repeat(40),
+      conflictedFiles: [{ path: "f.txt", stage: "bothModified" }],
+      capabilities: ["continue", "skip", "abort"],
+    };
+
+    await store.requestSkip();
+    const operation = useOperationStore();
+    expect(operation.status).toBe("confirming");
+    expect(operation.current?.risk).toBe("moderate");
+
+    await operation.confirm();
+
+    expect(received).toContain("skip_operation");
+    expect(operation.status).toBe("succeeded");
     expect(store.inProgressOperation).toEqual({ kind: "none" });
   });
 });

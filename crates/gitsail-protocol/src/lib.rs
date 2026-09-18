@@ -22,8 +22,8 @@ pub use dto::{
     DiffLineOriginDto, FileChangeDto, FileContentDto, FileDiffDto, FileStatusCodeDto,
     GitTimestampDto, GraphEdgeDto, HeadStateDto, InProgressOperationDto, LineHistoryDto,
     LineHistoryEntryDto, LineRangeDto, MergeResultDto, OperationCapabilityDto, PatchExportDto,
-    PatchPreviewDto, PullOutcomeDto, PullResultDto, RecentRepositoryDto, RemoteDto, RepositoryDto,
-    RepositoryStatusDto, SignatureDto, SyncTargetDto,
+    PatchPreviewDto, PullOutcomeDto, PullResultDto, RebaseResultDto, RecentRepositoryDto,
+    RemoteDto, RepositoryDto, RepositoryStatusDto, SignatureDto, SyncTargetDto,
 };
 pub use envelope::{Envelope, Page, SCHEMA_VERSION};
 pub use error::ErrorPayload;

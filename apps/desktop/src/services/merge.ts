@@ -9,6 +9,7 @@ import type {
   ConflictSidesDto,
   InProgressOperationDto,
   MergeResultDto,
+  RebaseResultDto,
 } from "./dto";
 
 /** Detects a merge/rebase/cherry-pick/revert/bisect currently in progress
@@ -63,4 +64,22 @@ export async function continueOperation(): Promise<void> {
  * contract. */
 export async function abortOperation(): Promise<void> {
   await invoke<void>("abort_operation");
+}
+
+/** Rebases the current branch onto `ontoRevision` (T-235/US-083). Never
+ * silently stashes uncommitted changes — a dirty working tree or any other
+ * incompatible state comes back as a rejected promise instead. Completion
+ * and conflict are always two distinct, explicit outcomes (criterion 3),
+ * mirroring `merge`'s own contract. */
+export async function rebase(ontoRevision: string): Promise<RebaseResultDto> {
+  return invoke<RebaseResultDto>("rebase", { ontoRevision });
+}
+
+/** Skips the current step of whichever operation is pending (T-235/US-083
+ * criterion 3) and moves to the next one. Rejects with a clear error when
+ * the detected operation does not offer skip (e.g. a merge, which has no
+ * further step to skip past). Matches `continueOperation`'s own "never
+ * presumed, always reinspected" contract. */
+export async function skipOperation(): Promise<void> {
+  await invoke<void>("skip_operation");
 }

@@ -87,6 +87,14 @@ pub enum OperationKind {
     /// T-233/US-081: `RepositoryWritePort::abort_operation`. Mirrors
     /// `gitsail_application::MutationKind::AbortOperation`.
     AbortOperation,
+    /// T-235/US-083: `RepositoryWritePort::rebase`. Carries the target base
+    /// so origin, destination and policy are all shown before executing,
+    /// mirroring [`Self::Merge`]'s own rationale.
+    Rebase { onto: String },
+    /// T-235/US-083: `RepositoryWritePort::skip_operation`. Generic across
+    /// whichever sequencer operation is actually detected, mirroring
+    /// [`Self::ContinueOperation`]'s own reuse rationale.
+    SkipOperation,
 }
 
 impl OperationKind {
@@ -139,6 +147,17 @@ impl OperationKind {
             // reinforced confirmation even though Git restores the
             // pre-operation state rather than losing history outright.
             OperationKind::AbortOperation => OperationRisk::Destructive,
+            // Mirrors `gitsail_application::MutationKind::Rebase`: mutates
+            // the current branch's history, but a confirmed,
+            // non-conflicting rebase is the ordinary, expected case, and a
+            // conflict is never silently lost work (it lands in a distinct
+            // `RebaseResult::Conflict`, recoverable via continue/skip/abort).
+            OperationKind::Rebase { .. } => OperationRisk::Moderate,
+            // Mirrors `gitsail_application::MutationKind::SkipOperation`:
+            // deliberately advancing past the current step of an
+            // already-confirmed, in-progress operation, the same character
+            // `ContinueOperation` already has.
+            OperationKind::SkipOperation => OperationRisk::Moderate,
         }
     }
 
@@ -171,6 +190,10 @@ impl OperationKind {
             OperationKind::Merge { target } => format!("merging '{target}' into the current branch"),
             OperationKind::ContinueOperation => "the in-progress operation".to_string(),
             OperationKind::AbortOperation => "the in-progress operation".to_string(),
+            OperationKind::Rebase { onto } => format!("rebasing the current branch onto '{onto}'"),
+            OperationKind::SkipOperation => {
+                "the current step of the in-progress operation".to_string()
+            }
         }
     }
 }
@@ -348,6 +371,21 @@ mod tests {
 
         assert_eq!(OperationKind::ContinueOperation.risk(), OperationRisk::Moderate);
         assert_eq!(OperationKind::AbortOperation.risk(), OperationRisk::Destructive);
+    }
+
+    /// T-235/US-083: `Rebase`/`SkipOperation` both classify `Moderate`
+    /// (mutates history / advances a sequencer step, but a conflict is
+    /// never silently lost work), and `Rebase`'s label always names the
+    /// concrete target base.
+    #[test]
+    fn rebase_and_skip_operation_classify_moderate_with_a_concrete_target_label() {
+        let rebase = OperationKind::Rebase {
+            onto: "main".to_string(),
+        };
+        assert_eq!(rebase.risk(), OperationRisk::Moderate);
+        assert!(rebase.target_label().contains("main"));
+
+        assert_eq!(OperationKind::SkipOperation.risk(), OperationRisk::Moderate);
     }
 
     #[test]

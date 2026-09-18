@@ -148,4 +148,18 @@ pub enum Action {
     /// conflicts overlay, T-233/US-081) — only offered when
     /// [`gitsail_domain::OperationCapability::Abort`] is supported.
     RequestAbortOperation,
+
+    // -- EPIC-17/T-235: rebase, skip -------------------------------------
+    /// Requests confirmation to rebase the current branch onto the
+    /// highlighted reference (`o`, Sidebar only — reuses the same branch
+    /// search/selection mechanism [`Action::RequestMerge`] already uses;
+    /// T-235/US-083 criterion 1: current branch, chosen base and expected
+    /// rewrite are shown before executing).
+    RequestRebase,
+    /// Requests confirmation to skip the current step of the pending
+    /// operation (`s` within the conflicts overlay, T-235/US-083 criterion
+    /// 3) — only offered when
+    /// [`gitsail_domain::OperationCapability::Skip`] is supported (a merge
+    /// never offers it).
+    RequestSkipOperation,
 }
