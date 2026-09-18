@@ -62,6 +62,13 @@ pub enum OperationKind {
     /// out of scope for this operation set; see this crate's module docs
     /// for why.
     Push { remote: String, branch: String },
+    /// T-163/US-030: `RepositoryWritePort::apply_patch`. Carries the
+    /// affected-file count from the [`gitsail_application::PatchPreview`]
+    /// [`crate::app::App`] already computed via
+    /// `RepositoryWritePort::preview_patch_application` before ever
+    /// reaching this `Confirming` state (US-030 criterion 1: the prompt
+    /// always names concrete scope, never a generic "apply a patch").
+    ApplyPatch { affected_file_count: usize },
 }
 
 impl OperationKind {
@@ -92,6 +99,10 @@ impl OperationKind {
             // `SwitchBranch`/`CreateCommit` already have).
             OperationKind::Fetch { .. } => OperationRisk::Safe,
             OperationKind::Pull { .. } | OperationKind::Push { .. } => OperationRisk::Moderate,
+            // Mirrors `gitsail_application::MutationKind::ApplyPatch`:
+            // mutates the working tree, but never HEAD/the index, and is
+            // not irreversible the way a `Destructive` operation is.
+            OperationKind::ApplyPatch { .. } => OperationRisk::Moderate,
         }
     }
 
@@ -111,6 +122,12 @@ impl OperationKind {
             }
             OperationKind::Push { remote, branch } => {
                 format!("branch '{branch}' to remote '{remote}'")
+            }
+            OperationKind::ApplyPatch { affected_file_count } => {
+                format!(
+                    "{affected_file_count} file{} affected by the patch",
+                    if *affected_file_count == 1 { "" } else { "s" }
+                )
             }
         }
     }
@@ -218,6 +235,17 @@ mod tests {
             .risk(),
             OperationRisk::Moderate
         );
+    }
+
+    /// T-163/US-030: `ApplyPatch` classifies `Moderate` and its label names
+    /// the concrete affected-file count from the already-computed preview.
+    #[test]
+    fn apply_patch_classifies_moderate_with_a_concrete_target_label() {
+        let kind = OperationKind::ApplyPatch {
+            affected_file_count: 2,
+        };
+        assert_eq!(kind.risk(), OperationRisk::Moderate);
+        assert_eq!(kind.target_label(), "2 files affected by the patch");
     }
 
     /// T-182: mirrors `gitsail_application::mutation`'s canonical

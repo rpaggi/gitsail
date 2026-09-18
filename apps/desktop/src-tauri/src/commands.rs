@@ -19,20 +19,21 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use gitsail_application::{
-    AmendCommit, CommitQuery, CreateBranch, CreateCommit, DeleteBranch, DiffRequest, Fetch,
-    ForgetRecentRepository, GetCommit, GetCommitHistory, GetDiff, ListBranches,
-    ListRecentRepositories, OpenRepository, PreviewAmend, Pull, Push, RecordRecentRepository,
-    RefreshReason, StageFiles, StageHunks, SwitchBranch, UnstageFiles, UnstageHunks,
+    AmendCommit, ApplyPatch, CommitQuery, CreateBranch, CreateCommit, DeleteBranch, DiffRequest,
+    Fetch, ForgetRecentRepository, GetCommit, GetCommitHistory, GetDiff, ListBranches,
+    ListRecentRepositories, OpenRepository, PreviewAmend, PreviewPatchApplication, Pull, Push,
+    RecordRecentRepository, RefreshReason, StageFiles, StageHunks, SwitchBranch, UnstageFiles,
+    UnstageHunks,
 };
 use gitsail_domain::{
     Branch, BranchKind, BranchName, CancellationToken, CommitHash, ErrorCode, FileDiff,
     GitSailError, GraphCommit, Remote, Repository,
 };
 use gitsail_protocol::{
-    AmendPreviewDto, BranchDto, CommitDto, CommitGraphPageDto, CommitGraphRowDto,
-    CommitResultDto, DiffDto, ErrorPayload, FileDiffDto, PatchExportDto, PullOutcomeDto,
-    PullResultDto, RecentRepositoryDto, RemoteDto, RepositoryDto, RepositoryStatusDto,
-    SyncTargetDto,
+    AmendPreviewDto, ApplyPatchResultDto, BranchDto, CommitDto, CommitGraphPageDto,
+    CommitGraphRowDto, CommitResultDto, DiffDto, ErrorPayload, FileDiffDto, PatchExportDto,
+    PatchPreviewDto, PullOutcomeDto, PullResultDto, RecentRepositoryDto, RemoteDto, RepositoryDto,
+    RepositoryStatusDto, SyncTargetDto,
 };
 
 use crate::state::{AppState, StartupIntent};
@@ -180,6 +181,70 @@ fn save_text_file_impl(path: &str, contents: &str) -> Result<(), GitSailError> {
     std::fs::write(path, contents).map_err(|err| {
         GitSailError::new(ErrorCode::Internal, "failed to write the file").with_source(err)
     })
+}
+
+/// Reads `path`'s full contents as UTF-8 text — the read counterpart to
+/// [`save_text_file`], added for T-163/US-030's "apply a patch from a
+/// chosen file" flow: the frontend picks `path` via
+/// `@tauri-apps/plugin-dialog`'s native open dialog (already a
+/// dependency), this command's only job is the read itself. Deliberately
+/// generic (not "read a patch file"), mirroring [`save_text_file`]'s own
+/// "the same primitive would serve any future need" reasoning.
+#[tauri::command]
+pub fn read_text_file(path: String) -> Result<String, ErrorPayload> {
+    read_text_file_impl(&path).map_err(|err| ErrorPayload::from(&err))
+}
+
+fn read_text_file_impl(path: &str) -> Result<String, GitSailError> {
+    std::fs::read_to_string(path).map_err(|err| {
+        GitSailError::new(ErrorCode::Internal, "failed to read the file").with_source(err)
+    })
+}
+
+/// Validates `patch_text` against the repository's current state via a
+/// non-mutating `git apply --check`, reporting which files it would touch
+/// and whether it is supported at all (T-163/US-030 criterion 1) — the
+/// preview the frontend shows *before* asking for confirmation. Never
+/// mutates anything; the actual apply is [`apply_patch`], a separate
+/// command the frontend calls only once the person confirms.
+#[tauri::command]
+pub fn preview_patch_application(
+    patch_text: String,
+    state: tauri::State<AppState>,
+) -> Result<PatchPreviewDto, ErrorPayload> {
+    preview_patch_application_impl(&state, &patch_text).map_err(|err| ErrorPayload::from(&err))
+}
+
+fn preview_patch_application_impl(
+    state: &AppState,
+    patch_text: &str,
+) -> Result<PatchPreviewDto, GitSailError> {
+    let (repository, _epoch) = state.repository_with_epoch()?;
+    let preview =
+        PreviewPatchApplication::new(state.write_port()).execute(&repository, patch_text)?;
+    Ok(PatchPreviewDto::from(&preview))
+}
+
+/// Applies `patch_text` to the working tree (T-163/US-030) — the confirmed
+/// counterpart to [`preview_patch_application`]. Goes through
+/// [`run_mutation`] like every other mutating command here, and
+/// `gitsail_git::GitCliProvider::apply_patch` itself re-validates with the
+/// same `--check` immediately before writing anything, so a stale
+/// confirmation (the file changed again after the preview the frontend
+/// showed) is refused rather than silently applied.
+#[tauri::command]
+pub fn apply_patch(
+    patch_text: String,
+    state: tauri::State<AppState>,
+) -> Result<ApplyPatchResultDto, ErrorPayload> {
+    apply_patch_impl(&state, &patch_text).map_err(|err| ErrorPayload::from(&err))
+}
+
+fn apply_patch_impl(state: &AppState, patch_text: &str) -> Result<ApplyPatchResultDto, GitSailError> {
+    let result = run_mutation(state, |repository| {
+        ApplyPatch::new(state.write_port()).execute(repository, patch_text)
+    })?;
+    Ok(ApplyPatchResultDto::from(&result))
 }
 
 #[tauri::command]
@@ -1047,6 +1112,10 @@ mod tests {
         received_pull: Mutex<Option<(String, BranchName)>>,
         received_push: Mutex<Option<(String, BranchName)>>,
         pull_outcome: gitsail_application::PullOutcome,
+        received_preview_patch: Mutex<Option<String>>,
+        patch_preview: gitsail_application::PatchPreview,
+        received_apply_patch: Mutex<Option<String>>,
+        apply_patch_result: gitsail_application::ApplyPatchResult,
     }
 
     impl FakeWritePort {
@@ -1067,6 +1136,16 @@ mod tests {
                 received_pull: Mutex::new(None),
                 received_push: Mutex::new(None),
                 pull_outcome: gitsail_application::PullOutcome::AlreadyUpToDate,
+                received_preview_patch: Mutex::new(None),
+                patch_preview: gitsail_application::PatchPreview {
+                    affected_files: vec![PathBuf::from("a.txt")],
+                    supported: true,
+                    rejection_reason: None,
+                },
+                received_apply_patch: Mutex::new(None),
+                apply_patch_result: gitsail_application::ApplyPatchResult {
+                    applied_files: vec![PathBuf::from("a.txt")],
+                },
             }
         }
 
@@ -1209,6 +1288,33 @@ mod tests {
                 return Err(GitSailError::new(ErrorCode::OperationConflict, "non-fast-forward"));
             }
             Ok(())
+        }
+
+        fn preview_patch_application(
+            &self,
+            _repo: &Repository,
+            patch_text: &str,
+        ) -> Result<gitsail_application::PatchPreview, GitSailError> {
+            *self.received_preview_patch.lock().unwrap() = Some(patch_text.to_string());
+            if self.fail {
+                return Err(GitSailError::new(ErrorCode::ParseFailure, "the patch is malformed"));
+            }
+            Ok(self.patch_preview.clone())
+        }
+
+        fn apply_patch(
+            &self,
+            _repo: &Repository,
+            patch_text: &str,
+        ) -> Result<gitsail_application::ApplyPatchResult, GitSailError> {
+            *self.received_apply_patch.lock().unwrap() = Some(patch_text.to_string());
+            if self.fail {
+                return Err(GitSailError::new(
+                    ErrorCode::OperationConflict,
+                    "the patch no longer applies to the current file content",
+                ));
+            }
+            Ok(self.apply_patch_result.clone())
         }
     }
 
@@ -1362,6 +1468,31 @@ mod tests {
     #[test]
     fn save_text_file_reports_an_internal_error_for_an_unwritable_path() {
         let err = save_text_file_impl("/nonexistent-dir-abcxyz/patch.txt", "content").unwrap_err();
+        assert_eq!(err.code(), ErrorCode::Internal);
+    }
+
+    #[test]
+    fn read_text_file_returns_the_exact_contents_written() {
+        let dir = std::env::temp_dir().join(format!(
+            "gitsail-desktop-read-text-file-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("a.patch");
+        std::fs::write(&path, "--- a/a.txt\n+++ b/a.txt\n").unwrap();
+
+        let contents = read_text_file_impl(path.to_str().unwrap()).unwrap();
+
+        assert_eq!(contents, "--- a/a.txt\n+++ b/a.txt\n");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn read_text_file_reports_an_internal_error_for_a_missing_file() {
+        let err = read_text_file_impl("/nonexistent-dir-abcxyz/missing.patch").unwrap_err();
         assert_eq!(err.code(), ErrorCode::Internal);
     }
 
@@ -1729,6 +1860,67 @@ mod tests {
         open_repository_impl(&state, "/repo").unwrap();
 
         let err = amend_commit_impl(&state, "amended message", &"a".repeat(40)).unwrap_err();
+
+        assert_eq!(err.code(), ErrorCode::OperationConflict);
+    }
+
+    // -- T-163/US-030: apply a patch ----------------------------------------
+
+    #[test]
+    fn preview_patch_application_maps_a_supported_preview_to_its_dto() {
+        let state = state_from_port_and_write_port(FakePort::default(), FakeWritePort::new());
+        open_repository_impl(&state, "/repo").unwrap();
+
+        let dto = preview_patch_application_impl(&state, "--- a/a.txt\n+++ b/a.txt\n").unwrap();
+
+        assert!(dto.supported);
+        assert_eq!(dto.affected_files, vec!["a.txt".to_string()]);
+        assert!(dto.rejection_reason.is_none());
+    }
+
+    #[test]
+    fn preview_patch_application_before_opening_fails_with_invalid_repository_state() {
+        let state = state_with_fake_port();
+
+        let err = preview_patch_application_impl(&state, "a patch").unwrap_err();
+
+        assert_eq!(err.code(), ErrorCode::InvalidRepositoryState);
+    }
+
+    #[test]
+    fn preview_patch_application_reports_a_malformed_patch_as_a_clear_error() {
+        let state = state_from_port_and_write_port(FakePort::default(), FakeWritePort::failing());
+        open_repository_impl(&state, "/repo").unwrap();
+
+        let err = preview_patch_application_impl(&state, "not a patch").unwrap_err();
+
+        assert_eq!(err.code(), ErrorCode::ParseFailure);
+    }
+
+    #[test]
+    fn apply_patch_returns_the_applied_files_from_the_write_port() {
+        let write_port = FakeWritePort::new();
+        let expected_files = write_port.apply_patch_result.applied_files.clone();
+        let state = state_from_port_and_write_port(FakePort::default(), write_port);
+        open_repository_impl(&state, "/repo").unwrap();
+
+        let dto = apply_patch_impl(&state, "--- a/a.txt\n+++ b/a.txt\n").unwrap();
+
+        assert_eq!(
+            dto.applied_files,
+            expected_files
+                .iter()
+                .map(|p| p.to_string_lossy().to_string())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn apply_patch_reports_a_stale_context_conflict_without_a_false_success() {
+        let state = state_from_port_and_write_port(FakePort::default(), FakeWritePort::failing());
+        open_repository_impl(&state, "/repo").unwrap();
+
+        let err = apply_patch_impl(&state, "--- a/a.txt\n+++ b/a.txt\n").unwrap_err();
 
         assert_eq!(err.code(), ErrorCode::OperationConflict);
     }

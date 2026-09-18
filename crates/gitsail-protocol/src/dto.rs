@@ -12,7 +12,10 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use gitsail_application::{AmendPreview, CommitDiff, PatchExport, PullOutcome, RecentRepositoryEntry};
+use gitsail_application::{
+    AmendPreview, ApplyPatchResult, CommitDiff, PatchExport, PatchPreview, PullOutcome,
+    RecentRepositoryEntry,
+};
 use gitsail_domain::{
     Blame, BlameLine, BlameOrigin, Branch, BranchKind, ChangeType, Commit, CommitHash, Decoration,
     Diff, DiffHunk, DiffLine, DiffLineOrigin, FileChange, FileContentAtRevision, FileContentKind,
@@ -724,6 +727,45 @@ impl From<&PatchExport> for PatchExportDto {
 }
 
 // ---------------------------------------------------------------------
+// Apply a patch (T-163/US-030). Mirrors
+// `gitsail_application::write_ports::{PatchPreview, ApplyPatchResult}` —
+// the same "this crate only adds the wire shape" convention as
+// `PatchExportDto` above.
+// ---------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PatchPreviewDto {
+    pub affected_files: Vec<String>,
+    pub supported: bool,
+    pub rejection_reason: Option<String>,
+}
+
+impl From<&PatchPreview> for PatchPreviewDto {
+    fn from(preview: &PatchPreview) -> Self {
+        Self {
+            affected_files: preview.affected_files.iter().map(|p| path_to_string(p)).collect(),
+            supported: preview.supported,
+            rejection_reason: preview.rejection_reason.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApplyPatchResultDto {
+    pub applied_files: Vec<String>,
+}
+
+impl From<&ApplyPatchResult> for ApplyPatchResultDto {
+    fn from(result: &ApplyPatchResult) -> Self {
+        Self {
+            applied_files: result.applied_files.iter().map(|p| path_to_string(p)).collect(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------
 // Blame.
 // ---------------------------------------------------------------------
 
@@ -1101,6 +1143,34 @@ mod tests {
         assert_eq!(json["includedFiles"], serde_json::json!(["a.txt"]));
         assert_eq!(json["skippedBinaryFiles"], serde_json::json!(["image.png"]));
         assert_eq!(json["skippedTruncatedFiles"], serde_json::json!(["huge.txt"]));
+    }
+
+    #[test]
+    fn patch_preview_dto_maps_affected_files_support_and_rejection_reason() {
+        let preview = PatchPreview {
+            affected_files: vec![PathBuf::from("a.txt")],
+            supported: false,
+            rejection_reason: Some("the patch no longer applies".to_string()),
+        };
+
+        let dto = PatchPreviewDto::from(&preview);
+        let json = serde_json::to_value(&dto).unwrap();
+
+        assert_eq!(json["affectedFiles"], serde_json::json!(["a.txt"]));
+        assert!(!dto.supported);
+        assert_eq!(json["rejectionReason"], "the patch no longer applies");
+    }
+
+    #[test]
+    fn apply_patch_result_dto_maps_applied_files() {
+        let result = ApplyPatchResult {
+            applied_files: vec![PathBuf::from("a.txt"), PathBuf::from("b.txt")],
+        };
+
+        let dto = ApplyPatchResultDto::from(&result);
+        let json = serde_json::to_value(&dto).unwrap();
+
+        assert_eq!(json["appliedFiles"], serde_json::json!(["a.txt", "b.txt"]));
     }
 
     #[test]

@@ -2,7 +2,7 @@
 //! a terminal input event or the outcome of a background [`crate::worker::Command`]
 //! (SAD §18: "... return typed messages/events").
 
-use gitsail_application::{Page, PullOutcome, RefreshTicket};
+use gitsail_application::{ApplyPatchResult, Page, PatchPreview, PullOutcome, RefreshTicket};
 use gitsail_domain::{
     Blame, Branch, Commit, CommitHash, Diff, GitSailError, Remote, Repository, RepositoryStatus,
     Stash, Tag,
@@ -59,4 +59,16 @@ pub enum Message {
     /// collapsed into a bare success (criterion 1: "divergência ou conflito
     /// é mostrado claramente").
     PullFinished(Result<PullOutcome, GitSailError>),
+    /// [`crate::worker::Command::PreviewPatchApplication`] completed
+    /// (T-163/US-030 criterion 1). Carries the patch text alongside the
+    /// preview so [`crate::app::App`] can hold onto it for the confirmed
+    /// [`crate::worker::Command::ApplyPatch`] that follows, without a
+    /// second clipboard read (the clipboard's contents could have changed
+    /// in between).
+    PatchPreviewed(Result<PatchPreview, GitSailError>, String),
+    /// [`crate::worker::Command::ApplyPatch`] completed (T-163/US-030).
+    /// Carries the [`ApplyPatchResult`] on success — distinct from
+    /// [`Self::OperationFinished`] so the exact applied files can be shown,
+    /// mirroring [`Self::PullFinished`]'s own reasoning.
+    PatchApplied(Result<ApplyPatchResult, GitSailError>),
 }

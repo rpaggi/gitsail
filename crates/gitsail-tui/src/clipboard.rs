@@ -25,6 +25,13 @@ pub trait ClipboardPort: Send + Sync {
     /// always fall back to saving a file (criterion 3), never lose the
     /// patch or crash the TUI.
     fn set_text(&self, text: &str) -> Result<(), String>;
+
+    /// Attempts to read the system clipboard's current text contents
+    /// (T-163/US-030: applying a patch currently on the clipboard is the
+    /// inverse of [`Self::set_text`]'s export). Returns a short,
+    /// human-readable reason on failure (no display server, clipboard
+    /// empty, or clipboard holding non-text data) rather than panicking.
+    fn get_text(&self) -> Result<String, String>;
 }
 
 /// Real clipboard access via `arboard` (see `Cargo.toml` for why this crate
@@ -39,6 +46,11 @@ impl ClipboardPort for SystemClipboard {
     fn set_text(&self, text: &str) -> Result<(), String> {
         let mut clipboard = arboard::Clipboard::new().map_err(|e| e.to_string())?;
         clipboard.set_text(text.to_string()).map_err(|e| e.to_string())
+    }
+
+    fn get_text(&self) -> Result<String, String> {
+        let mut clipboard = arboard::Clipboard::new().map_err(|e| e.to_string())?;
+        clipboard.get_text().map_err(|e| e.to_string())
     }
 }
 
@@ -55,6 +67,10 @@ pub struct FakeClipboard {
     /// The last text successfully handed to [`Self::set_text`], for
     /// assertions.
     pub last_set: std::sync::Mutex<Option<String>>,
+    /// What [`Self::get_text`] returns on success (T-163/US-030). `None`
+    /// (the default) simulates an empty/unavailable clipboard, returning
+    /// `Err` the same way a real empty clipboard would for `arboard`.
+    pub contents: std::sync::Mutex<Option<String>>,
 }
 
 impl ClipboardPort for FakeClipboard {
@@ -64,6 +80,17 @@ impl ClipboardPort for FakeClipboard {
         }
         *self.last_set.lock().unwrap() = Some(text.to_string());
         Ok(())
+    }
+
+    fn get_text(&self) -> Result<String, String> {
+        if self.fail {
+            return Err("no display server available (fake)".to_string());
+        }
+        self.contents
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or_else(|| "clipboard is empty (fake)".to_string())
     }
 }
 
@@ -86,5 +113,27 @@ mod tests {
         };
         assert!(clipboard.set_text("hello").is_err());
         assert!(clipboard.last_set.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn fake_clipboard_get_text_returns_configured_contents() {
+        let clipboard = FakeClipboard {
+            contents: std::sync::Mutex::new(Some("a patch".to_string())),
+            ..Default::default()
+        };
+        assert_eq!(clipboard.get_text().unwrap(), "a patch");
+    }
+
+    #[test]
+    fn fake_clipboard_get_text_fails_when_empty_or_unavailable() {
+        let empty = FakeClipboard::default();
+        assert!(empty.get_text().is_err());
+
+        let unavailable = FakeClipboard {
+            fail: true,
+            contents: std::sync::Mutex::new(Some("ignored".to_string())),
+            ..Default::default()
+        };
+        assert!(unavailable.get_text().is_err());
     }
 }

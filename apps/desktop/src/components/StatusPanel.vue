@@ -2,6 +2,7 @@
 import { useRepositorySessionStore } from "../stores/session";
 import { usePatchExportStore } from "../stores/patchExport";
 import type { FileChangeDto, FileStatusCodeDto } from "../services/dto";
+import PatchApplyPanel from "./PatchApplyPanel.vue";
 
 const session = useRepositorySessionStore();
 const patchExport = usePatchExportStore();
@@ -92,6 +93,7 @@ function outcomeMessage(): string {
           </button>
         </li>
       </ul>
+      <PatchApplyPanel />
     </template>
     <p v-else>No repository open.</p>
   </div>

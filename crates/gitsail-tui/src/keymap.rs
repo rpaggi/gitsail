@@ -105,6 +105,7 @@ pub fn action_for(key: KeyEvent, ctx: InputContext) -> Option<Action> {
             KeyCode::Char('s') => Some(Action::ToggleStage),
             KeyCode::Char('C') => Some(Action::StartCommit),
             KeyCode::Char('y') => Some(Action::ExportPatch),
+            KeyCode::Char('Y') => Some(Action::RequestApplyPatch),
             KeyCode::Char('f') => Some(Action::RequestFetch),
             KeyCode::Char('p') => Some(Action::RequestPull),
             KeyCode::Char('P') => Some(Action::RequestPush),
@@ -240,6 +241,14 @@ mod tests {
         assert_eq!(
             action_for(press(KeyCode::Char('y')), InputContext::Normal),
             Some(Action::ExportPatch)
+        );
+    }
+
+    #[test]
+    fn shift_y_maps_to_request_apply_patch_in_the_normal_context() {
+        assert_eq!(
+            action_for(press(KeyCode::Char('Y')), InputContext::Normal),
+            Some(Action::RequestApplyPatch)
         );
     }
 

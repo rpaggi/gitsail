@@ -15,7 +15,7 @@ use ratatui::text::Line;
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
 use ratatui::Frame;
 
-use crate::app::{App, DiffViewMode, Panel, PatchExportOutcome, ReferenceView, ViewPhase};
+use crate::app::{App, DiffViewMode, Panel, PatchApplyOutcome, PatchExportOutcome, ReferenceView, ViewPhase};
 use crate::operation::OperationState;
 use crate::sanitize;
 use crate::status_view::DiffScope;
@@ -389,6 +389,7 @@ fn diff_lines(app: &App) -> Vec<Line<'static>> {
     // currently loading; an `if let ... return` chain would otherwise hide
     // it whenever one of those early states applies.
     let banner = app.patch_export().map(patch_export_banner);
+    let apply_banner = app.patch_apply_outcome().map(patch_apply_banner);
 
     let mut lines = Vec::new();
     if let Some(err) = app.diff_error() {
@@ -434,6 +435,9 @@ fn diff_lines(app: &App) -> Vec<Line<'static>> {
         lines.push(Line::from("Loading diff…"));
     }
 
+    if let Some(banner) = apply_banner {
+        lines.insert(0, banner);
+    }
     if let Some(banner) = banner {
         lines.insert(0, banner);
     }
@@ -477,6 +481,25 @@ fn patch_export_banner(outcome: &PatchExportOutcome) -> Line<'static> {
         PatchExportOutcome::Empty => {
             "Nothing to export — no content hunks in the current diff".to_string()
         }
+    };
+    Line::from(sanitize::safe_line(&text)).style(Style::default().add_modifier(Modifier::BOLD))
+}
+
+/// Renders the outcome of the last `Y` (apply patch) press as a single,
+/// bold banner line (T-163/US-030 criteria 1-3), mirroring
+/// [`patch_export_banner`]'s own convention.
+fn patch_apply_banner(outcome: &PatchApplyOutcome) -> Line<'static> {
+    let text = match outcome {
+        PatchApplyOutcome::ClipboardEmpty { reason } => {
+            format!("Nothing to apply from the clipboard ({reason})")
+        }
+        PatchApplyOutcome::Rejected { reason } => format!("Patch rejected: {reason}"),
+        PatchApplyOutcome::Failed { reason } => format!("Patch apply failed: {reason}"),
+        PatchApplyOutcome::Applied { affected_files } => format!(
+            "Patch applied — {} file{} changed",
+            affected_files.len(),
+            if affected_files.len() == 1 { "" } else { "s" }
+        ),
     };
     Line::from(sanitize::safe_line(&text)).style(Style::default().add_modifier(Modifier::BOLD))
 }
@@ -987,6 +1010,7 @@ fn render_help(frame: &mut Frame, area: Rect) {
         Line::from("/ (Graph)         search commits: text, author:, branch:, hash"),
         Line::from("b                 toggle diff/blame view"),
         Line::from("y (Diff)          copy the diff's patch (or save to a file)"),
+        Line::from("Y (Diff)          apply the patch on the clipboard (preview, then confirm)"),
         Line::from("s                 stage/unstage the highlighted entry"),
         Line::from("C                 compose a commit"),
         Line::from("n                 create a branch"),

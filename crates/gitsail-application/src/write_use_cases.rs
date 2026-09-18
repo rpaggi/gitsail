@@ -12,8 +12,8 @@ use gitsail_domain::{
 
 use crate::mutation::Precondition;
 use crate::write_ports::{
-    PullOutcome, RepositoryWritePort, StashApplyOutcome, StashScope, TagAnnotation,
-    WorktreeBranchSpec,
+    ApplyPatchResult, PatchPreview, PullOutcome, RepositoryWritePort, StashApplyOutcome,
+    StashScope, TagAnnotation, WorktreeBranchSpec,
 };
 
 pub struct StageFiles {
@@ -396,6 +396,38 @@ impl ForcePushWithLease {
     }
 }
 
+/// Previews whether a patch can be applied, without side effects (US-030
+/// criterion 1). See [`RepositoryWritePort::preview_patch_application`].
+pub struct PreviewPatchApplication {
+    port: Arc<dyn RepositoryWritePort>,
+}
+
+impl PreviewPatchApplication {
+    pub fn new(port: Arc<dyn RepositoryWritePort>) -> Self {
+        Self { port }
+    }
+
+    pub fn execute(&self, repo: &Repository, patch_text: &str) -> Result<PatchPreview, GitSailError> {
+        self.port.preview_patch_application(repo, patch_text)
+    }
+}
+
+/// Applies a patch to the working tree (US-030). See
+/// [`RepositoryWritePort::apply_patch`].
+pub struct ApplyPatch {
+    port: Arc<dyn RepositoryWritePort>,
+}
+
+impl ApplyPatch {
+    pub fn new(port: Arc<dyn RepositoryWritePort>) -> Self {
+        Self { port }
+    }
+
+    pub fn execute(&self, repo: &Repository, patch_text: &str) -> Result<ApplyPatchResult, GitSailError> {
+        self.port.apply_patch(repo, patch_text)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -438,6 +470,10 @@ mod tests {
         pull_outcome: PullOutcome,
         received_push: Mutex<Option<(String, BranchName)>>,
         received_force_push: Mutex<Option<(String, BranchName, CommitHash)>>,
+        received_preview_patch: Mutex<Option<String>>,
+        patch_preview: PatchPreview,
+        received_apply_patch: Mutex<Option<String>>,
+        apply_patch_result: ApplyPatchResult,
     }
 
     fn sample_stash() -> Stash {
@@ -496,6 +532,16 @@ mod tests {
                 },
                 received_push: Mutex::new(None),
                 received_force_push: Mutex::new(None),
+                received_preview_patch: Mutex::new(None),
+                patch_preview: PatchPreview {
+                    affected_files: vec![PathBuf::from("a.txt")],
+                    supported: true,
+                    rejection_reason: None,
+                },
+                received_apply_patch: Mutex::new(None),
+                apply_patch_result: ApplyPatchResult {
+                    applied_files: vec![PathBuf::from("a.txt")],
+                },
             }
         }
 
@@ -809,6 +855,36 @@ mod tests {
                 ));
             }
             Ok(())
+        }
+
+        fn preview_patch_application(
+            &self,
+            _repo: &Repository,
+            patch_text: &str,
+        ) -> Result<PatchPreview, GitSailError> {
+            *self.received_preview_patch.lock().unwrap() = Some(patch_text.to_string());
+            if self.fail {
+                return Err(GitSailError::new(
+                    ErrorCode::InvalidRepositoryState,
+                    "patch is malformed",
+                ));
+            }
+            Ok(self.patch_preview.clone())
+        }
+
+        fn apply_patch(
+            &self,
+            _repo: &Repository,
+            patch_text: &str,
+        ) -> Result<ApplyPatchResult, GitSailError> {
+            *self.received_apply_patch.lock().unwrap() = Some(patch_text.to_string());
+            if self.fail {
+                return Err(GitSailError::new(
+                    ErrorCode::OperationConflict,
+                    "the patch no longer applies to the current file content",
+                ));
+            }
+            Ok(self.apply_patch_result.clone())
         }
     }
 
@@ -1395,6 +1471,64 @@ mod tests {
                 &expected,
                 &CancellationToken::new(),
             )
+            .unwrap_err();
+
+        assert_eq!(err.code(), ErrorCode::OperationConflict);
+    }
+
+    // -----------------------------------------------------------------
+    // T-163/US-030: preview/apply patch use cases.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn preview_patch_application_delegates_to_port_with_the_exact_patch_text() {
+        let port = Arc::new(FakeWritePort::new());
+        let use_case = PreviewPatchApplication::new(port.clone());
+        let patch_text = "--- a/a.txt\n+++ b/a.txt\n@@ -1,1 +1,1 @@\n-old\n+new\n";
+
+        let preview = use_case.execute(&sample_repository(), patch_text).unwrap();
+
+        assert_eq!(preview, port.patch_preview);
+        assert_eq!(
+            *port.received_preview_patch.lock().unwrap(),
+            Some(patch_text.to_string())
+        );
+    }
+
+    #[test]
+    fn preview_patch_application_propagates_port_error_without_a_false_success() {
+        let port = Arc::new(FakeWritePort::failing());
+        let use_case = PreviewPatchApplication::new(port);
+
+        let err = use_case
+            .execute(&sample_repository(), "not a patch")
+            .unwrap_err();
+
+        assert_eq!(err.code(), ErrorCode::InvalidRepositoryState);
+    }
+
+    #[test]
+    fn apply_patch_delegates_to_port_and_returns_the_applied_files() {
+        let port = Arc::new(FakeWritePort::new());
+        let use_case = ApplyPatch::new(port.clone());
+        let patch_text = "--- a/a.txt\n+++ b/a.txt\n@@ -1,1 +1,1 @@\n-old\n+new\n";
+
+        let result = use_case.execute(&sample_repository(), patch_text).unwrap();
+
+        assert_eq!(result, port.apply_patch_result);
+        assert_eq!(
+            *port.received_apply_patch.lock().unwrap(),
+            Some(patch_text.to_string())
+        );
+    }
+
+    #[test]
+    fn apply_patch_propagates_a_stale_context_conflict_without_a_false_success() {
+        let port = Arc::new(FakeWritePort::failing());
+        let use_case = ApplyPatch::new(port);
+
+        let err = use_case
+            .execute(&sample_repository(), "--- a/a.txt\n+++ b/a.txt\n")
             .unwrap_err();
 
         assert_eq!(err.code(), ErrorCode::OperationConflict);

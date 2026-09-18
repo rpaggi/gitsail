@@ -16,8 +16,8 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use gitsail_application::{
-    export_patch, BlameRequest, CommitQuery, DiffRequest, Page, PullOutcome, RefreshReason,
-    RepositoryReadPort, RepositorySession,
+    export_patch, ApplyPatchResult, BlameRequest, CommitQuery, DiffRequest, Page, PatchPreview,
+    PullOutcome, RefreshReason, RepositoryReadPort, RepositorySession,
 };
 use gitsail_domain::{
     Blame, Branch, BranchKind, BranchName, Commit, CommitGraph, CommitHash, Diff, ErrorCode,
@@ -168,6 +168,29 @@ pub enum PatchExportOutcome {
     Empty,
 }
 
+/// Outcome of the last [`Action::RequestApplyPatch`] (T-163/US-030),
+/// mirroring [`PatchExportOutcome`]'s "always state the outcome
+/// explicitly, never leave it to be inferred" convention. Shown as a
+/// transient banner in the Diff panel, replaced by the next apply attempt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PatchApplyOutcome {
+    /// The clipboard had nothing usable to apply — empty, or unavailable
+    /// (`reason` carries why). Nothing was previewed or confirmed.
+    ClipboardEmpty { reason: String },
+    /// The preview (`git apply --check`) rejected the patch — malformed,
+    /// referencing a path outside the repository, or with a context that
+    /// no longer matches the current file content (US-030 criterion 2).
+    /// Confirmation is never reached in this case.
+    Rejected { reason: String },
+    /// The confirmed apply itself failed — e.g. the file changed again
+    /// between preview and confirmation. Reported honestly, never as an
+    /// implicit rollback (US-030 criterion 3).
+    Failed { reason: String },
+    /// The patch was applied. Carries exactly the files touched (US-030
+    /// criterion 3: never a generic "done").
+    Applied { affected_files: Vec<PathBuf> },
+}
+
 /// How many commits [`App`] requests per commit-graph page (US-065, US-066
 /// criterion 3). Not tuned for any particular repository size — a large
 /// enough value that a typical scroll session rarely needs a second
@@ -265,6 +288,17 @@ pub struct App {
     clipboard: Arc<dyn ClipboardPort>,
     patch_export: Option<PatchExportOutcome>,
 
+    // -- T-163/US-030: apply a patch --------------------------------------
+    /// Transient banner mirroring [`Self::patch_export`]'s own convention.
+    patch_apply_outcome: Option<PatchApplyOutcome>,
+    /// The exact clipboard text a supported preview was just built from,
+    /// held onto so the confirmed [`crate::worker::Command::ApplyPatch`]
+    /// reuses it unchanged rather than re-reading a clipboard that may
+    /// have changed since (criterion 1's preview and criterion 3's applied
+    /// result must always refer to the same patch). Cleared once the
+    /// pending operation is dispatched or cancelled.
+    pending_patch_text: Option<String>,
+
     // -- US-048: branch administration ----------------------------------
     branch_input: Option<String>,
 
@@ -353,6 +387,8 @@ impl App {
             last_pull_outcome: None,
             clipboard,
             patch_export: None,
+            patch_apply_outcome: None,
+            pending_patch_text: None,
             branch_input: None,
             commit_message: None,
             pending_paths: Vec::new(),
@@ -545,6 +581,12 @@ impl App {
     /// a new diff selection.
     pub fn patch_export(&self) -> Option<&PatchExportOutcome> {
         self.patch_export.as_ref()
+    }
+
+    /// The outcome of the last [`Action::RequestApplyPatch`] flow
+    /// (T-163/US-030), mirroring [`Self::patch_export`].
+    pub fn patch_apply_outcome(&self) -> Option<&PatchApplyOutcome> {
+        self.patch_apply_outcome.as_ref()
     }
 
     pub fn branch_input(&self) -> Option<&str> {
@@ -799,6 +841,7 @@ impl App {
                 }
                 Vec::new()
             }
+            Action::RequestApplyPatch => self.request_apply_patch(),
         }
     }
 
@@ -1412,6 +1455,37 @@ impl App {
         Vec::new()
     }
 
+    /// Starts T-163/US-030's apply-patch flow (`Y`, Diff panel only,
+    /// mirroring [`Self::export_patch`]'s own `y`-gating): reads the
+    /// clipboard and, if it has usable text, dispatches the non-mutating
+    /// preview (`git apply --check`, US-030 criterion 1). Never applies
+    /// anything itself, and never even reaches [`OperationState::Confirming`]
+    /// for an empty/unavailable clipboard — there is nothing to confirm.
+    fn request_apply_patch(&mut self) -> Vec<Command> {
+        if self.focus != Panel::Diff {
+            return Vec::new();
+        }
+        self.patch_apply_outcome = None;
+        let Some(session) = self.session.as_ref() else {
+            return Vec::new();
+        };
+        let patch_text = match self.clipboard.get_text() {
+            Ok(text) if !text.trim().is_empty() => text,
+            Ok(_) => {
+                self.patch_apply_outcome = Some(PatchApplyOutcome::ClipboardEmpty {
+                    reason: "the clipboard is empty".to_string(),
+                });
+                return Vec::new();
+            }
+            Err(reason) => {
+                self.patch_apply_outcome = Some(PatchApplyOutcome::ClipboardEmpty { reason });
+                return Vec::new();
+            }
+        };
+        let repo = session.repository().clone();
+        vec![Command::PreviewPatchApplication(repo, patch_text)]
+    }
+
     /// Turns a confirmed [`OperationKind`] into the [`Command`] that
     /// actually runs it. A malformed name (only possible from a
     /// hand-typed branch name — `Branch`/`StatusEntry`-derived kinds are
@@ -1473,6 +1547,10 @@ impl App {
                     Vec::new()
                 }
             },
+            OperationKind::ApplyPatch { .. } => {
+                let patch_text = std::mem::take(&mut self.pending_patch_text).unwrap_or_default();
+                vec![Command::ApplyPatch(repo, patch_text)]
+            }
         }
     }
 
@@ -1522,6 +1600,8 @@ impl App {
                 self.reference_cursor = 0;
                 self.sync_error = None;
                 self.last_pull_outcome = None;
+                self.patch_apply_outcome = None;
+                self.pending_patch_text = None;
 
                 let mut commands = vec![
                     Command::RefreshStatus(ticket, repo.clone()),
@@ -1799,6 +1879,59 @@ impl App {
                 self.refresh_commands_for(RefreshReason::AfterMutation)
             }
             Err(error) => {
+                self.operation.fail(error);
+                Vec::new()
+            }
+        }
+    }
+
+    /// Handles [`crate::message::Message::PatchPreviewed`] (T-163/US-030
+    /// criterion 1). A supported preview starts [`OperationState::Confirming`]
+    /// with the concrete affected-file count and holds onto the exact patch
+    /// text for the confirmed apply; an unsupported preview (US-030
+    /// criterion 2: malformed, out-of-repository path, or stale context) —
+    /// or a hard failure building it at all — is reported as a clear
+    /// banner and never reaches confirmation.
+    pub fn on_patch_previewed(&mut self, result: Result<PatchPreview, GitSailError>, patch_text: String) {
+        match result {
+            Ok(preview) if preview.supported => {
+                let affected_file_count = preview.affected_files.len();
+                self.pending_patch_text = Some(patch_text);
+                self.operation.begin(OperationKind::ApplyPatch { affected_file_count });
+            }
+            Ok(preview) => {
+                self.patch_apply_outcome = Some(PatchApplyOutcome::Rejected {
+                    reason: preview
+                        .rejection_reason
+                        .unwrap_or_else(|| "the patch cannot be applied".to_string()),
+                });
+            }
+            Err(error) => {
+                self.patch_apply_outcome = Some(PatchApplyOutcome::Rejected {
+                    reason: error.message().to_string(),
+                });
+            }
+        }
+    }
+
+    /// Handles [`crate::message::Message::PatchApplied`] (T-163/US-030).
+    /// Success reports exactly the applied files (criterion 3) and
+    /// refreshes; failure — e.g. the file changed again between preview and
+    /// confirmation — moves to [`OperationState::Failed`] and reports a
+    /// banner, never claiming a rollback Git does not actually guarantee.
+    pub fn on_patch_applied(&mut self, result: Result<ApplyPatchResult, GitSailError>) -> Vec<Command> {
+        match result {
+            Ok(applied) => {
+                self.operation.succeed();
+                self.patch_apply_outcome = Some(PatchApplyOutcome::Applied {
+                    affected_files: applied.applied_files,
+                });
+                self.refresh_commands_for(RefreshReason::AfterMutation)
+            }
+            Err(error) => {
+                self.patch_apply_outcome = Some(PatchApplyOutcome::Failed {
+                    reason: error.message().to_string(),
+                });
                 self.operation.fail(error);
                 Vec::new()
             }
@@ -2728,6 +2861,169 @@ mod tests {
             app.patch_export().is_none(),
             "a new diff selection must clear the previous export result"
         );
+    }
+
+    // -- T-163/US-030: apply a patch ---------------------------------------
+
+    fn sample_patch_preview(supported: bool) -> PatchPreview {
+        PatchPreview {
+            affected_files: vec![PathBuf::from("a.txt")],
+            supported,
+            rejection_reason: if supported {
+                None
+            } else {
+                Some("the patch no longer applies to the current file content".to_string())
+            },
+        }
+    }
+
+    #[test]
+    fn apply_patch_reads_the_clipboard_and_dispatches_a_preview() {
+        let clipboard = Arc::new(FakeClipboard {
+            contents: std::sync::Mutex::new(Some("--- a/a.txt\n+++ b/a.txt\n".to_string())),
+            ..Default::default()
+        });
+        let (mut app, _port) = new_app_with_clipboard(clipboard);
+        app_with_diff_focused(&mut app, modified_a_txt_diff());
+
+        let commands = app.update(Action::RequestApplyPatch);
+
+        match commands.as_slice() {
+            [Command::PreviewPatchApplication(_, patch_text)] => {
+                assert_eq!(patch_text, "--- a/a.txt\n+++ b/a.txt\n");
+            }
+            other => panic!("expected exactly one PreviewPatchApplication command, got {other:?}"),
+        }
+        assert!(
+            app.operation().is_idle(),
+            "the preview alone must never start a confirmation"
+        );
+    }
+
+    #[test]
+    fn apply_patch_outside_the_diff_panel_is_a_no_op() {
+        let clipboard = Arc::new(FakeClipboard {
+            contents: std::sync::Mutex::new(Some("a patch".to_string())),
+            ..Default::default()
+        });
+        let (mut app, _port) = new_app_with_clipboard(clipboard);
+        open_and_load_dirty_status(&mut app);
+        assert_eq!(app.focus(), Panel::Sidebar);
+
+        let commands = app.update(Action::RequestApplyPatch);
+
+        assert!(commands.is_empty());
+        assert!(app.patch_apply_outcome().is_none());
+    }
+
+    #[test]
+    fn apply_patch_with_an_empty_clipboard_reports_clipboard_empty_without_a_command() {
+        let clipboard = Arc::new(FakeClipboard::default());
+        let (mut app, _port) = new_app_with_clipboard(clipboard);
+        app_with_diff_focused(&mut app, modified_a_txt_diff());
+
+        let commands = app.update(Action::RequestApplyPatch);
+
+        assert!(commands.is_empty());
+        assert!(matches!(
+            app.patch_apply_outcome(),
+            Some(PatchApplyOutcome::ClipboardEmpty { .. })
+        ));
+    }
+
+    #[test]
+    fn a_supported_preview_starts_confirmation_with_the_concrete_affected_file_count() {
+        let clipboard = Arc::new(FakeClipboard::default());
+        let (mut app, _port) = new_app_with_clipboard(clipboard);
+        app_with_diff_focused(&mut app, modified_a_txt_diff());
+
+        app.on_patch_previewed(Ok(sample_patch_preview(true)), "the patch text".to_string());
+
+        assert!(matches!(
+            app.operation(),
+            OperationState::Confirming(OperationKind::ApplyPatch {
+                affected_file_count: 1
+            })
+        ));
+        assert!(
+            app.patch_apply_outcome().is_none(),
+            "a supported preview is not itself a banner-worthy outcome"
+        );
+
+        let commands = app.update(Action::Activate);
+        match commands.as_slice() {
+            [Command::ApplyPatch(_, patch_text)] => assert_eq!(patch_text, "the patch text"),
+            other => panic!("expected exactly one ApplyPatch command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_unsupported_preview_is_rejected_with_a_clear_reason_and_never_reaches_confirmation() {
+        let clipboard = Arc::new(FakeClipboard::default());
+        let (mut app, _port) = new_app_with_clipboard(clipboard);
+        app_with_diff_focused(&mut app, modified_a_txt_diff());
+
+        app.on_patch_previewed(Ok(sample_patch_preview(false)), "the patch text".to_string());
+
+        assert!(
+            app.operation().is_idle(),
+            "a rejected preview must never start a confirmation"
+        );
+        match app.patch_apply_outcome() {
+            Some(PatchApplyOutcome::Rejected { reason }) => assert!(!reason.is_empty()),
+            other => panic!("expected Rejected, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_successful_apply_reports_the_applied_files_and_refreshes() {
+        let clipboard = Arc::new(FakeClipboard::default());
+        let (mut app, _port) = new_app_with_clipboard(clipboard);
+        app_with_diff_focused(&mut app, modified_a_txt_diff());
+        app.on_patch_previewed(Ok(sample_patch_preview(true)), "the patch text".to_string());
+        app.update(Action::Activate);
+
+        let commands = app.on_patch_applied(Ok(ApplyPatchResult {
+            applied_files: vec![PathBuf::from("a.txt")],
+        }));
+
+        assert!(
+            commands
+                .iter()
+                .any(|c| matches!(c, Command::RefreshStatus(_, _))),
+            "a successful apply must refresh"
+        );
+        match app.patch_apply_outcome() {
+            Some(PatchApplyOutcome::Applied { affected_files }) => {
+                assert_eq!(affected_files, &[PathBuf::from("a.txt")]);
+            }
+            other => panic!("expected Applied, got {other:?}"),
+        }
+        assert!(matches!(app.operation(), OperationState::Succeeded(_)));
+    }
+
+    #[test]
+    fn a_failed_confirmed_apply_reports_failure_without_claiming_a_rollback() {
+        let clipboard = Arc::new(FakeClipboard::default());
+        let (mut app, _port) = new_app_with_clipboard(clipboard);
+        app_with_diff_focused(&mut app, modified_a_txt_diff());
+        app.on_patch_previewed(Ok(sample_patch_preview(true)), "the patch text".to_string());
+        app.update(Action::Activate);
+
+        let commands = app.on_patch_applied(Err(GitSailError::new(
+            ErrorCode::OperationConflict,
+            "the patch no longer applies to the current file content",
+        )));
+
+        assert!(commands.is_empty(), "a failed apply must never refresh");
+        match app.patch_apply_outcome() {
+            Some(PatchApplyOutcome::Failed { reason }) => {
+                assert!(!reason.to_lowercase().contains("rollback"));
+                assert!(!reason.is_empty());
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
+        assert!(matches!(app.operation(), OperationState::Failed(_, _)));
     }
 
     // -- US-049: sync with a remote ---------------------------------------

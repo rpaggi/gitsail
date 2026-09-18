@@ -93,6 +93,59 @@ pub enum WorktreeBranchSpec {
     Detached(CommitHash),
 }
 
+/// Preview of what applying a candidate patch would do, built from a
+/// non-mutating `git apply --check` (US-030 criterion 1): a presentation
+/// layer shows this — affected files and whether the destination is
+/// supported — *before* asking for confirmation. Building this never
+/// touches the working tree, the index, or any ref.
+///
+/// [`Self::affected_files`] is derived directly from the patch's own
+/// `---`/`+++` unified-diff headers, independent of whether `git apply`
+/// would accept it — a rejected patch still shows what it *claimed* to
+/// touch (e.g. a path traversal attempt shows the offending path itself,
+/// which is exactly what makes [`Self::rejection_reason`] concrete rather
+/// than generic).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PatchPreview {
+    /// Every path the patch's headers declare touching, in header order,
+    /// deduplicated. Populated even when [`Self::supported`] is `false`, to
+    /// the extent the patch text has recognizable file headers at all (a
+    /// patch with none yields an empty list here rather than a fabricated
+    /// guess).
+    pub affected_files: Vec<PathBuf>,
+    /// Whether this exact patch, against the repository's current state,
+    /// can actually be applied. `false` for a malformed patch, a patch
+    /// referencing a path outside the repository, or a patch whose context
+    /// no longer matches the current file content (US-030 criterion 2).
+    pub supported: bool,
+    /// A clear, human-readable reason `supported` is `false`. Always `None`
+    /// when `supported` is `true`.
+    pub rejection_reason: Option<String>,
+}
+
+/// Result of a successful [`RepositoryWritePort::apply_patch`] (US-030
+/// criterion 3): exactly which files were modified, so a caller never has
+/// to guess or re-diff to find out.
+///
+/// There is deliberately no "applied some files, failed on others" variant
+/// here: a single `git apply` invocation validates every hunk of every file
+/// *before* writing anything, so it either applies the whole patch or
+/// writes nothing at all — verified empirically against a real multi-file
+/// patch where one file's hunk was made stale on purpose (see
+/// `gitsail-git`'s `apply_patch_is_all_or_nothing_across_files` test): the
+/// working tree came back completely untouched, not partially patched.
+/// [`RepositoryWritePort::apply_patch`] additionally never passes
+/// `--unsafe-paths`, so it can never write outside the repository either
+/// (verified against a real path-traversal and a real symlink-escape
+/// patch in that same test module) — a failure from it is always a plain
+/// `Err` with the repository left exactly as it was found, never described
+/// as "rolled back" (Git provides no such guarantee, and this port makes
+/// none either).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ApplyPatchResult {
+    pub applied_files: Vec<PathBuf>,
+}
+
 /// Outcome of [`RepositoryWritePort::pull`] (US-097 criterion 2's "fast-
 /// forward only" policy). Mirrors [`StashApplyOutcome`]'s "legitimate,
 /// expected outcome, not an error" convention: a pull with nothing new to
@@ -442,5 +495,55 @@ pub trait RepositoryWritePort: Send + Sync {
     ) -> Result<(), GitSailError> {
         let _ = (repo, remote, branch, expected_remote_head, cancel);
         Err(unsupported("force_push_with_lease"))
+    }
+
+    // -------------------------------------------------------------------
+    // EPIC-06/T-163 (US-030): applying a selected patch. Defaulted the same
+    // way as the EPIC-18/19 batches above, for the same reason (existing
+    // `RepositoryWritePort` implementers predating this task keep compiling
+    // unchanged). [`gitsail_git::GitCliProvider`] overrides both with a real
+    // `git apply` implementation.
+
+    /// Validates `patch_text` against the repository's current state via a
+    /// non-mutating `git apply --check` and reports which files it would
+    /// touch (US-030 criterion 1). Never passes `--unsafe-paths` — Git
+    /// itself then refuses a patch referencing an absolute path, a path
+    /// with a `..` component, or a path reached through a symbolic link,
+    /// all verified empirically (see [`ApplyPatchResult`]'s doc) — so this
+    /// preview, and [`Self::apply_patch`] which shares the same invocation
+    /// shape, can never write outside the repository.
+    fn preview_patch_application(
+        &self,
+        repo: &Repository,
+        patch_text: &str,
+    ) -> Result<PatchPreview, GitSailError> {
+        let _ = (repo, patch_text);
+        Err(unsupported("preview_patch_application"))
+    }
+
+    /// Applies `patch_text` to the working tree via a plain `git apply`
+    /// (never `--cached`/`--index`: this reuses changes into the working
+    /// tree for a person to review/stage/commit normally, a distinct
+    /// capability from [`Self::stage_hunks`]'s index-only hunk staging).
+    ///
+    /// Revalidates with the same `--check` [`Self::preview_patch_application`]
+    /// performs, immediately before writing anything (Destructive
+    /// Operations & Confirmation Guardrails rule 4: a confirmation given
+    /// against an older state must never authorize execution against a
+    /// newer one) — a caller that already previewed moments ago still gets
+    /// this re-check for free, rather than having to remember to ask for it
+    /// again itself. Rejects a malformed patch, a patch referencing a path
+    /// outside the repository, or a patch whose context no longer matches
+    /// the current file content (US-030 criterion 2), and never applies
+    /// part of the patch while rejecting the rest of it (US-030 criterion
+    /// 3; see [`ApplyPatchResult`]'s doc for why that "partial apply" case
+    /// does not exist for a single `git apply` invocation).
+    fn apply_patch(
+        &self,
+        repo: &Repository,
+        patch_text: &str,
+    ) -> Result<ApplyPatchResult, GitSailError> {
+        let _ = (repo, patch_text);
+        Err(unsupported("apply_patch"))
     }
 }

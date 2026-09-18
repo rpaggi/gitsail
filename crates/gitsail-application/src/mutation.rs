@@ -160,6 +160,14 @@ pub enum MutationKind {
         remote: String,
         branch: String,
     },
+    /// EPIC-06/T-163 (US-030): `RepositoryWritePort::apply_patch`. Carries
+    /// the affected-file count from the already-computed
+    /// [`crate::write_ports::PatchPreview`] so a confirmation prompt names
+    /// concrete scope rather than a generic "apply a patch" (mirrors
+    /// [`Self::target_label`]'s convention across every other variant here).
+    ApplyPatch {
+        affected_file_count: usize,
+    },
 }
 
 impl MutationKind {
@@ -258,6 +266,14 @@ impl MutationKind {
             // makes safe to do) — SAD §20's own "force push" example of a
             // `Destructive` operation.
             MutationKind::ForcePushWithLease { .. } => RiskLevel::Destructive,
+            // Applying a patch mutates the working tree — the same
+            // character `CreateCommit`/`SwitchBranch` already have — but is
+            // not irreversible the way SAD §20's `Destructive` examples
+            // are: the patch text itself remains available to reapply, and
+            // `RepositoryWritePort::apply_patch` never touches the index or
+            // HEAD, only working-tree file content. Hence `Moderate`, per
+            // this task's own scope note (T-163/US-030).
+            MutationKind::ApplyPatch { .. } => RiskLevel::Moderate,
         }
     }
 
@@ -293,6 +309,12 @@ impl MutationKind {
             }
             MutationKind::ForcePushWithLease { remote, branch } => {
                 format!("branch '{branch}' on remote '{remote}' (force push with lease)")
+            }
+            MutationKind::ApplyPatch { affected_file_count } => {
+                format!(
+                    "{affected_file_count} file{} affected by the patch",
+                    if *affected_file_count == 1 { "" } else { "s" }
+                )
             }
         }
     }
@@ -533,6 +555,25 @@ mod tests {
         .target_label();
         assert!(force_label.contains("feature/x"));
         assert!(force_label.contains("force"));
+    }
+
+    /// T-163/US-030: `ApplyPatch` classifies `Moderate` (mutates the working
+    /// tree but never HEAD/index, and is not irreversible) and its label
+    /// names the concrete affected-file count rather than a generic
+    /// "apply a patch".
+    #[test]
+    fn apply_patch_classifies_moderate_with_a_concrete_target_label() {
+        let one_file = MutationKind::ApplyPatch {
+            affected_file_count: 1,
+        };
+        assert_eq!(one_file.risk(), RiskLevel::Moderate);
+        assert!(!one_file.risk().requires_reinforced_confirmation());
+        assert_eq!(one_file.target_label(), "1 file affected by the patch");
+
+        let three_files = MutationKind::ApplyPatch {
+            affected_file_count: 3,
+        };
+        assert_eq!(three_files.target_label(), "3 files affected by the patch");
     }
 
     #[test]

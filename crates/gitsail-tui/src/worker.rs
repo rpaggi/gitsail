@@ -21,10 +21,10 @@ use std::sync::Arc;
 use std::thread;
 
 use gitsail_application::{
-    BlameRequest, CommitQuery, CreateBranch, CreateCommit, DeleteBranch, DiffRequest, Fetch,
-    GetCommitHistory, GetDiff, GetFileBlame, GetRepositoryStatus, ListBranches, OpenRepository,
-    Pull, Push, RefreshTicket, RepositoryReadPort, RepositoryWritePort, StageFiles, SwitchBranch,
-    UnstageFiles,
+    ApplyPatch, BlameRequest, CommitQuery, CreateBranch, CreateCommit, DeleteBranch, DiffRequest,
+    Fetch, GetCommitHistory, GetDiff, GetFileBlame, GetRepositoryStatus, ListBranches,
+    OpenRepository, PreviewPatchApplication, Pull, Push, RefreshTicket, RepositoryReadPort,
+    RepositoryWritePort, StageFiles, SwitchBranch, UnstageFiles,
 };
 use gitsail_domain::{BranchName, CancellationToken, CommitHash, Repository};
 
@@ -74,6 +74,15 @@ pub enum Command {
     Pull(Repository, String, BranchName),
     /// Pushes the current `branch` to `remote` (US-049), never forcing.
     Push(Repository, String, BranchName),
+    /// Validates a candidate patch via `git apply --check`, without side
+    /// effects (T-163/US-030 criterion 1). Dispatched as soon as
+    /// `Action::RequestApplyPatch` reads a non-empty clipboard — *before*
+    /// any confirmation, since building the preview itself needs no
+    /// confirmation (it never mutates anything).
+    PreviewPatchApplication(Repository, String),
+    /// Applies a previously previewed, now-confirmed patch to the working
+    /// tree (T-163/US-030).
+    ApplyPatch(Repository, String),
 }
 
 /// Spawns one background thread per command in `commands`, each reporting
@@ -182,6 +191,14 @@ fn spawn_one(
                 let result =
                     Push::new(write_port).execute(&repo, &remote, &branch, &CancellationToken::new());
                 Message::OperationFinished(result)
+            }
+            Command::PreviewPatchApplication(repo, patch_text) => {
+                let result = PreviewPatchApplication::new(write_port).execute(&repo, &patch_text);
+                Message::PatchPreviewed(result, patch_text)
+            }
+            Command::ApplyPatch(repo, patch_text) => {
+                let result = ApplyPatch::new(write_port).execute(&repo, &patch_text);
+                Message::PatchApplied(result)
             }
         };
         // The receiving end only disappears once the app is shutting down

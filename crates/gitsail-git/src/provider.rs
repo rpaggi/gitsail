@@ -20,9 +20,9 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use gitsail_application::{
-    BlameRequest, CommitQuery, DiffRequest, LineHistoryRequest, Page, Precondition, PullOutcome,
-    RepositoryReadPort, RepositoryWritePort, StashApplyOutcome, StashScope, TagAnnotation,
-    WorktreeBranchSpec,
+    ApplyPatchResult, BlameRequest, CommitQuery, DiffRequest, LineHistoryRequest, Page,
+    PatchPreview, Precondition, PullOutcome, RepositoryReadPort, RepositoryWritePort,
+    StashApplyOutcome, StashScope, TagAnnotation, WorktreeBranchSpec,
 };
 use gitsail_domain::{
     Blame, BlameLine, BlameOrigin, Branch, BranchKind, BranchName, ChangeType, Commit, CommitHash,
@@ -1411,6 +1411,60 @@ impl RepositoryWritePort for GitCliProvider {
             .map_err(classify_force_push_failure)?;
         Ok(())
     }
+
+    /// See [`RepositoryWritePort::preview_patch_application`]. Delegates to
+    /// [`Self::check_patch_application`], discarding the `ErrorCode`
+    /// [`Self::apply_patch`] additionally needs.
+    fn preview_patch_application(
+        &self,
+        repo: &Repository,
+        patch_text: &str,
+    ) -> Result<PatchPreview, GitSailError> {
+        self.check_patch_application(repo, patch_text)
+            .map(|(preview, _rejection_code)| preview)
+    }
+
+    /// See [`RepositoryWritePort::apply_patch`]. Shares
+    /// [`Self::check_patch_application`] with the preview, so the
+    /// immediate re-check this performs right before writing anything can
+    /// never classify a rejection differently than the preview a caller
+    /// just showed a moment earlier.
+    fn apply_patch(&self, repo: &Repository, patch_text: &str) -> Result<ApplyPatchResult, GitSailError> {
+        let (preview, rejection_code) = self.check_patch_application(repo, patch_text)?;
+        if let Some(code) = rejection_code {
+            return Err(GitSailError::new(
+                code,
+                preview
+                    .rejection_reason
+                    .unwrap_or_else(|| "the patch cannot be applied".to_string()),
+            )
+            .with_remediation("refresh the patch and retry, or resolve the reported conflict"));
+        }
+
+        // A plain `git apply` — never `--cached`/`--index` (this writes the
+        // working tree, distinct from `stage_hunks`'s index-only apply) and
+        // never `--unsafe-paths` (US-030 DoD: a malicious patch must never
+        // write outside the repository; verified empirically against a
+        // real path-traversal, absolute-path, and symlink-escape patch —
+        // see `gitsail-git`'s test suite). `--whitespace=nowarn` matches
+        // `apply_hunk_selection`'s own choice: whitespace warnings are
+        // noise here, never a reason to refuse an otherwise-valid patch.
+        let args = vec![
+            "apply".to_string(),
+            "--whitespace=nowarn".to_string(),
+            "-".to_string(),
+        ];
+        self.run_with_stdin(args, &repo.root_path, patch_text.as_bytes().to_vec())
+            .map_err(|err| {
+                let (code, reason) = classify_patch_check_failure(&err);
+                GitSailError::new(code, reason)
+                    .with_remediation("refresh the diff/patch and retry")
+                    .with_source(err)
+            })?;
+        Ok(ApplyPatchResult {
+            applied_files: preview.affected_files,
+        })
+    }
 }
 
 /// Direction in which a reconstructed hunk patch is applied to the index:
@@ -1532,6 +1586,105 @@ impl GitCliProvider {
         Ok(())
     }
 
+    /// Shared logic behind [`RepositoryWritePort::preview_patch_application`]
+    /// and [`RepositoryWritePort::apply_patch`] (US-030). Both call this —
+    /// the preview to report affected files/support without side effects,
+    /// `apply_patch` to revalidate immediately before writing (Destructive
+    /// Operations & Confirmation Guardrails rule 4) — so a rejection is
+    /// always classified identically wherever it is checked.
+    ///
+    /// Three rejection categories are distinguished (US-030 criterion 2),
+    /// in the order checked:
+    /// 1. The patch has no recognizable file headers at all — `git apply`
+    ///    itself is never even invoked for this case (DoD: a malformed or
+    ///    malicious patch must never be executed as a command).
+    /// 2. A declared path is unsafe — absolute, or containing a `..`
+    ///    component — checked by this adapter itself, again *before*
+    ///    `git apply` is invoked at all: this is on top of, never instead
+    ///    of, Git's own refusal of the same thing ([`Self::apply_patch`]
+    ///    never passes `--unsafe-paths`, so Git would refuse it too —
+    ///    verified empirically, see this module's test suite — but
+    ///    rejecting it here means a hostile patch is never handed to a
+    ///    subprocess in the first place).
+    /// 3. Anything `git apply --check` itself refuses: a malformed patch
+    ///    body, an unsafe path this adapter's own check somehow missed, or
+    ///    a hunk whose context no longer matches the current file content.
+    ///
+    /// Returns the built [`PatchPreview`] plus, when unsupported, the
+    /// [`ErrorCode`] [`Self::apply_patch`] classifies the rejection as. The
+    /// outer `Result` only ever fails for [`require_worktree`] (no working
+    /// tree to apply into) — every patch-shaped rejection is a normal `Ok`
+    /// with `supported: false`, never a [`GitSailError`] (mirrors
+    /// [`StashApplyOutcome`]'s "a conflict is a legitimate, expected
+    /// outcome" convention).
+    fn check_patch_application(
+        &self,
+        repo: &Repository,
+        patch_text: &str,
+    ) -> Result<(PatchPreview, Option<ErrorCode>), GitSailError> {
+        require_worktree(repo, "apply patch")?;
+        let affected_files = declared_patch_paths(patch_text);
+
+        if affected_files.is_empty() {
+            return Ok((
+                PatchPreview {
+                    affected_files,
+                    supported: false,
+                    rejection_reason: Some(
+                        "the patch text has no recognizable file headers".to_string(),
+                    ),
+                },
+                Some(ErrorCode::ParseFailure),
+            ));
+        }
+
+        if let Some(unsafe_path) = affected_files
+            .iter()
+            .find(|path| !is_safe_patch_path(path))
+            .cloned()
+        {
+            return Ok((
+                PatchPreview {
+                    affected_files,
+                    supported: false,
+                    rejection_reason: Some(format!(
+                        "the patch references a path outside the repository: {}",
+                        unsafe_path.display()
+                    )),
+                },
+                Some(ErrorCode::InvalidRepositoryState),
+            ));
+        }
+
+        let args = vec![
+            "apply".to_string(),
+            "--check".to_string(),
+            "--whitespace=nowarn".to_string(),
+            "-".to_string(),
+        ];
+        match self.run_with_stdin(args, &repo.root_path, patch_text.as_bytes().to_vec()) {
+            Ok(_) => Ok((
+                PatchPreview {
+                    affected_files,
+                    supported: true,
+                    rejection_reason: None,
+                },
+                None,
+            )),
+            Err(err) => {
+                let (code, reason) = classify_patch_check_failure(&err);
+                Ok((
+                    PatchPreview {
+                        affected_files,
+                        supported: false,
+                        rejection_reason: Some(reason),
+                    },
+                    Some(code),
+                ))
+            }
+        }
+    }
+
     /// Revalidates `expected` (a stash entry a caller observed via a prior
     /// [`RepositoryReadPort::list_stash_entries`] read) is still the same
     /// entry at the same stack position immediately before
@@ -1613,6 +1766,91 @@ fn classify_apply_failure(err: GitSailError) -> GitSailError {
         .with_source(err)
     } else {
         err
+    }
+}
+
+/// Extracts the file paths a patch declares touching, straight from its
+/// unified-diff headers (`--- a/<path>`/`+++ b/<path>`, tolerating a patch
+/// with no `a/`/`b/` prefix, and a trailing tab-separated timestamp some
+/// patch dialects append) — independent of whether `git apply` would
+/// accept the patch at all, so a *rejected* patch still shows what it
+/// claimed to touch (US-030 criterion 1: this is what makes a path-
+/// traversal rejection's message name the exact offending path, rather
+/// than a generic "invalid patch"). `/dev/null` — an added or deleted
+/// file's other side — is never reported as an affected path. Order is
+/// preserved and duplicates (a modified file has both a `---` and a `+++`
+/// line naming the same path) are dropped.
+fn declared_patch_paths(patch_text: &str) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    for line in patch_text.lines() {
+        let Some(raw) = line.strip_prefix("+++ ").or_else(|| line.strip_prefix("--- ")) else {
+            continue;
+        };
+        let raw = raw.split('\t').next().unwrap_or(raw).trim();
+        if raw.is_empty() || raw == "/dev/null" {
+            continue;
+        }
+        let stripped = raw
+            .strip_prefix("a/")
+            .or_else(|| raw.strip_prefix("b/"))
+            .unwrap_or(raw);
+        let candidate = PathBuf::from(stripped);
+        if !paths.contains(&candidate) {
+            paths.push(candidate);
+        }
+    }
+    paths
+}
+
+/// Whether `path` is safe for `git apply` to touch inside a repository:
+/// relative (never absolute) and free of any `..` component anywhere in
+/// it. Checked by this adapter itself *before* `git apply`/`git apply
+/// --check` is ever invoked for a patch declaring an unsafe path (US-030
+/// DoD: a malicious patch must never even be executed as a command) — on
+/// top of, never instead of, Git's own refusal of the same thing: this
+/// adapter never passes `--unsafe-paths` to `git apply`, and Git itself
+/// then independently refuses an absolute path, a `..`-containing path, or
+/// a path reached through a symbolic link, all verified empirically (see
+/// this module's test suite).
+fn is_safe_patch_path(path: &Path) -> bool {
+    path.is_relative()
+        && !path
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
+}
+
+/// Reclassifies a failed whole-patch `git apply --check`/`git apply`
+/// invocation (distinct from [`classify_apply_failure`], which handles the
+/// `--cached` hunk-level case) into one of the rejection categories US-030
+/// criterion 2 names, with a message safe to show a user directly (the raw
+/// Git diagnostic stays attached via the caller's `with_source`, never
+/// folded into this message — SAD §19, §28). Any failure kind other than
+/// `ProcessFailure` (e.g. `Timeout`, `Cancelled`) passes through unchanged.
+fn classify_patch_check_failure(err: &GitSailError) -> (ErrorCode, String) {
+    if err.code() != ErrorCode::ProcessFailure {
+        return (err.code(), err.message().to_string());
+    }
+    let diagnostic_text = err.diagnostic().map(|d| d.to_string()).unwrap_or_default();
+    if diagnostic_text.contains("does not apply") || diagnostic_text.contains("patch failed") {
+        (
+            ErrorCode::OperationConflict,
+            "the patch no longer applies to the current file content".to_string(),
+        )
+    } else if diagnostic_text.contains("invalid path")
+        || diagnostic_text.contains("beyond a symbolic link")
+    {
+        (
+            ErrorCode::InvalidRepositoryState,
+            "the patch references a path outside the repository".to_string(),
+        )
+    } else if diagnostic_text.contains("No valid patches in input")
+        || diagnostic_text.contains("corrupt patch")
+        || diagnostic_text.contains("patch fragment without header")
+        || diagnostic_text.contains("unrecognized input")
+    {
+        (ErrorCode::ParseFailure, "the patch is malformed".to_string())
+    } else {
+        (ErrorCode::ProcessFailure, "git could not apply the patch".to_string())
     }
 }
 

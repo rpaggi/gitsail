@@ -5,7 +5,7 @@
 
 import { invoke } from "@tauri-apps/api/core";
 
-import type { PatchExportDto } from "./dto";
+import type { ApplyPatchResultDto, PatchExportDto, PatchPreviewDto } from "./dto";
 
 /**
  * Builds the full `git apply`-compatible patch for the diff scoped by
@@ -25,4 +25,34 @@ export async function exportPatch(staged: boolean, path?: string): Promise<Patch
  */
 export async function saveTextFile(path: string, contents: string): Promise<void> {
   return invoke<void>("save_text_file", { path, contents });
+}
+
+/**
+ * Reads `path`'s full contents as UTF-8 text — the read counterpart to
+ * {@link saveTextFile}, used by T-163/US-030's "apply a patch from a
+ * chosen file" flow: the frontend picks `path` via
+ * `@tauri-apps/plugin-dialog`'s native open dialog.
+ */
+export async function readTextFile(path: string): Promise<string> {
+  return invoke<string>("read_text_file", { path });
+}
+
+/**
+ * Validates `patchText` against the repository's current state via a
+ * non-mutating `git apply --check` (T-163/US-030 criterion 1). Never
+ * mutates anything — the preview a caller shows before asking to confirm
+ * `applyPatch`.
+ */
+export async function previewPatchApplication(patchText: string): Promise<PatchPreviewDto> {
+  return invoke<PatchPreviewDto>("preview_patch_application", { patchText });
+}
+
+/**
+ * Applies `patchText` to the working tree (T-163/US-030) — the confirmed
+ * counterpart to {@link previewPatchApplication}. The backend re-validates
+ * with the same `--check` immediately before writing anything, so a stale
+ * confirmation is refused rather than silently (or partially) applied.
+ */
+export async function applyPatch(patchText: string): Promise<ApplyPatchResultDto> {
+  return invoke<ApplyPatchResultDto>("apply_patch", { patchText });
 }

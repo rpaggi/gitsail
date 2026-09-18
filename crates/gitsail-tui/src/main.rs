@@ -160,6 +160,11 @@ fn run(
                 Vec::new()
             }
             Message::PullFinished(result) => app.on_pull_finished(result),
+            Message::PatchPreviewed(result, patch_text) => {
+                app.on_patch_previewed(result, patch_text);
+                Vec::new()
+            }
+            Message::PatchApplied(result) => app.on_patch_applied(result),
         };
         worker::dispatch(commands, &read_port, &write_port, &tx);
 

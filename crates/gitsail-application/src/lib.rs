@@ -37,11 +37,12 @@ pub use use_cases::{
     OpenRepository, PreviewAmend, RevisionComparison,
 };
 pub use write_ports::{
-    PullOutcome, RepositoryWritePort, StashApplyOutcome, StashScope, TagAnnotation,
-    WorktreeBranchSpec,
+    ApplyPatchResult, PatchPreview, PullOutcome, RepositoryWritePort, StashApplyOutcome,
+    StashScope, TagAnnotation, WorktreeBranchSpec,
 };
 pub use write_use_cases::{
-    AmendCommit, ApplyStash, CreateBranch, CreateCommit, CreateStash, CreateTag, CreateWorktree,
-    DeleteBranch, DeleteTag, DropStash, Fetch, ForcePushWithLease, PopStash, Pull, Push,
-    RemoveWorktree, StageFiles, StageHunks, SwitchBranch, UnstageFiles, UnstageHunks,
+    AmendCommit, ApplyPatch, ApplyStash, CreateBranch, CreateCommit, CreateStash, CreateTag,
+    CreateWorktree, DeleteBranch, DeleteTag, DropStash, Fetch, ForcePushWithLease, PopStash,
+    PreviewPatchApplication, Pull, Push, RemoveWorktree, StageFiles, StageHunks, SwitchBranch,
+    UnstageFiles, UnstageHunks,
 };

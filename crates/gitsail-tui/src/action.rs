@@ -98,4 +98,13 @@ pub enum Action {
     /// Cycles the References panel between its Tags/Remotes/Stash sub-views
     /// (`t`, References panel only), mirroring [`Action::ToggleBlameView`].
     CycleReferenceView,
+
+    // -- T-163/US-030: apply a patch --------------------------------------
+    /// Requests applying the patch currently on the system clipboard (`Y`,
+    /// Diff panel only — the inverse of [`Action::ExportPatch`]'s `y`).
+    /// Never applies immediately: this only starts the non-mutating
+    /// preview (`git apply --check`); confirming the resulting prompt is
+    /// what actually dispatches [`crate::worker::Command::ApplyPatch`]
+    /// (US-030 criterion 1).
+    RequestApplyPatch,
 }

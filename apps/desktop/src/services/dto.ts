@@ -145,6 +145,22 @@ export interface PatchExportDto {
   skippedTruncatedFiles: string[];
 }
 
+// -- Apply a patch (T-163/US-030) ---------------------------------------
+//
+// Mirrors `crates/gitsail-protocol/src/dto.rs`'s `PatchPreviewDto`/
+// `ApplyPatchResultDto`, themselves built from
+// `gitsail_application::write_ports::{PatchPreview, ApplyPatchResult}`.
+
+export interface PatchPreviewDto {
+  affectedFiles: string[];
+  supported: boolean;
+  rejectionReason: string | null;
+}
+
+export interface ApplyPatchResultDto {
+  appliedFiles: string[];
+}
+
 // -- Branches (EPIC-12/T-189, T-193 local-branch subset) ----------------
 
 export type BranchKindDto = { kind: "local" } | { kind: "remote"; remote: string };
