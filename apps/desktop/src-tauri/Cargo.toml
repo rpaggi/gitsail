@@ -2,6 +2,7 @@
 name = "gitsail-desktop"
 version = "0.0.0"
 edition.workspace = true
+rust-version.workspace = true
 
 [lib]
 name = "gitsail_desktop_lib"

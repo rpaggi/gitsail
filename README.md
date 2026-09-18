@@ -34,10 +34,12 @@ On Linux, building the Rust backend also needs the system WebKitGTK/GTK/D-Bus de
 
 - [Product backlog](docs/product/GitSail_Product_Backlog_v1.0.md)
 - [Original PRD](docs/product/GitSail_PRD_v0.1-v1.0.md)
-- [Original SAD and 12 ADRs](docs/architecture/GitSail_SAD_and_ADRs_v0.1.md)
+- [Original SAD and 12 ADRs](docs/architecture/GitSail_SAD_and_ADRs_v0.1.md) (ADR-013 onward records decisions made since; see the same file)
+- [Brand identity — name, tagline, mascot, sail + Git-graph concept](docs/product/brand-identity.md)
 - [Original logo](assets/branding/logo_gitsail.png)
 - [Original Desktop mockup](assets/mockups/gitsail_gui_mockup.png)
 - [Original TUI mockup](assets/mockups/gitsail_tui_mockup.png)
+- [Assets inventory — provenance and usage of the files above](assets/README.md)
 
 ## Backlog baseline
 
@@ -50,3 +52,13 @@ Original source files and PNG assets were copied byte-for-byte from the files su
 ## Document validation
 
 Validated on 2026-09-17: story and epic counts; unique IDs; required fields; at least three acceptance criteria per story; existing dependency targets; no dependency cycles; no dependency targeting a later milestone; valid local links; byte-for-byte integrity of the original documents and images. Product tests and builds are not applicable to this documentation-only delivery.
+
+## License
+
+GitSail is licensed under the [Apache License 2.0](LICENSE). See
+`docs/architecture/GitSail_SAD_and_ADRs_v0.1.md` (ADR-021) for why
+Apache-2.0 was chosen over MIT, and for the related minimum-Git-version
+(2.31), Rust MSRV (1.97.0), repository-identity, and pre-1.0 versioning
+decisions recorded alongside it. Trademark/brand-rights availability for the
+name "GitSail" and its assets has not been verified — see
+`docs/product/brand-identity.md`.

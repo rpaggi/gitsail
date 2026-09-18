@@ -2983,8 +2983,8 @@ Os itens abaixo permanecem abertos nas fontes. A coluna de encaminhamento indica
 
 | Decisão | Encaminhamento e momento |
 |---|---|
-| MIT vs Apache-2.0; nome/organização do repositório; versão pré-1.0 | [US-130](#us-130), antes do primeiro release público. |
-| Git mínimo e Rust MSRV | [US-130](#us-130), [US-004](#us-004) e [US-124](#us-124); registrar matriz antes da v0.1. |
+| MIT vs Apache-2.0; nome/organização do repositório; versão pré-1.0 | **Resolvido** em [US-130](#us-130)/[ADR-021](../architecture/GitSail_SAD_and_ADRs_v0.1.md#adr-021--license-minimum-git-version-rust-msrv-repository-identity-and-pre-10-versioning): Apache-2.0 (arquivo `LICENSE` na raiz); repositório permanece `rpaggi/gitsail` (GitHub) até decisão futura de organização dedicada; versões de crate ficam em `0.0.0` até o primeiro release público, com milestones (`v0.1`…`v1.0`) rastreados por tag/release notes. |
+| Git mínimo e Rust MSRV | **Resolvido** em [US-130](#us-130)/[ADR-021](../architecture/GitSail_SAD_and_ADRs_v0.1.md#adr-021--license-minimum-git-version-rust-msrv-repository-identity-and-pre-10-versioning): Git mínimo 2.31 (derivado do uso real de `--path-format=absolute` em `gitsail-git`); Rust MSRV 1.97.0, fixado como piso igual ao toolchain verificado (não testado contra versão mais antiga) via `rust-version` no `Cargo.toml` do workspace. |
 | Runtime/estratégia async e parser CLI | Refinar em [US-004](#us-004) e [US-036](#us-036); não expor runtime no Domain. |
 | Envelope definitivo, cursor e correlação | [US-035](#us-035) e [US-015](#us-015); definir na v0.1 e manter testes de compatibilidade. |
 | State management Desktop e persistência de preferências | [US-051](#us-051) e [US-105](#us-105), antes de estabilizar v0.3. |
@@ -2993,7 +2993,7 @@ Os itens abaixo permanecem abertos nas fontes. A coluna de encaminhamento indica
 | Assinatura/notarização e atualização | [US-125](#us-125) / [US-127](#us-127); documentar mecanismo e limitações reais. |
 | Escopo exato e hosts suportados de GitHub/GitLab | [US-101](#us-101)–[US-103](#us-103); delimitar consulta inicial. Criar PR/MR é Could. |
 | Submodules v1.0 ou pós-v1.0 | Decisão explícita de escopo antes do gate v1.0. Não existe história prometendo suporte completo; ampliar requer revisão do PRD e novos IDs. |
-| Marca/pacotes/domínios e uso dos assets | [US-129](#us-129) mantém identidade escolhida sem alegar disponibilidade verificada. Registrar avaliação antes de publicação pública da marca. |
+| Marca/pacotes/domínios e uso dos assets | [US-129](#us-129) mantém identidade escolhida sem alegar disponibilidade verificada — ver `docs/product/brand-identity.md` e `assets/README.md`. Avaliação de marca/direitos permanece **não realizada**; registrar antes de publicação pública da marca. |
 | IPC/daemon e política de plugins | Permanecem evolução futura; nenhuma dependência obrigatória antes da v1.0. |
 
 ### Won’t até v1.0 / ideias não comprometidas

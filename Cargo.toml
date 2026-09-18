@@ -12,6 +12,12 @@ members = [
 
 [workspace.package]
 edition = "2021"
+# ADR-021: pinned to the toolchain actually verified against this workspace
+# (`cargo --version` / `rustc --version` both report 1.97.0 in the
+# environment this was set from). This is a floor-equals-current pin, not a
+# compatibility-tested minimum — no older toolchain has been built against
+# this workspace, so it must not be lowered without that evidence.
+rust-version = "1.97.0"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
