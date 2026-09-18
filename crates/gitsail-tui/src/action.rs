@@ -204,4 +204,26 @@ pub enum Action {
     /// mutation — mirrors [`Action::RequestRebasePlan`]'s own "opening the
     /// picker is not itself a mutation" rationale.
     RequestReset,
+
+    // -- T-241/US-089: inspect HEAD's reflog -------------------------------
+    // No dedicated `Action` variant: selecting a reflog entry reuses
+    // `Action::Activate` (`Enter`) exactly like every other panel/sub-view
+    // already does — [`crate::app::App::activate`]'s `Panel::References`
+    // arm branches on the active [`crate::app::ReferenceView`] the same way
+    // it already reads whichever sub-view (Tags/Remotes/Stash) is current.
+    // Read-only: this never runs `reset` or any other mutation (US-089
+    // criterion 3) — a no-op when the entry's commit object no longer
+    // exists, since there is nothing left to open.
+
+    // -- T-242/US-090: amend the last commit with the TUI --------------------
+    /// Opens the amend composer (`A`), dispatching a non-mutating preview
+    /// read ([`gitsail_application::PreviewAmend`]) immediately — reading
+    /// `HEAD`'s identity and staged diff never touches anything, so there is
+    /// nothing to confirm yet (mirrors [`Action::RequestRebasePlan`]'s own
+    /// "opening the composer is not itself a mutation" rationale).
+    StartAmend,
+    /// Appends one character to the amend message being edited.
+    AmendMessageInput(char),
+    /// Removes the last character from the amend message being edited.
+    AmendMessageBackspace,
 }

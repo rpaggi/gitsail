@@ -3,12 +3,12 @@
 //! (SAD §18: "... return typed messages/events").
 
 use gitsail_application::{
-    ApplyPatchResult, CherryPickResult, MergeResult, Page, PatchPreview, PullOutcome, RebasePlan,
-    RebaseResult, RefreshTicket, RevertResult,
+    AmendPreview, ApplyPatchResult, CherryPickResult, MergeResult, Page, PatchPreview, PullOutcome,
+    RebasePlan, RebaseResult, RefreshTicket, RevertResult,
 };
 use gitsail_domain::{
     Blame, Branch, Commit, CommitHash, ConflictSides, Diff, GitSailError, InProgressOperation,
-    Remote, Repository, RepositoryStatus, Stash, Tag,
+    ReflogEntry, Remote, Repository, RepositoryStatus, Stash, Tag,
 };
 
 #[derive(Debug)]
@@ -123,4 +123,21 @@ pub enum Message {
     /// [`crate::worker::Command::Revert`] completed (T-239/US-087). Carries
     /// the [`RevertResult`] on success, mirroring [`Self::CherryPickFinished`].
     RevertFinished(Result<RevertResult, GitSailError>),
+    /// [`crate::worker::Command::LoadReflog`] completed (T-241/US-089),
+    /// tagged with the session generation active when it was requested,
+    /// matching [`Self::TagsLoaded`].
+    ReflogLoaded(u64, Result<Vec<ReflogEntry>, GitSailError>),
+    /// [`crate::worker::Command::LoadReflogCommit`] completed (T-241/US-089
+    /// criterion 2), tagged with the commit hash it was requested for, so a
+    /// result for a since-abandoned selection can be discarded — mirrors
+    /// [`Self::ConflictSidesLoaded`]'s own path-tagged staleness discipline.
+    ReflogCommitLoaded(CommitHash, Result<Commit, GitSailError>),
+    /// [`crate::worker::Command::PreviewAmend`] completed (T-242/US-090
+    /// criterion 1), reusing `gitsail_application::PreviewAmend` exactly
+    /// like `apps/desktop`'s own amend flow does.
+    AmendPreviewed(Result<AmendPreview, GitSailError>),
+    /// [`crate::worker::Command::AmendCommit`] completed (T-242/US-090).
+    /// Carries the new commit's [`CommitHash`] on success — distinct from
+    /// [`Self::OperationFinished`], mirroring [`Self::CommitCreated`].
+    AmendCommitFinished(Result<CommitHash, GitSailError>),
 }

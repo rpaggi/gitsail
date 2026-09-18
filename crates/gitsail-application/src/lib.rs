@@ -34,7 +34,7 @@ pub use session::{RefreshReason, RefreshTicket, RepositorySession, Selection};
 pub use use_cases::{
     AmendPreview, CommitDiff, CompareRevisions, DetectInProgressOperation, GetCommit,
     GetCommitDiff, GetCommitHistory, GetConflictSides, GetDiff, GetFileBlame, GetFileContent,
-    GetLineHistory, GetRepositoryStatus, ListBranches, OpenRepository, PreviewAmend,
+    GetLineHistory, GetReflog, GetRepositoryStatus, ListBranches, OpenRepository, PreviewAmend,
     RevisionComparison,
 };
 pub use write_ports::{

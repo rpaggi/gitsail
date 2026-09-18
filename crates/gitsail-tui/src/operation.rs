@@ -127,6 +127,23 @@ pub enum OperationKind {
         expected_head: String,
         predicted_loss_files: usize,
     },
+    /// T-242/US-090: `RepositoryWritePort::amend_commit`, via
+    /// `gitsail_application::AmendCommit` (already used by the Desktop since
+    /// T-192 — this variant is the TUI's first use of the same, unchanged
+    /// Core capability, never a parallel implementation). `short_hash` is
+    /// the exact commit being replaced (US-090 criterion 2: the
+    /// confirmation always identifies it explicitly), and `expected_head` is
+    /// the full hash [`crate::app::App::dispatch_operation`] hands back to
+    /// `AmendCommit` as the revalidated `expected_head` (US-090 criterion 1:
+    /// this call, not a parallel one, revalidates HEAD immediately before
+    /// executing). The message being amended to lives in
+    /// [`crate::app::App`]'s own `amend_message` field, mirroring
+    /// [`Self::ApplyPatch`]'s "the actual payload lives on `App`, not here"
+    /// convention.
+    AmendCommit {
+        short_hash: String,
+        expected_head: String,
+    },
 }
 
 impl OperationKind {
@@ -212,6 +229,16 @@ impl OperationKind {
                 ResetMode::Soft | ResetMode::Mixed => OperationRisk::Moderate,
                 ResetMode::Hard => OperationRisk::Destructive,
             },
+            // Mirrors `gitsail_application::mutation::MutationKind::AmendCommit`'s
+            // own canonical classification (that module's doc explains why:
+            // amend replaces `HEAD`'s commit object in place and can rewrite
+            // history another clone/collaborator already observed — the
+            // same "hard to reverse, visible consequence" character SAD §20
+            // lists `reset --hard`/force push under). This adopts the
+            // Desktop's existing decision (`apps/desktop/src/stores/
+            // amend.ts`) as the canonical one the TUI now shares, rather
+            // than inventing a second, weaker classification.
+            OperationKind::AmendCommit { .. } => OperationRisk::Destructive,
         }
     }
 
@@ -283,6 +310,13 @@ impl OperationKind {
                     if *predicted_loss_files == 1 { "" } else { "s" }
                 ),
             },
+            // US-090 criterion 2: identifies the exact commit being
+            // replaced and states the publication risk in real words — the
+            // same text `apps/desktop/src/stores/amend.ts`'s `requestAmend`
+            // already shows, never a generic "are you sure?".
+            OperationKind::AmendCommit { short_hash, .. } => format!(
+                "HEAD ({short_hash}) — this replaces the last commit with a new one carrying the message below. If this commit has already been pushed or shared, rewriting it means anyone who already has the old one will need to rebase or reset onto the new commit."
+            ),
         }
     }
 }
@@ -560,6 +594,23 @@ mod tests {
         assert!(label.contains("HARD"));
         assert!(label.contains("3 uncommitted changes"));
         assert!(label.contains("permanently discarded"));
+    }
+
+    /// T-242/US-090: `AmendCommit` classifies `Destructive` (mirrors
+    /// `gitsail_application::mutation::MutationKind::AmendCommit`'s own
+    /// classification, and the Desktop's pre-existing decision) and its
+    /// label always identifies the exact replaced commit plus the
+    /// publication-risk text, never a generic warning.
+    #[test]
+    fn amend_commit_classifies_destructive_and_names_the_replaced_commit() {
+        let kind = OperationKind::AmendCommit {
+            short_hash: "abc1234".into(),
+            expected_head: "abc1234deadbeefdeadbeefdeadbeefdeadbeef".into(),
+        };
+        assert_eq!(kind.risk(), OperationRisk::Destructive);
+        let label = kind.target_label();
+        assert!(label.contains("abc1234"));
+        assert!(label.contains("pushed or shared"));
     }
 
     #[test]

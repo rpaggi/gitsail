@@ -187,6 +187,19 @@ fn run(
             }
             Message::CherryPickFinished(result) => app.on_cherry_pick_finished(result),
             Message::RevertFinished(result) => app.on_revert_finished(result),
+            Message::ReflogLoaded(generation, result) => {
+                app.on_reflog_loaded(generation, result);
+                Vec::new()
+            }
+            Message::ReflogCommitLoaded(hash, result) => {
+                app.on_reflog_commit_loaded(hash, result);
+                Vec::new()
+            }
+            Message::AmendPreviewed(result) => {
+                app.on_amend_previewed(result);
+                Vec::new()
+            }
+            Message::AmendCommitFinished(result) => app.on_amend_finished(result),
         };
         worker::dispatch(commands, &read_port, &write_port, &tx);
 

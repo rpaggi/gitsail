@@ -47,6 +47,9 @@ fn open_and_load(app: &mut App, dir: &std::path::Path) {
             Command::LoadStashEntries(generation, repo) => {
                 app.on_stash_entries_loaded(generation, read.list_stash_entries(&repo));
             }
+            Command::LoadReflog(generation, repo) => {
+                app.on_reflog_loaded(generation, read.reflog(&repo));
+            }
             _ => {}
         }
     }
@@ -108,6 +111,10 @@ fn run_mutation(app: &mut App, commands: Vec<Command>) {
             }
             Command::LoadStashEntries(generation, repo) => {
                 app.on_stash_entries_loaded(generation, read.list_stash_entries(&repo));
+                Vec::new()
+            }
+            Command::LoadReflog(generation, repo) => {
+                app.on_reflog_loaded(generation, read.reflog(&repo));
                 Vec::new()
             }
             Command::LoadInProgressOperation(generation, repo) => {

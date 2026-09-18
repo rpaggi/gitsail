@@ -76,6 +76,10 @@ fn run_mutation(app: &mut App, commands: Vec<Command>) {
                 app.on_stash_entries_loaded(generation, read.list_stash_entries(&repo));
                 Vec::new()
             }
+            Command::LoadReflog(generation, repo) => {
+                app.on_reflog_loaded(generation, read.reflog(&repo));
+                Vec::new()
+            }
             Command::LoadInProgressOperation(generation, repo) => {
                 app.on_in_progress_operation_loaded(
                     generation,

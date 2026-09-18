@@ -37,6 +37,11 @@ pub enum InputContext {
     /// The reference-details overlay is open (Enter on the References
     /// panel, US-050 criterion 2), mirroring [`Self::CommitDetails`].
     ReferenceDetails,
+    /// The reflog-entry details overlay is open (Enter on the References
+    /// panel while its Reflog sub-view is active, T-241/US-089 criterion
+    /// 2), mirroring [`Self::CommitDetails`]/[`Self::ReferenceDetails`]
+    /// exactly — dismiss-only, never a reset or any other mutation.
+    ReflogDetails,
     /// The conflicts overlay is open (`M`, T-232/US-080/T-233/US-081) —
     /// unlike [`Self::CommitDetails`]/[`Self::ReferenceDetails`], this
     /// overlay is itself navigable (multiple conflicted files) and offers
@@ -55,6 +60,16 @@ pub enum InputContext {
     /// navigable like [`Self::RebasePlan`], picking soft/mixed/hard before
     /// anything is confirmed.
     ResetMode,
+    /// The amend composer is open (`A`, T-242/US-090), editing the message
+    /// that will replace `HEAD`'s (US-090 criterion 1: reuses the same
+    /// `gitsail_application::AmendCommit`/`PreviewAmend` use cases the
+    /// Desktop already exercises, no parallel Git implementation). Stays
+    /// active through `Confirming`/`InProgress`/`Failed` — mirrors
+    /// [`Self::CommitMessage`]'s own "stays open through confirmation"
+    /// convention (US-090 criterion 3: a failed amend must never lose the
+    /// typed message), unlike [`Self::ResetMode`]/[`Self::RebasePlan`],
+    /// which hand off to the generic operation overlay instead.
+    Amend,
     /// No overlay is active; the panels and shortcuts bar are live.
     Normal,
 }
@@ -109,6 +124,10 @@ pub fn action_for(key: KeyEvent, ctx: InputContext) -> Option<Action> {
             KeyCode::Char('q') | KeyCode::Esc => Some(Action::Dismiss),
             _ => None,
         },
+        InputContext::ReflogDetails => match key.code {
+            KeyCode::Char('q') | KeyCode::Esc => Some(Action::Dismiss),
+            _ => None,
+        },
         InputContext::Conflicts => match key.code {
             KeyCode::Char('q') | KeyCode::Esc => Some(Action::Dismiss),
             KeyCode::Up | KeyCode::Char('k') => Some(Action::MoveUp),
@@ -146,6 +165,13 @@ pub fn action_for(key: KeyEvent, ctx: InputContext) -> Option<Action> {
             KeyCode::Enter => Some(Action::Activate),
             _ => None,
         },
+        InputContext::Amend => match key.code {
+            KeyCode::Esc => Some(Action::Dismiss),
+            KeyCode::Enter => Some(Action::Activate),
+            KeyCode::Backspace => Some(Action::AmendMessageBackspace),
+            KeyCode::Char(c) => Some(Action::AmendMessageInput(c)),
+            _ => None,
+        },
         InputContext::Normal => match key.code {
             KeyCode::Tab => Some(Action::FocusNext),
             KeyCode::BackTab => Some(Action::FocusPrev),
@@ -179,6 +205,7 @@ pub fn action_for(key: KeyEvent, ctx: InputContext) -> Option<Action> {
             KeyCode::Char('x') => Some(Action::RequestCherryPick),
             KeyCode::Char('v') => Some(Action::RequestRevert),
             KeyCode::Char('z') => Some(Action::RequestReset),
+            KeyCode::Char('A') => Some(Action::StartAmend),
             _ => None,
         },
     }
@@ -518,6 +545,57 @@ mod tests {
             action_for(press(KeyCode::Tab), InputContext::RebasePlanReword),
             None,
             "focus change is not a documented reword-prompt shortcut"
+        );
+    }
+
+    /// T-241/US-089: the reflog-details overlay only accepts dismiss keys,
+    /// mirroring [`InputContext::ReferenceDetails`]/[`InputContext::CommitDetails`]
+    /// exactly.
+    #[test]
+    fn reflog_details_context_only_accepts_dismiss_keys() {
+        assert_eq!(
+            action_for(press(KeyCode::Char('q')), InputContext::ReflogDetails),
+            Some(Action::Dismiss)
+        );
+        assert_eq!(
+            action_for(press(KeyCode::Esc), InputContext::ReflogDetails),
+            Some(Action::Dismiss)
+        );
+        assert_eq!(
+            action_for(press(KeyCode::Char('j')), InputContext::ReflogDetails),
+            None,
+            "movement must not leak through the reflog-details overlay"
+        );
+    }
+
+    /// T-242/US-090: `A` opens the amend composer in the Normal context, and
+    /// the composer routes characters/backspace/confirm/cancel exactly like
+    /// [`InputContext::CommitMessage`].
+    #[test]
+    fn shift_a_starts_amend_in_the_normal_context() {
+        assert_eq!(
+            action_for(press(KeyCode::Char('A')), InputContext::Normal),
+            Some(Action::StartAmend)
+        );
+    }
+
+    #[test]
+    fn amend_context_routes_characters_and_confirms_on_enter() {
+        assert_eq!(
+            action_for(press(KeyCode::Char('x')), InputContext::Amend),
+            Some(Action::AmendMessageInput('x'))
+        );
+        assert_eq!(
+            action_for(press(KeyCode::Backspace), InputContext::Amend),
+            Some(Action::AmendMessageBackspace)
+        );
+        assert_eq!(
+            action_for(press(KeyCode::Enter), InputContext::Amend),
+            Some(Action::Activate)
+        );
+        assert_eq!(
+            action_for(press(KeyCode::Esc), InputContext::Amend),
+            Some(Action::Dismiss)
         );
     }
 

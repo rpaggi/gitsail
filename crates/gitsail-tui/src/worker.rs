@@ -21,13 +21,14 @@ use std::sync::Arc;
 use std::thread;
 
 use gitsail_application::{
-    AbortOperation, ApplyPatch, BlameRequest, CherryPick, CommitQuery, ContinueOperation,
-    CreateBranch, CreateCommit, DeleteBranch, DetectInProgressOperation, DiffRequest,
-    ExecuteRebasePlan, Fetch, GetCommitHistory, GetConflictSides, GetDiff, GetFileBlame,
-    GetRepositoryStatus, ListBranches, MarkConflictResolved, Merge, MergeParentPolicy,
-    OpenRepository, PlanRebase, PreviewPatchApplication, Pull, Push, Rebase, RebasePlan,
-    RefreshTicket, RenameBranch, RepositoryReadPort, RepositoryWritePort, Reset, ResetMode,
-    Revert, SkipOperation, StageFiles, SwitchBranch, TakeConflictSide, UnstageFiles,
+    AbortOperation, AmendCommit, ApplyPatch, BlameRequest, CherryPick, CommitQuery,
+    ContinueOperation, CreateBranch, CreateCommit, DeleteBranch, DetectInProgressOperation,
+    DiffRequest, ExecuteRebasePlan, Fetch, GetCommit, GetCommitHistory, GetConflictSides, GetDiff,
+    GetFileBlame, GetReflog, GetRepositoryStatus, ListBranches, MarkConflictResolved, Merge,
+    MergeParentPolicy, OpenRepository, PlanRebase, PreviewAmend, PreviewPatchApplication, Pull,
+    Push, Rebase, RebasePlan, RefreshTicket, RenameBranch, RepositoryReadPort, RepositoryWritePort,
+    Reset, ResetMode, Revert, SkipOperation, StageFiles, SwitchBranch, TakeConflictSide,
+    UnstageFiles,
 };
 use gitsail_domain::{BranchName, CancellationToken, CommitHash, ConflictSide, Repository};
 
@@ -133,6 +134,25 @@ pub enum Command {
     /// revision (T-240/US-088), revalidating `expected_head` immediately
     /// before running.
     Reset(Repository, String, ResetMode, CommitHash),
+    /// Loads `HEAD`'s reflog entries (T-241/US-089), tagged with the session
+    /// generation active when it was requested, matching [`Self::LoadTags`].
+    LoadReflog(u64, Repository),
+    /// Loads one reflog entry's full commit details (T-241/US-089 criterion
+    /// 2), via the same [`GetCommit`] use case the Graph/References panels
+    /// already reuse — never a parallel read. Tagged with the exact hash
+    /// requested, matching [`Self::LoadConflictSides`]'s own path tagging.
+    LoadReflogCommit(Repository, CommitHash),
+    /// Builds a non-mutating amend preview (T-242/US-090 criterion 1) via
+    /// `gitsail_application::PreviewAmend` — the same use case
+    /// `apps/desktop`'s amend flow already uses (T-192), never a parallel
+    /// read.
+    PreviewAmend(Repository),
+    /// Replaces `HEAD`'s commit with `message` and whatever is currently
+    /// staged (T-242/US-090), revalidating `expected_head` immediately
+    /// before amending — via `gitsail_application::AmendCommit`, the same
+    /// use case `apps/desktop`'s amend flow already uses (T-192), never a
+    /// parallel Git implementation.
+    AmendCommit(Repository, String, CommitHash),
 }
 
 /// Spawns one background thread per command in `commands`, each reporting
@@ -309,6 +329,22 @@ fn spawn_one(
             Command::Reset(repo, target_revision, mode, expected_head) => {
                 let result = Reset::new(write_port).execute(&repo, &target_revision, mode, &expected_head);
                 Message::OperationFinished(result)
+            }
+            Command::LoadReflog(generation, repo) => {
+                let result = GetReflog::new(read_port).execute(&repo);
+                Message::ReflogLoaded(generation, result)
+            }
+            Command::LoadReflogCommit(repo, hash) => {
+                let result = GetCommit::new(read_port).execute(&repo, &hash);
+                Message::ReflogCommitLoaded(hash, result)
+            }
+            Command::PreviewAmend(repo) => {
+                let result = PreviewAmend::new(read_port).execute(&repo, &CancellationToken::new());
+                Message::AmendPreviewed(result)
+            }
+            Command::AmendCommit(repo, message, expected_head) => {
+                let result = AmendCommit::new(write_port).execute(&repo, &message, &expected_head);
+                Message::AmendCommitFinished(result)
             }
         };
         // The receiving end only disappears once the app is shutting down

@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use gitsail_domain::{
     Blame, Branch, BranchName, CancellationToken, Commit, CommitHash, ConflictSideContent,
     ConflictSides, Diff, FileContentAtRevision, GitSailError, InProgressOperation, LineHistory,
-    LineRange, Remote, Repository, RepositoryStatus, Stash, Tag, Worktree,
+    LineRange, ReflogEntry, Remote, Repository, RepositoryStatus, Stash, Tag, Worktree,
 };
 
 /// A single page of results plus continuation metadata (SAD §25).
@@ -298,5 +298,26 @@ pub trait RepositoryReadPort: Send + Sync {
             ours: ConflictSideContent::Absent,
             theirs: ConflictSideContent::Absent,
         })
+    }
+
+    // -------------------------------------------------------------------
+    // T-241/US-089: inspecting HEAD's reflog.
+    // -------------------------------------------------------------------
+
+    /// Lists `HEAD`'s reflog entries, newest (`HEAD@{0}`) first (US-089
+    /// criterion 1: reference/hash/date/message all available). Read-only —
+    /// never runs `reset` or any other mutation (History Editing Rules #10)
+    /// — and an entry whose commit object no longer exists (already expired
+    /// and pruned) is reported via
+    /// [`gitsail_domain::ReflogObjectState::Missing`] rather than failing
+    /// the whole query (US-089 criterion 3).
+    ///
+    /// Default: an empty list — correct for any test double/adapter that
+    /// predates this story, mirroring [`Self::list_tags`]'s "empty is a
+    /// legitimate state" convention. `gitsail_git::GitCliProvider` overrides
+    /// this with a real `git reflog show` implementation.
+    fn reflog(&self, repo: &Repository) -> Result<Vec<ReflogEntry>, GitSailError> {
+        let _ = repo;
+        Ok(Vec::new())
     }
 }

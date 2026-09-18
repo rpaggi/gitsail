@@ -16,14 +16,15 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use gitsail_application::{
-    export_patch, ApplyPatchResult, BlameRequest, CherryPickResult, CommitQuery, DiffRequest,
-    MergeParentPolicy, MergeResult, Page, PatchPreview, PullOutcome, RebaseAction, RebasePlan,
-    RebaseResult, RefreshReason, RepositoryReadPort, RepositorySession, ResetMode, RevertResult,
+    export_patch, AmendPreview, ApplyPatchResult, BlameRequest, CherryPickResult, CommitQuery,
+    DiffRequest, MergeParentPolicy, MergeResult, Page, PatchPreview, PullOutcome, RebaseAction,
+    RebasePlan, RebaseResult, RefreshReason, RepositoryReadPort, RepositorySession, ResetMode,
+    RevertResult,
 };
 use gitsail_domain::{
     Blame, Branch, BranchKind, BranchName, Commit, CommitGraph, CommitHash, ConflictSide,
     ConflictSides, Diff, ErrorCode, GitSailError, GraphCommit, HeadState, InProgressOperation,
-    OperationCapability, Remote, Repository, RepositoryStatus, Stash, Tag,
+    OperationCapability, ReflogEntry, Remote, Repository, RepositoryStatus, Stash, Tag,
 };
 
 use crate::action::Action;
@@ -116,6 +117,13 @@ pub enum ReferenceView {
     Tags,
     Remotes,
     Stash,
+    /// `HEAD`'s reflog (T-241/US-089) — folded into this panel's existing
+    /// cycle of sub-views rather than a new [`Panel`] variant: the fixed
+    /// three-column bottom layout (`crate::ui::render`) has no spare column,
+    /// and a reflog entry list is exactly the same shape (an indexed,
+    /// selectable list of hash/date/message records) every other sub-view
+    /// here already is.
+    Reflog,
 }
 
 impl ReferenceView {
@@ -124,6 +132,7 @@ impl ReferenceView {
             ReferenceView::Tags => "Tags",
             ReferenceView::Remotes => "Remotes",
             ReferenceView::Stash => "Stash",
+            ReferenceView::Reflog => "Reflog",
         }
     }
 
@@ -133,7 +142,8 @@ impl ReferenceView {
         match self {
             ReferenceView::Tags => ReferenceView::Remotes,
             ReferenceView::Remotes => ReferenceView::Stash,
-            ReferenceView::Stash => ReferenceView::Tags,
+            ReferenceView::Stash => ReferenceView::Reflog,
+            ReferenceView::Reflog => ReferenceView::Tags,
         }
     }
 }
@@ -443,6 +453,53 @@ pub struct App {
     /// the target stays stable while the chooser is open, even if the Graph
     /// cursor itself moves under an unrelated key.
     reset_target: Option<Commit>,
+
+    // -- T-241/US-089: inspect HEAD's reflog -------------------------------
+    /// `HEAD`'s reflog entries, newest first (US-089 criterion 1) — shown
+    /// as [`ReferenceView::Reflog`], one of [`Self::reference_view`]'s
+    /// existing sub-views, sharing its own `reference_cursor`.
+    reflog: Vec<ReflogEntry>,
+    /// Whether the reflog-entry commit-details overlay is open (US-089
+    /// criterion 2), mirroring [`Self::reference_details_open`].
+    reflog_details_open: bool,
+    /// The full [`Commit`] loaded for the highlighted reflog entry, via the
+    /// same [`gitsail_application::GetCommit`] use case
+    /// [`Self::commit_details_open`]'s overlay already reuses — never a
+    /// parallel read (US-089 criterion 2). `None` while loading, or when
+    /// the entry's object no longer exists ([`Self::reflog_details_error`]
+    /// carries that case instead, US-089 criterion 3).
+    reflog_details_commit: Option<Commit>,
+    /// A load failure, or the "this entry's object no longer exists"
+    /// message set directly by [`Self::open_reflog_details`] without any
+    /// read at all (US-089 criterion 3) — shown inline in the overlay,
+    /// mirroring [`Self::conflict_error`]'s own side-channel convention.
+    reflog_details_error: Option<GitSailError>,
+
+    // -- T-242/US-090: amend the last commit -------------------------------
+    /// Whether the amend composer is open (`A`). Kept `true` through
+    /// `Confirming`/`InProgress`/`Failed` (mirrors [`Self::commit_message`]'s
+    /// own "stays open through confirmation" convention, not
+    /// [`Self::reset_mode_open`]'s "hands off to the generic operation
+    /// overlay" one) — US-090 criterion 3 requires a failed amend to never
+    /// lose the typed message, so the composer (and the message inside it)
+    /// must still be showing afterward, not just still resident in memory.
+    amend_open: bool,
+    /// The read-only preview [`gitsail_application::PreviewAmend`] returned:
+    /// `HEAD`'s exact commit (identity for the confirmation, US-090
+    /// criterion 2) and the staged diff that would be folded in. `None`
+    /// while loading, or after a failed preview
+    /// ([`Self::amend_error`] carries that case).
+    amend_preview: Option<AmendPreview>,
+    /// The amend message being edited, pre-filled from
+    /// [`Self::amend_preview`]'s `head` subject/body the moment it loads
+    /// (mirrors `apps/desktop/src/stores/amend.ts`'s own `loadPreview`
+    /// prefill exactly) and otherwise editable like [`Self::commit_message`].
+    /// Never cleared on a failed amend (US-090 criterion 3) — only ever
+    /// cleared by a successful amend or by dismissing the composer outright.
+    amend_message: Option<String>,
+    /// A preview-load failure, shown inline in the composer, mirroring
+    /// [`Self::rebase_plan_error`]'s own convention.
+    amend_error: Option<GitSailError>,
 }
 
 impl App {
@@ -548,6 +605,14 @@ impl App {
             reset_mode_open: false,
             reset_mode_cursor: 0,
             reset_target: None,
+            reflog: Vec::new(),
+            reflog_details_open: false,
+            reflog_details_commit: None,
+            reflog_details_error: None,
+            amend_open: false,
+            amend_preview: None,
+            amend_message: None,
+            amend_error: None,
         };
         (app, vec![Command::OpenRepository(repo_path)])
     }
@@ -656,6 +721,56 @@ impl App {
     /// exactly what the chooser already showed.
     pub fn predicted_reset_loss_file_count(&self) -> usize {
         self.status_entries().len()
+    }
+
+    /// `HEAD`'s reflog entries loaded so far (T-241/US-089 criterion 1),
+    /// newest first.
+    pub fn reflog(&self) -> &[ReflogEntry] {
+        &self.reflog
+    }
+
+    /// Whether the reflog-entry commit-details overlay is open (US-089
+    /// criterion 2).
+    pub fn reflog_details_open(&self) -> bool {
+        self.reflog_details_open
+    }
+
+    /// The full commit loaded for the highlighted reflog entry, or `None`
+    /// while loading (see [`Self::reflog_details_error`] for the other two
+    /// "no commit to show" cases: a load failure, and the entry's object no
+    /// longer existing at all).
+    pub fn reflog_details_commit(&self) -> Option<&Commit> {
+        self.reflog_details_commit.as_ref()
+    }
+
+    /// A reflog-details load failure, or the fixed "object no longer
+    /// exists" message [`Self::open_reflog_details`] sets directly for an
+    /// expired/pruned entry (US-089 criterion 3) — never a read is even
+    /// attempted for that case.
+    pub fn reflog_details_error(&self) -> Option<&GitSailError> {
+        self.reflog_details_error.as_ref()
+    }
+
+    /// Whether the amend composer (`A`, T-242/US-090) is open.
+    pub fn amend_open(&self) -> bool {
+        self.amend_open
+    }
+
+    /// The read-only amend preview loaded so far (US-090 criterion 1), or
+    /// `None` while loading or after a failed preview.
+    pub fn amend_preview(&self) -> Option<&AmendPreview> {
+        self.amend_preview.as_ref()
+    }
+
+    /// The amend message currently being edited (US-090 criterion 3: never
+    /// cleared by a failed amend).
+    pub fn amend_message(&self) -> Option<&str> {
+        self.amend_message.as_deref()
+    }
+
+    /// A preview-load failure, shown inline in the composer.
+    pub fn amend_error(&self) -> Option<&GitSailError> {
+        self.amend_error.as_ref()
     }
 
     /// Whether the interactive rebase plan overlay (`O`, T-236/US-084) is
@@ -805,6 +920,7 @@ impl App {
             ReferenceView::Tags => self.tags.len(),
             ReferenceView::Remotes => self.remotes.len(),
             ReferenceView::Stash => self.stashes.len(),
+            ReferenceView::Reflog => self.reflog.len(),
         }
     }
 
@@ -936,6 +1052,8 @@ impl App {
             InputContext::CommitDetails
         } else if self.reference_details_open {
             InputContext::ReferenceDetails
+        } else if self.reflog_details_open {
+            InputContext::ReflogDetails
         } else if self.conflicts_open && self.operation.is_idle() {
             // Falls through to `Normal` while a merge/continue/abort
             // confirmation is in flight (`operation` not idle), exactly
@@ -968,6 +1086,16 @@ impl App {
             InputContext::ResetMode
         } else if self.commit_message.is_some() && self.operation.is_idle() {
             InputContext::CommitMessage
+        } else if self.amend_open && self.operation.is_idle() {
+            // Falls through to `Normal` while a `Confirming`/`InProgress`/
+            // terminal amend is in flight, exactly like `CommitMessage`
+            // above — the second `Enter` that confirms it must reach
+            // `Self::handle_activate`'s generic `Confirming` intercept, not
+            // this context's own (unrelated) `Enter` meaning. Unlike
+            // `CommitMessage`, `Self::amend_open` (not the message buffer
+            // itself) is what tracks whether the composer is open, since
+            // the message starts `None` while the preview is still loading.
+            InputContext::Amend
         } else if self.branch_input.is_some() && self.rename_source.is_some() {
             InputContext::RenameBranch
         } else if self.branch_input.is_some() {
@@ -1189,6 +1317,19 @@ impl App {
                 self.request_reset();
                 Vec::new()
             }
+            Action::StartAmend => self.request_start_amend(),
+            Action::AmendMessageInput(c) => {
+                if let Some(text) = self.amend_message.as_mut() {
+                    text.push(c);
+                }
+                Vec::new()
+            }
+            Action::AmendMessageBackspace => {
+                if let Some(text) = self.amend_message.as_mut() {
+                    text.pop();
+                }
+                Vec::new()
+            }
         }
     }
 
@@ -1395,6 +1536,9 @@ impl App {
             self.confirm_reset_mode();
             return Vec::new();
         }
+        if self.input_context() == InputContext::Amend {
+            return self.confirm_amend();
+        }
         if let OperationState::Confirming(kind) = &self.operation {
             let kind = kind.clone();
             self.operation.confirm();
@@ -1423,10 +1567,19 @@ impl App {
                 self.open_commit_details();
                 Vec::new()
             }
-            Panel::References => {
-                self.open_reference_details();
-                Vec::new()
-            }
+            Panel::References => match self.reference_view {
+                // T-241/US-089 criterion 2: selecting a reflog entry opens
+                // its commit details when the object still exists, and this
+                // is genuinely a fresh read (a reflog entry's own fields
+                // carry a hash/message/date, never a full `Commit`) — unlike
+                // [`Self::open_commit_details`]/[`Self::open_reference_details`],
+                // which only ever flip a bool over already-resident data.
+                ReferenceView::Reflog => self.open_reflog_details(),
+                ReferenceView::Tags | ReferenceView::Remotes | ReferenceView::Stash => {
+                    self.open_reference_details();
+                    Vec::new()
+                }
+            },
             _ => Vec::new(),
         }
     }
@@ -1451,6 +1604,82 @@ impl App {
         if self.reference_cursor < self.reference_len() {
             self.reference_details_open = true;
         }
+    }
+
+    /// Opens the reflog-entry details overlay for the entry currently under
+    /// the References panel's cursor, while its Reflog sub-view is active
+    /// (T-241/US-089 criterion 2). A no-op when nothing is loaded under the
+    /// cursor, mirroring [`Self::open_reference_details`]. When the entry's
+    /// commit object no longer exists, this states that clearly (US-089
+    /// criterion 3) without ever attempting a read for it — reusing
+    /// [`gitsail_application::GetCommit`] (via
+    /// [`crate::worker::Command::LoadReflogCommit`]) exactly like the Graph
+    /// panel's own commit-details overlay reuses it, never a parallel
+    /// lookup. This never runs `reset` or any other mutation — inspection
+    /// here is read-only, full stop (History Editing Rules #10); "go back
+    /// to this state" is a deliberately separate, already-existing,
+    /// explicit action ([`Action::RequestReset`], T-240), not offered from
+    /// here.
+    fn open_reflog_details(&mut self) -> Vec<Command> {
+        let Some(entry) = self.reflog.get(self.reference_cursor).cloned() else {
+            return Vec::new();
+        };
+        self.reflog_details_open = true;
+        self.reflog_details_commit = None;
+        self.reflog_details_error = None;
+        if !entry.is_available() {
+            self.reflog_details_error = Some(GitSailError::new(
+                ErrorCode::RepositoryNotFound,
+                "this reflog entry's commit object no longer exists (already expired and pruned)",
+            ));
+            return Vec::new();
+        }
+        let Some(session) = self.session.as_ref() else {
+            return Vec::new();
+        };
+        let repo = session.repository().clone();
+        vec![Command::LoadReflogCommit(repo, entry.commit)]
+    }
+
+    /// Opens the amend composer (`A`, T-242/US-090 criterion 1), dispatching
+    /// a non-mutating [`Command::PreviewAmend`] immediately — building the
+    /// preview only ever reads `HEAD`/the staged diff, so there is nothing
+    /// to confirm yet (mirrors [`Self::request_rebase_plan`]'s own "opening
+    /// the composer is not itself a mutation" rationale). A no-op while
+    /// already open, so a repeated `A` press never discards an in-flight
+    /// edit or restarts a still-loading preview.
+    fn request_start_amend(&mut self) -> Vec<Command> {
+        if self.amend_open {
+            return Vec::new();
+        }
+        let Some(session) = self.session.as_ref() else {
+            return Vec::new();
+        };
+        self.amend_open = true;
+        self.amend_preview = None;
+        self.amend_message = None;
+        self.amend_error = None;
+        let repo = session.repository().clone();
+        vec![Command::PreviewAmend(repo)]
+    }
+
+    /// Begins confirmation for [`OperationKind::AmendCommit`] (T-242/US-090
+    /// criteria 1, 2): a no-op until the preview has actually loaded — there
+    /// is nothing to amend to yet, and no confirmation can honestly name the
+    /// commit being replaced without it. `expected_head` is exactly the
+    /// commit hash this preview observed as `HEAD`, revalidated by
+    /// `RepositoryWritePort::amend_commit` immediately before it actually
+    /// amends (US-090 criterion 1's own race protection — the same one
+    /// `apps/desktop`'s amend flow already relies on).
+    fn confirm_amend(&mut self) -> Vec<Command> {
+        let Some(preview) = self.amend_preview.as_ref() else {
+            return Vec::new();
+        };
+        self.operation.begin(OperationKind::AmendCommit {
+            short_hash: preview.head.short_hash.as_str().to_string(),
+            expected_head: preview.head.hash.as_str().to_string(),
+        });
+        Vec::new()
     }
 
     /// Loads the diff for the status entry under the cursor (US-046
@@ -1599,6 +1828,10 @@ impl App {
             self.commit_details_open = false;
         } else if self.reference_details_open {
             self.reference_details_open = false;
+        } else if self.reflog_details_open {
+            self.reflog_details_open = false;
+            self.reflog_details_commit = None;
+            self.reflog_details_error = None;
         } else if self.commit_message.is_some() && self.operation.is_idle() {
             // A confirmation in flight (`Confirming(CreateCommit)`) is left
             // alone here — cancelling *that* is `operation.cancel()` below,
@@ -1606,6 +1839,15 @@ impl App {
             // confirmation returns to an editable composer with the typed
             // message intact.
             self.commit_message = None;
+        } else if self.amend_open && self.operation.is_idle() {
+            // Same guard/rationale as `commit_message` above: a
+            // confirmation/in-progress/terminal amend already in flight is
+            // left alone here — dismissing *that* is `operation.cancel()`
+            // in the final `else` below, which never touches these fields.
+            self.amend_open = false;
+            self.amend_preview = None;
+            self.amend_message = None;
+            self.amend_error = None;
         } else if self.rebase_plan_reword_input.is_some() {
             // Cancels only the message edit — the entry's `action` stays
             // `Reword` (client-side validation will require a message
@@ -2504,6 +2746,18 @@ impl App {
                     Vec::new()
                 }
             },
+            OperationKind::AmendCommit { expected_head, .. } => {
+                match CommitHash::new(expected_head) {
+                    Ok(expected_head) => {
+                        let message = self.amend_message.clone().unwrap_or_default();
+                        vec![Command::AmendCommit(repo, message, expected_head)]
+                    }
+                    Err(err) => {
+                        self.operation.fail(err);
+                        Vec::new()
+                    }
+                }
+            }
         }
     }
 
@@ -2520,6 +2774,7 @@ impl App {
             Command::LoadTags(generation, repo.clone()),
             Command::LoadRemotes(generation, repo.clone()),
             Command::LoadStashEntries(generation, repo.clone()),
+            Command::LoadReflog(generation, repo.clone()),
             Command::LoadInProgressOperation(generation, repo),
         ]
     }
@@ -2573,6 +2828,13 @@ impl App {
                 self.reset_mode_open = false;
                 self.reset_mode_cursor = 0;
                 self.reset_target = None;
+                self.reflog_details_open = false;
+                self.reflog_details_commit = None;
+                self.reflog_details_error = None;
+                self.amend_open = false;
+                self.amend_preview = None;
+                self.amend_message = None;
+                self.amend_error = None;
 
                 let mut commands = vec![
                     Command::RefreshStatus(ticket, repo.clone()),
@@ -2580,6 +2842,7 @@ impl App {
                     Command::LoadTags(generation, repo.clone()),
                     Command::LoadRemotes(generation, repo.clone()),
                     Command::LoadStashEntries(generation, repo.clone()),
+                    Command::LoadReflog(generation, repo.clone()),
                     Command::LoadInProgressOperation(generation, repo.clone()),
                 ];
                 commands.extend(self.restart_commit_graph(CommitQuery::default()));
@@ -2769,6 +3032,104 @@ impl App {
         if let Ok(stashes) = result {
             self.stashes = stashes;
             self.clamp_reference_cursor();
+        }
+    }
+
+    /// Handles [`crate::message::Message::ReflogLoaded`] (T-241/US-089),
+    /// matching [`Self::on_tags_loaded`]'s staleness/failure discipline.
+    pub fn on_reflog_loaded(&mut self, generation: u64, result: Result<Vec<ReflogEntry>, GitSailError>) {
+        let Some(session) = self.session.as_ref() else {
+            return;
+        };
+        if session.generation() != generation {
+            return;
+        }
+        if let Ok(entries) = result {
+            self.reflog = entries;
+            self.clamp_reference_cursor();
+        }
+    }
+
+    /// Handles [`crate::message::Message::ReflogCommitLoaded`] (T-241/US-089
+    /// criterion 2), discarding a result for an entry no longer under the
+    /// cursor — mirrors [`Self::on_conflict_sides_loaded`]'s own hash/path
+    /// tagged staleness discipline.
+    pub fn on_reflog_commit_loaded(&mut self, hash: CommitHash, result: Result<Commit, GitSailError>) {
+        if !self.reflog_details_open {
+            return;
+        }
+        let Some(current) = self.reflog.get(self.reference_cursor) else {
+            return;
+        };
+        if current.commit != hash {
+            return;
+        }
+        match result {
+            Ok(commit) => {
+                self.reflog_details_commit = Some(commit);
+                self.reflog_details_error = None;
+            }
+            Err(error) => {
+                self.reflog_details_error = Some(error);
+            }
+        }
+    }
+
+    /// Handles [`crate::message::Message::AmendPreviewed`] (T-242/US-090
+    /// criterion 1), matching [`Self::on_rebase_plan_loaded`]'s own shape:
+    /// discarded when the composer has since been dismissed, and the
+    /// message is pre-filled from `HEAD`'s current subject/body exactly
+    /// like `apps/desktop/src/stores/amend.ts`'s own `loadPreview` (never a
+    /// different prefill rule for the TUI).
+    pub fn on_amend_previewed(&mut self, result: Result<AmendPreview, GitSailError>) {
+        if !self.amend_open {
+            return;
+        }
+        match result {
+            Ok(preview) => {
+                self.amend_message = Some(if preview.head.body.trim().is_empty() {
+                    preview.head.subject.clone()
+                } else {
+                    format!("{}\n\n{}", preview.head.subject, preview.head.body)
+                });
+                self.amend_error = None;
+                self.amend_preview = Some(preview);
+            }
+            Err(error) => {
+                self.amend_error = Some(error);
+            }
+        }
+    }
+
+    /// Handles [`crate::message::Message::AmendCommitFinished`] (T-242/
+    /// US-090). Success clears the composer and refreshes the commit graph
+    /// (US-090 criterion 3: HEAD's identity changed) alongside status —
+    /// mirroring [`Self::on_commit_created`], extended with the commit-graph
+    /// restart no other mutation here performs (a deliberate, narrow
+    /// addition: amend is the one operation in this crate that rewrites the
+    /// Graph panel's own tip commit in place, so leaving it unrefreshed
+    /// would show a stale hash/subject for `HEAD` until the next unrelated
+    /// refresh). Failure preserves the typed message and the loaded preview
+    /// exactly as they were (criterion 3) — `amend_commit` itself never
+    /// touches the index/working tree unless it actually succeeds, so
+    /// staged changes are equally untouched by construction.
+    pub fn on_amend_finished(&mut self, result: Result<CommitHash, GitSailError>) -> Vec<Command> {
+        match result {
+            Ok(_hash) => {
+                self.operation.succeed();
+                self.amend_open = false;
+                self.amend_preview = None;
+                self.amend_message = None;
+                self.amend_error = None;
+                let mut commands = self.refresh_commands_for(RefreshReason::AfterMutation);
+                let filter = parse_commit_search(self.active_commit_filter.as_deref().unwrap_or(""));
+                commands.extend(self.restart_commit_graph(filter));
+                commands
+            }
+            Err(error) => {
+                self.operation.fail(error);
+                Vec::new()
+            }
         }
     }
 
@@ -4729,6 +5090,8 @@ mod tests {
         app.update(Action::CycleReferenceView);
         assert_eq!(app.reference_view(), ReferenceView::Stash);
         app.update(Action::CycleReferenceView);
+        assert_eq!(app.reference_view(), ReferenceView::Reflog);
+        app.update(Action::CycleReferenceView);
         assert_eq!(app.reference_view(), ReferenceView::Tags);
     }
 
@@ -5147,5 +5510,425 @@ mod tests {
 
         assert!(commands.is_empty());
         assert!(matches!(app.operation(), OperationState::Failed(_, _)));
+    }
+
+    // -----------------------------------------------------------------
+    // T-241/US-089: inspect HEAD's reflog.
+    // -----------------------------------------------------------------
+
+    fn sample_reflog_entry(index: u32, state: gitsail_domain::ReflogObjectState) -> ReflogEntry {
+        ReflogEntry {
+            index,
+            commit: CommitHash::new("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef").unwrap(),
+            message: format!("commit: entry {index}"),
+            date: gitsail_domain::GitTimestamp::new(1_000, 0),
+            object_state: state,
+        }
+    }
+
+    fn sample_commit_for_details() -> gitsail_domain::Commit {
+        gitsail_domain::Commit {
+            hash: CommitHash::new("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef").unwrap(),
+            short_hash: gitsail_domain::ShortHash::new("deadbee".to_string()).unwrap(),
+            parents: vec![],
+            author: gitsail_domain::Signature::new("Ada Lovelace", "ada@example.com"),
+            committer: gitsail_domain::Signature::new("Ada Lovelace", "ada@example.com"),
+            author_date: gitsail_domain::GitTimestamp::new(1_000, 0),
+            commit_date: gitsail_domain::GitTimestamp::new(1_000, 0),
+            subject: "a sample commit".to_string(),
+            body: String::new(),
+            decorations: vec![],
+        }
+    }
+
+    /// Focuses the References panel and cycles its sub-view to Reflog
+    /// (Tags -> Remotes -> Stash -> Reflog).
+    fn open_references_on_reflog(app: &mut App) {
+        for _ in 0..4 {
+            app.update(Action::FocusNext);
+        }
+        assert_eq!(app.focus(), Panel::References);
+        for _ in 0..3 {
+            app.update(Action::CycleReferenceView);
+        }
+        assert_eq!(app.reference_view(), ReferenceView::Reflog);
+    }
+
+    #[test]
+    fn reflog_entries_are_listed_after_loading_newest_first() {
+        let (mut app, _port) = new_app();
+        app.on_repository_opened(Ok(sample_repository()));
+        let generation = app.session().unwrap().generation();
+
+        app.on_reflog_loaded(
+            generation,
+            Ok(vec![
+                sample_reflog_entry(0, gitsail_domain::ReflogObjectState::Present),
+                sample_reflog_entry(1, gitsail_domain::ReflogObjectState::Missing),
+            ]),
+        );
+
+        assert_eq!(app.reflog().len(), 2);
+        assert_eq!(app.reflog()[0].selector("HEAD"), "HEAD@{0}");
+        assert!(app.reflog()[0].is_available());
+        assert!(
+            !app.reflog()[1].is_available(),
+            "US-089 criterion 3: an expired/pruned entry must be reported, not hidden"
+        );
+    }
+
+    #[test]
+    fn a_stale_reflog_result_is_discarded() {
+        let (mut app, _port) = new_app();
+        app.on_repository_opened(Ok(sample_repository()));
+        let stale_generation = app.session().unwrap().generation();
+
+        app.update(Action::Refresh);
+        app.on_reflog_loaded(
+            stale_generation,
+            Ok(vec![sample_reflog_entry(
+                0,
+                gitsail_domain::ReflogObjectState::Present,
+            )]),
+        );
+
+        assert!(
+            app.reflog().is_empty(),
+            "a reflog result computed for an old generation must not populate the panel"
+        );
+    }
+
+    /// US-089 criterion 2: selecting an entry whose commit still exists
+    /// opens its details — reusing `GetCommit` (via
+    /// `Command::LoadReflogCommit`), never a parallel read.
+    #[test]
+    fn activating_an_available_reflog_entry_dispatches_a_commit_load_and_opens_the_overlay() {
+        let (mut app, _port) = new_app();
+        app.on_repository_opened(Ok(sample_repository()));
+        let generation = app.session().unwrap().generation();
+        app.on_reflog_loaded(
+            generation,
+            Ok(vec![sample_reflog_entry(
+                0,
+                gitsail_domain::ReflogObjectState::Present,
+            )]),
+        );
+        open_references_on_reflog(&mut app);
+
+        let commands = app.update(Action::Activate);
+
+        assert!(app.reflog_details_open());
+        assert!(app.reflog_details_error().is_none());
+        assert!(app.reflog_details_commit().is_none(), "still loading");
+        match commands.as_slice() {
+            [Command::LoadReflogCommit(_, hash)] => {
+                assert_eq!(hash.as_str(), "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef");
+            }
+            other => panic!("expected exactly one LoadReflogCommit command, got {other:?}"),
+        }
+    }
+
+    /// US-089 criterion 3: an entry whose object no longer exists states
+    /// that clearly, and never even attempts a read for it — this is never a
+    /// silent omission, and the inspection never runs a reset (History
+    /// Editing Rules #10).
+    #[test]
+    fn activating_a_missing_reflog_entry_states_that_clearly_without_reading_anything() {
+        let (mut app, _port) = new_app();
+        app.on_repository_opened(Ok(sample_repository()));
+        let generation = app.session().unwrap().generation();
+        app.on_reflog_loaded(
+            generation,
+            Ok(vec![sample_reflog_entry(
+                0,
+                gitsail_domain::ReflogObjectState::Missing,
+            )]),
+        );
+        open_references_on_reflog(&mut app);
+
+        let commands = app.update(Action::Activate);
+
+        assert!(app.reflog_details_open());
+        assert!(
+            commands.is_empty(),
+            "an expired/pruned entry's object must never be read"
+        );
+        assert!(app.reflog_details_error().is_some());
+        assert!(app.reflog_details_commit().is_none());
+    }
+
+    #[test]
+    fn on_reflog_commit_loaded_discards_a_result_for_an_entry_no_longer_under_the_cursor() {
+        let (mut app, _port) = new_app();
+        app.on_repository_opened(Ok(sample_repository()));
+        let generation = app.session().unwrap().generation();
+        app.on_reflog_loaded(
+            generation,
+            Ok(vec![sample_reflog_entry(
+                0,
+                gitsail_domain::ReflogObjectState::Present,
+            )]),
+        );
+        open_references_on_reflog(&mut app);
+        app.update(Action::Activate);
+
+        let abandoned_hash =
+            CommitHash::new("cafecafecafecafecafecafecafecafecafecafe").unwrap();
+        app.on_reflog_commit_loaded(abandoned_hash, Ok(sample_commit_for_details()));
+
+        assert!(
+            app.reflog_details_commit().is_none(),
+            "a result for a hash no longer under the cursor must be discarded"
+        );
+    }
+
+    #[test]
+    fn on_reflog_commit_loaded_populates_the_overlay_for_the_current_entry() {
+        let (mut app, _port) = new_app();
+        app.on_repository_opened(Ok(sample_repository()));
+        let generation = app.session().unwrap().generation();
+        app.on_reflog_loaded(
+            generation,
+            Ok(vec![sample_reflog_entry(
+                0,
+                gitsail_domain::ReflogObjectState::Present,
+            )]),
+        );
+        open_references_on_reflog(&mut app);
+        app.update(Action::Activate);
+
+        let hash = CommitHash::new("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef").unwrap();
+        app.on_reflog_commit_loaded(hash, Ok(sample_commit_for_details()));
+
+        assert_eq!(
+            app.reflog_details_commit().unwrap().subject,
+            "a sample commit"
+        );
+        assert!(app.reflog_details_error().is_none());
+    }
+
+    #[test]
+    fn dismissing_reflog_details_closes_it_without_touching_the_operation_state() {
+        let (mut app, _port) = new_app();
+        app.on_repository_opened(Ok(sample_repository()));
+        let generation = app.session().unwrap().generation();
+        app.on_reflog_loaded(
+            generation,
+            Ok(vec![sample_reflog_entry(
+                0,
+                gitsail_domain::ReflogObjectState::Present,
+            )]),
+        );
+        open_references_on_reflog(&mut app);
+        app.update(Action::Activate);
+        assert!(app.reflog_details_open());
+
+        app.update(Action::Dismiss);
+
+        assert!(!app.reflog_details_open());
+        assert!(app.reflog_details_commit().is_none());
+        assert!(app.operation().is_idle());
+    }
+
+    // -----------------------------------------------------------------
+    // T-242/US-090: amend the last commit with the TUI.
+    // -----------------------------------------------------------------
+
+    fn sample_amend_preview(subject: &str, body: &str) -> AmendPreview {
+        AmendPreview {
+            head: gitsail_domain::Commit {
+                subject: subject.to_string(),
+                body: body.to_string(),
+                ..sample_commit_for_details()
+            },
+            staged_diff: Diff { files: vec![] },
+        }
+    }
+
+    #[test]
+    fn starting_amend_dispatches_a_preview_read_and_is_idempotent_while_open() {
+        let (mut app, _port) = new_app();
+        app.on_repository_opened(Ok(sample_repository()));
+
+        let commands = app.update(Action::StartAmend);
+        assert!(app.amend_open());
+        assert!(matches!(commands.as_slice(), [Command::PreviewAmend(_)]));
+
+        // A second `A` press while already open must never discard an
+        // in-flight/edited state by restarting the preview.
+        let commands = app.update(Action::StartAmend);
+        assert!(commands.is_empty());
+    }
+
+    /// US-090 criterion 1: the TUI reuses `gitsail_application::PreviewAmend`
+    /// unchanged — the message is pre-filled from HEAD's own subject/body,
+    /// mirroring `apps/desktop/src/stores/amend.ts`'s own prefill exactly.
+    #[test]
+    fn amend_preview_prefills_the_message_from_heads_subject_and_body() {
+        let (mut app, _port) = new_app();
+        app.on_repository_opened(Ok(sample_repository()));
+        app.update(Action::StartAmend);
+
+        app.on_amend_previewed(Ok(sample_amend_preview("fix bug", "details here")));
+
+        assert_eq!(app.amend_message(), Some("fix bug\n\ndetails here"));
+        assert!(app.amend_error().is_none());
+        assert!(app.amend_preview().is_some());
+    }
+
+    #[test]
+    fn amend_preview_with_no_body_prefills_only_the_subject() {
+        let (mut app, _port) = new_app();
+        app.on_repository_opened(Ok(sample_repository()));
+        app.update(Action::StartAmend);
+
+        app.on_amend_previewed(Ok(sample_amend_preview("fix bug", "")));
+
+        assert_eq!(app.amend_message(), Some("fix bug"));
+    }
+
+    #[test]
+    fn a_failed_amend_preview_is_shown_inline_without_opening_a_composer_message() {
+        let (mut app, _port) = new_app();
+        app.on_repository_opened(Ok(sample_repository()));
+        app.update(Action::StartAmend);
+
+        app.on_amend_previewed(Err(GitSailError::new(
+            ErrorCode::RepositoryNotFound,
+            "HEAD could not be resolved",
+        )));
+
+        assert!(app.amend_error().is_some());
+        assert!(app.amend_message().is_none());
+    }
+
+    /// US-090 criteria 1, 2: confirming amend names the exact commit being
+    /// replaced and classifies `Destructive` — reusing
+    /// `gitsail_application::AmendCommit`'s existing `expected_head`
+    /// revalidation contract (never a parallel implementation), and the
+    /// same risk level `apps/desktop/src/stores/amend.ts` already uses.
+    #[test]
+    fn confirming_amend_begins_a_destructive_confirmation_naming_head() {
+        let (mut app, _port) = new_app();
+        app.on_repository_opened(Ok(sample_repository()));
+        app.update(Action::StartAmend);
+        app.on_amend_previewed(Ok(sample_amend_preview("fix bug", "")));
+
+        app.update(Action::Activate);
+
+        match app.operation() {
+            OperationState::Confirming(kind) => {
+                assert_eq!(kind.risk(), crate::operation::OperationRisk::Destructive);
+                let label = kind.target_label();
+                assert!(label.contains("deadbee"));
+                assert!(label.contains("pushed or shared"));
+            }
+            other => panic!("expected Confirming(AmendCommit), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn confirming_amend_without_a_loaded_preview_is_a_no_op() {
+        let (mut app, _port) = new_app();
+        app.on_repository_opened(Ok(sample_repository()));
+        app.update(Action::StartAmend);
+
+        let commands = app.update(Action::Activate);
+
+        assert!(commands.is_empty());
+        assert!(app.operation().is_idle());
+    }
+
+    #[test]
+    fn dispatching_a_confirmed_amend_sends_the_edited_message_and_the_expected_head() {
+        let (mut app, _port) = new_app();
+        app.on_repository_opened(Ok(sample_repository()));
+        app.update(Action::StartAmend);
+        app.on_amend_previewed(Ok(sample_amend_preview("fix bug", "")));
+        for c in " — edited".chars() {
+            app.update(Action::AmendMessageInput(c));
+        }
+        app.update(Action::Activate); // -> Confirming
+
+        let commands = app.update(Action::Activate); // -> confirm, dispatch
+
+        match commands.as_slice() {
+            [Command::AmendCommit(_, message, expected_head)] => {
+                assert_eq!(message, "fix bug — edited");
+                assert_eq!(
+                    expected_head.as_str(),
+                    "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+                );
+            }
+            other => panic!("expected exactly one AmendCommit command, got {other:?}"),
+        }
+        assert!(matches!(app.operation(), OperationState::InProgress(_)));
+    }
+
+    /// US-090 criterion 3 / DoD: mirrors the Desktop's own stale-`HEAD` race
+    /// test — a rejected amend (Core's `amend_commit` revalidates
+    /// `expected_head` immediately before running, and refuses when `HEAD`
+    /// moved since the preview) must never be silently treated as a success,
+    /// and must never lose the typed message or discard staged changes.
+    /// `amend_commit` itself only ever touches the index/working tree on an
+    /// actual success, so "staged alterations preserved" holds by
+    /// construction whenever this failure path is taken.
+    #[test]
+    fn a_failed_amend_from_a_stale_head_preserves_the_message_and_never_refreshes() {
+        let (mut app, _port) = new_app();
+        app.on_repository_opened(Ok(sample_repository()));
+        app.update(Action::StartAmend);
+        app.on_amend_previewed(Ok(sample_amend_preview("fix bug", "")));
+        app.update(Action::Activate);
+        app.update(Action::Activate);
+
+        let commands = app.on_amend_finished(Err(GitSailError::new(
+            ErrorCode::OperationConflict,
+            "HEAD changed since the amend was previewed",
+        )));
+
+        assert!(commands.is_empty(), "a rejected amend must never refresh");
+        assert!(matches!(app.operation(), OperationState::Failed(_, _)));
+        assert_eq!(
+            app.amend_message(),
+            Some("fix bug"),
+            "the typed message must survive a rejected amend"
+        );
+        assert!(
+            app.amend_open(),
+            "the composer must still be showing the preserved message"
+        );
+    }
+
+    #[test]
+    fn a_successful_amend_clears_the_composer_and_refreshes_status_and_the_commit_graph() {
+        let (mut app, _port) = new_app();
+        app.on_repository_opened(Ok(sample_repository()));
+        app.update(Action::StartAmend);
+        app.on_amend_previewed(Ok(sample_amend_preview("fix bug", "")));
+        app.update(Action::Activate);
+        app.update(Action::Activate);
+
+        let commands = app.on_amend_finished(Ok(CommitHash::new(
+            "cafef00dcafef00dcafef00dcafef00dcafef00d",
+        )
+        .unwrap()));
+
+        assert!(!app.amend_open());
+        assert!(app.amend_message().is_none());
+        assert!(app.amend_preview().is_none());
+        assert!(matches!(app.operation(), OperationState::Succeeded(_)));
+        assert!(
+            commands
+                .iter()
+                .any(|c| matches!(c, Command::RefreshStatus(_, _))),
+            "success must refresh status"
+        );
+        assert!(
+            commands
+                .iter()
+                .any(|c| matches!(c, Command::LoadCommitGraph(_, _, _))),
+            "success must refresh the commit graph, since amend rewrites HEAD's own tip"
+        );
     }
 }

@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use gitsail_domain::{
     Blame, Branch, CancellationToken, Commit, CommitHash, ConflictSides, Diff,
-    FileContentAtRevision, GitSailError, InProgressOperation, LineHistory, Repository,
+    FileContentAtRevision, GitSailError, InProgressOperation, LineHistory, ReflogEntry, Repository,
     RepositoryStatus,
 };
 
@@ -345,6 +345,27 @@ impl GetFileContent {
     }
 }
 
+/// Lists `HEAD`'s reflog entries, newest first (T-241/US-089) — a thin
+/// wrapper over [`RepositoryReadPort::reflog`], mirroring
+/// [`GetConflictSides`]'s own shape. Read-only: this never runs `reset` or
+/// any other mutation (History Editing Rules #10) — a caller that wants to
+/// actually move `HEAD` back to a past entry dispatches the separate,
+/// already-existing [`crate::write_ports::RepositoryWritePort::reset`]
+/// (T-240) as its own explicit action.
+pub struct GetReflog {
+    port: Arc<dyn RepositoryReadPort>,
+}
+
+impl GetReflog {
+    pub fn new(port: Arc<dyn RepositoryReadPort>) -> Self {
+        Self { port }
+    }
+
+    pub fn execute(&self, repo: &Repository) -> Result<Vec<ReflogEntry>, GitSailError> {
+        self.port.reflog(repo)
+    }
+}
+
 /// Everything a caller needs to show before committing to an amend
 /// (US-059 criterion 1): `HEAD`'s exact commit (so its current message can
 /// be pre-filled and its identity displayed) and the staged diff (so the
@@ -414,6 +435,7 @@ mod tests {
         line_history: LineHistory,
         file_content: FileContentAtRevision,
         revisions: std::collections::HashMap<String, CommitHash>,
+        reflog_entries: Vec<ReflogEntry>,
         received_commit_query: Mutex<Option<CommitQuery>>,
         received_diff_request: Mutex<Option<DiffRequest>>,
         received_line_history_request: Mutex<Option<LineHistoryRequest>>,
@@ -503,6 +525,7 @@ mod tests {
                     kind: FileContentKind::Text("fixture content".into()),
                 },
                 revisions: std::collections::HashMap::new(),
+                reflog_entries: Vec::new(),
                 received_commit_query: Mutex::new(None),
                 received_diff_request: Mutex::new(None),
                 received_line_history_request: Mutex::new(None),
@@ -599,6 +622,10 @@ mod tests {
                 revision: revision.clone(),
                 kind: self.file_content.kind.clone(),
             })
+        }
+
+        fn reflog(&self, _repo: &Repository) -> Result<Vec<ReflogEntry>, GitSailError> {
+            Ok(self.reflog_entries.clone())
         }
     }
 
@@ -941,5 +968,34 @@ mod tests {
         assert_eq!(content.path, path);
         assert_eq!(content.revision, port.single_commit.hash);
         assert_eq!(content.kind, FileContentKind::Text("fixture content".into()));
+    }
+
+    #[test]
+    fn get_reflog_delegates_to_port() {
+        let mut port = FakeReadPort::new();
+        port.reflog_entries = vec![
+            gitsail_domain::ReflogEntry {
+                index: 0,
+                commit: CommitHash::new("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").unwrap(),
+                message: "commit: latest".to_string(),
+                date: gitsail_domain::GitTimestamp::new(100, 0),
+                object_state: gitsail_domain::ReflogObjectState::Present,
+            },
+            gitsail_domain::ReflogEntry {
+                index: 1,
+                commit: CommitHash::new("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb").unwrap(),
+                message: "commit: older, pruned".to_string(),
+                date: gitsail_domain::GitTimestamp::new(50, 0),
+                object_state: gitsail_domain::ReflogObjectState::Missing,
+            },
+        ];
+        let port = Arc::new(port);
+        let use_case = GetReflog::new(port.clone());
+
+        let entries = use_case.execute(&port.repository).unwrap();
+
+        assert_eq!(entries, port.reflog_entries);
+        assert!(entries[0].is_available());
+        assert!(!entries[1].is_available());
     }
 }

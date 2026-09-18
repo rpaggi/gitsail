@@ -19,6 +19,7 @@ pub mod ids;
 pub mod line_history;
 pub mod operation;
 pub mod redact;
+pub mod reflog;
 pub mod remote;
 pub mod repository;
 pub mod sanitize;
@@ -42,6 +43,7 @@ pub use operation::{
     ConflictedFile, InProgressOperation, MergeOperation, OperationCapability, RebaseOperation,
     SequencerOperation,
 };
+pub use reflog::{ReflogEntry, ReflogObjectState};
 pub use remote::{Remote, RemoteUrl};
 pub use repository::{HeadState, Repository, RepositoryId};
 pub use stash::Stash;

@@ -16,7 +16,7 @@
 //! all Git text parsing lives in this crate, never in `gitsail-application`
 //! or `gitsail-domain`.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -33,9 +33,9 @@ use gitsail_domain::{
     ConflictedFile, Decoration, Diff, DiffHunk, DiffLine, DiffLineOrigin, ErrorCode, FileChange,
     FileContentAtRevision, FileContentKind, FileDiff, FileStatusCode, GitSailError, GitTimestamp,
     HeadState, InProgressOperation, LineHistory, LineHistoryEntry, MergeOperation,
-    OperationCapability, RebaseOperation, Remote, RemoteUrl, Repository, RepositoryId,
-    RepositoryStatus, SequencerOperation, ShortHash, Signature, Stash, Tag, TagKind, Worktree,
-    WorktreeHead,
+    OperationCapability, RebaseOperation, ReflogEntry, ReflogObjectState, Remote, RemoteUrl,
+    Repository, RepositoryId, RepositoryStatus, SequencerOperation, ShortHash, Signature, Stash,
+    Tag, TagKind, Worktree, WorktreeHead,
 };
 
 use crate::runner::{CancellationToken, GitProcessRunner, ProcessOutput, ProcessRequest};
@@ -97,6 +97,20 @@ const STASH_FORMAT: &str = "%H\u{1f}%gs\u{1f}%ad\u{1e}";
 
 /// Number of `FIELD_SEP`-delimited fields in [`STASH_FORMAT`].
 const STASH_FIELD_COUNT: usize = 3;
+
+/// `git reflog show --format:` string, one `RECORD_SEP`-terminated record
+/// per reflog entry (T-241/US-089), mirroring [`STASH_FORMAT`]'s own
+/// convention exactly, including the same reason `%gd` is excluded: combined
+/// with `--date=raw` (needed for the date field below), Git renders `%gd`'s
+/// `N` as the *date* rather than the entry's position — verified empirically
+/// against a real repository — so the index instead comes from this
+/// record's position in `git reflog show`'s output, which is always
+/// newest-first (`HEAD@{0}` first), exactly like `git stash list`'s own
+/// output order.
+const REFLOG_FORMAT: &str = "%H\u{1f}%gs\u{1f}%ad\u{1e}";
+
+/// Number of `FIELD_SEP`-delimited fields in [`REFLOG_FORMAT`].
+const REFLOG_FIELD_COUNT: usize = 3;
 
 /// `git log --reverse --pretty=format:` string producing one
 /// `RECORD_SEP`-terminated record per candidate commit for
@@ -350,6 +364,43 @@ impl GitCliProvider {
             ));
         }
         Ok(())
+    }
+
+    /// Determines which of `hashes` are still readable objects, via a single
+    /// `git cat-file --batch-check` invocation fed every hash on stdin
+    /// (T-241/US-089 criterion 3) — one process for the whole batch rather
+    /// than one `git cat-file -e` per entry. Returns the subset that exists;
+    /// [`Self::reflog`] treats anything not in the returned set as missing.
+    /// An empty `hashes` never spawns a process at all (an empty reflog is a
+    /// valid, ordinary state).
+    fn object_existence(
+        &self,
+        cwd: &Path,
+        hashes: &[CommitHash],
+    ) -> Result<HashSet<String>, GitSailError> {
+        if hashes.is_empty() {
+            return Ok(HashSet::new());
+        }
+        let mut stdin = String::new();
+        for hash in hashes {
+            stdin.push_str(hash.as_str());
+            stdin.push('\n');
+        }
+        let request = ProcessRequest::new(
+            vec![
+                "cat-file".to_string(),
+                "--batch-check=%(objectname) %(objecttype)".to_string(),
+            ],
+            cwd.to_path_buf(),
+        )
+        .with_env(Self::locale_env())
+        .with_stdin(stdin.into_bytes());
+        let output = self
+            .runner
+            .run(request, &CancellationToken::new())
+            .map_err(classify_index_lock_conflict)?;
+        let stdout = Self::stdout_string(&output)?;
+        Ok(parse_batch_check_existence(&stdout))
     }
 
     /// Refuses to start a new rebase-shaped mutation when another
@@ -990,6 +1041,58 @@ impl RepositoryReadPort for GitCliProvider {
         let output = self.run(args, &repo.root_path)?;
         let stdout = Self::stdout_string(&output)?;
         parse_stash_records(&stdout)
+    }
+
+    /// Lists `HEAD`'s reflog entries, newest (`HEAD@{0}`) first, via `git
+    /// reflog show` (T-241/US-089 criterion 1). Read-only: this never runs
+    /// `git reset`/`checkout`/anything else that would move `HEAD`, the
+    /// index, or the working tree (History Editing Rules #10) — it only
+    /// reads the reflog file Git itself already maintains.
+    ///
+    /// The reflog's own hash/message/date fields are read directly out of
+    /// the reflog entry itself (never by re-deriving them from the commit
+    /// object), so a listing never fails even for an entry whose object has
+    /// since been pruned — Git's `reflog show`/`log -g` machinery reads the
+    /// same way. Each entry's [`ReflogObjectState`] is then determined
+    /// separately, in a single `git cat-file --batch-check` call over every
+    /// listed hash at once (see [`Self::object_existence`]), rather than one
+    /// process per entry — cheap even for a long reflog, and correct even
+    /// though the ordinary case (entries still within Git's own reflog
+    /// expiry window) never actually needs it: expiring a reflog entry
+    /// normally removes the entry itself from `git reflog show`'s output
+    /// (verified empirically — see this task's own session notes), so a
+    /// listed-but-pruned entry is a rare, largely defensive case (e.g.
+    /// external repository corruption) rather than the ordinary "old
+    /// history" one — but this must still never crash or fail the whole
+    /// query on it (US-089 criterion 3).
+    ///
+    /// An unborn `HEAD` (no commits yet) has no reflog at all — reported as
+    /// an empty list, mirroring [`Self::commits`]'s own "unresolvable
+    /// revision is a legitimate empty state" convention, never an error.
+    fn reflog(&self, repo: &Repository) -> Result<Vec<ReflogEntry>, GitSailError> {
+        let args = vec![
+            "reflog".to_string(),
+            "show".to_string(),
+            "--date=raw".to_string(),
+            format!("--format={REFLOG_FORMAT}"),
+            "HEAD".to_string(),
+        ];
+        let Some(output) = self.try_run(args, &repo.root_path)? else {
+            return Ok(Vec::new());
+        };
+        let stdout = Self::stdout_string(&output)?;
+        let mut entries = parse_reflog_records(&stdout)?;
+
+        let hashes: Vec<CommitHash> = entries.iter().map(|entry| entry.commit.clone()).collect();
+        let existing = self.object_existence(&repo.root_path, &hashes)?;
+        for entry in &mut entries {
+            entry.object_state = if existing.contains(entry.commit.as_str()) {
+                ReflogObjectState::Present
+            } else {
+                ReflogObjectState::Missing
+            };
+        }
+        Ok(entries)
     }
 
     /// Lists worktrees via `git worktree list --porcelain -z` (US-095
@@ -4512,6 +4615,67 @@ fn parse_stash_record(index: u32, record: &str) -> Result<Stash, GitSailError> {
 }
 
 // ---------------------------------------------------------------------
+// `git reflog show` parsing (T-241/US-089).
+// ---------------------------------------------------------------------
+
+/// Parses `raw` `git reflog show --format=REFLOG_FORMAT` output into
+/// entries, newest first, mirroring [`parse_stash_records`] exactly —
+/// including leaving [`ReflogEntry::object_state`] at a placeholder value
+/// ([`ReflogObjectState::Missing`]) here: [`GitCliProvider::reflog`] fills in
+/// the real value afterward via a single batched existence check, rather
+/// than this per-record parser doing it (which would mean one `git
+/// cat-file` process per entry).
+fn parse_reflog_records(raw: &str) -> Result<Vec<ReflogEntry>, GitSailError> {
+    split_record_sep_blocks(raw)
+        .enumerate()
+        .map(|(index, record)| parse_reflog_record(index as u32, record))
+        .collect()
+}
+
+fn parse_reflog_record(index: u32, record: &str) -> Result<ReflogEntry, GitSailError> {
+    let fields: Vec<&str> = record.split(FIELD_SEP).collect();
+    if fields.len() != REFLOG_FIELD_COUNT {
+        return Err(parse_err(
+            "malformed git reflog show record: unexpected field count",
+        ));
+    }
+    let commit = CommitHash::new(fields[0].to_string())?;
+    let message = fields[1].to_string();
+    let date = parse_raw_date(fields[2])?;
+    Ok(ReflogEntry {
+        index,
+        commit,
+        message,
+        date,
+        // Overwritten by `GitCliProvider::reflog` right after this parses —
+        // see this function's own doc.
+        object_state: ReflogObjectState::Missing,
+    })
+}
+
+/// Parses `git cat-file --batch-check='%(objectname) %(objecttype)'`
+/// output (fed one hash per stdin line by [`GitCliProvider::object_existence`])
+/// into the subset of hashes that still exist. A hash Git could not find
+/// reports its type as the literal string `missing` (verified empirically
+/// against a real `git cat-file --batch-check` run) rather than one of the
+/// real object types (`commit`, `tag`, ...); anything else is treated as
+/// existing regardless of its exact type, since [`GitCliProvider::reflog`]
+/// only ever asks about commit hashes here. A line this adapter cannot even
+/// parse into `<hash> <type>` is skipped rather than treated as either
+/// outcome — defensive, since malformed output would indicate a Git version
+/// mismatch this adapter does not otherwise support, not a real "missing"
+/// or "present" answer.
+fn parse_batch_check_existence(stdout: &str) -> HashSet<String> {
+    stdout
+        .lines()
+        .filter_map(|line| {
+            let (object, kind) = line.split_once(' ')?;
+            (kind != "missing").then(|| object.to_string())
+        })
+        .collect()
+}
+
+// ---------------------------------------------------------------------
 // `git worktree list --porcelain -z` parsing (EPIC-18/T-220/US-095).
 // ---------------------------------------------------------------------
 
@@ -5634,5 +5798,57 @@ mod tests {
         let err = parse_blame(&raw, &cancel).unwrap_err();
 
         assert_eq!(err.code(), ErrorCode::Cancelled);
+    }
+
+    // -------------------------------------------------------------------
+    // T-241/US-089: `git reflog show`/`git cat-file --batch-check` parsing.
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn parse_reflog_records_reports_index_hash_message_and_date_in_output_order() {
+        let raw = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\u{1f}commit: second\u{1f}200 +0000\u{1e}\nbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\u{1f}commit (initial): first\u{1f}100 +0000\u{1e}";
+
+        let entries = parse_reflog_records(raw).unwrap();
+
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].index, 0);
+        assert_eq!(
+            entries[0].commit.as_str(),
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        );
+        assert_eq!(entries[0].message, "commit: second");
+        assert_eq!(entries[0].date.seconds_since_epoch, 200);
+        assert_eq!(entries[1].index, 1);
+        assert_eq!(entries[1].message, "commit (initial): first");
+    }
+
+    #[test]
+    fn parse_reflog_records_rejects_a_malformed_record() {
+        let raw = "onlyonefield\u{1e}";
+
+        let err = parse_reflog_records(raw).unwrap_err();
+
+        assert_eq!(err.code(), ErrorCode::ParseFailure);
+    }
+
+    /// T-241/US-089 criterion 3: an entry whose object no longer exists must
+    /// be classified `Missing` rather than failing the whole batch, and this
+    /// never depends on a real pruned repository to exercise (see
+    /// `tests/t241_reflog.rs`'s own doc for why forcing that deterministically
+    /// via real Git commands is not viable — `git reflog expire` removes the
+    /// entry itself rather than leaving a dangling one).
+    #[test]
+    fn parse_batch_check_existence_classifies_missing_objects() {
+        let stdout = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa commit\nbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb missing\n";
+
+        let existing = parse_batch_check_existence(stdout);
+
+        assert!(existing.contains("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
+        assert!(!existing.contains("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"));
+    }
+
+    #[test]
+    fn parse_batch_check_existence_on_empty_output_reports_nothing_existing() {
+        assert!(parse_batch_check_existence("").is_empty());
     }
 }

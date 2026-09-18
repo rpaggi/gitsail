@@ -623,6 +623,28 @@ fn render_references_panel(frame: &mut Frame, rect: Rect, app: &App) {
                     .collect()
             }
         }
+        // T-241/US-089 criterion 1: reference (`HEAD@{n}`), hash, and
+        // message are all shown; criterion 3: an entry whose object no
+        // longer exists is marked `[missing]` right in the list, never
+        // silently hidden.
+        ReferenceView::Reflog => {
+            if app.reflog().is_empty() {
+                vec!["No reflog entries.".to_string()]
+            } else {
+                app.reflog()
+                    .iter()
+                    .map(|entry| {
+                        let missing = if entry.is_available() { "" } else { " [missing]" };
+                        format!(
+                            "{} {} {}{missing}",
+                            entry.selector("HEAD"),
+                            entry.commit.to_short(8).as_str(),
+                            sanitize::safe_line(&entry.message)
+                        )
+                    })
+                    .collect()
+            }
+        }
     };
 
     let has_entries = app.reference_len() > 0;
@@ -647,6 +669,10 @@ fn render_shortcuts(frame: &mut Frame, rect: Rect, app: &App) {
         "Esc/q closes commit details".to_string()
     } else if app.reference_details_open() {
         "Esc/q closes reference details".to_string()
+    } else if app.reflog_details_open() {
+        "Esc/q closes reflog entry details".to_string()
+    } else if app.amend_open() {
+        "Type amend message · Enter confirms · Esc discards".to_string()
     } else if app.conflicts_open() {
         "j/k select · Enter inspects · r resolves · o/t take ours/theirs · c continue · a abort · s skip · Esc closes"
             .to_string()
@@ -687,6 +713,10 @@ fn render_overlays(frame: &mut Frame, area: Rect, app: &App) {
         render_commit_details(frame, area, app);
     } else if app.reference_details_open() {
         render_reference_details(frame, area, app);
+    } else if app.reflog_details_open() {
+        render_reflog_details(frame, area, app);
+    } else if app.amend_open() {
+        render_amend_overlay(frame, area, app);
     } else if app.commit_message().is_some() {
         render_commit_composer(frame, area, app);
     } else if !app.operation().is_idle() {
@@ -846,6 +876,12 @@ fn render_reference_details(frame: &mut Frame, area: Rect, app: &App) {
             ],
             None => return,
         },
+        // Selecting a reflog entry opens `render_reflog_details` instead
+        // (via `reflog_details_open`, never `reference_details_open`) — see
+        // `crate::app::App::activate`'s `Panel::References` arm. This
+        // overlay never actually renders for this sub-view; the arm exists
+        // only to keep this match exhaustive.
+        ReferenceView::Reflog => return,
     };
     let mut lines = lines;
     lines.push(Line::from(""));
@@ -857,6 +893,46 @@ fn render_reference_details(frame: &mut Frame, area: Rect, app: &App) {
         Paragraph::new(lines)
             .wrap(Wrap { trim: true })
             .block(Block::default().title("Reference Details").borders(Borders::ALL)),
+        popup,
+    );
+}
+
+/// Shows the reflog-entry commit-details overlay (T-241/US-089 criterion
+/// 2), reusing [`commit_details_lines`] for a loaded object — the exact
+/// same fields [`render_commit_details`] shows for a Graph panel commit,
+/// never a bespoke, thinner rendering. While loading, or when the entry's
+/// object no longer exists (criterion 3), that state is shown explicitly
+/// instead.
+fn render_reflog_details(frame: &mut Frame, area: Rect, app: &App) {
+    let Some(entry) = app.reflog().get(app.reference_cursor()) else {
+        return;
+    };
+
+    let mut lines = vec![Line::from(format!(
+        "{} — {}",
+        entry.selector("HEAD"),
+        sanitize::safe_line(&entry.message)
+    ))];
+    lines.push(Line::from(""));
+
+    match app.reflog_details_commit() {
+        Some(commit) => lines.extend(commit_details_lines(commit)),
+        None => match app.reflog_details_error() {
+            Some(error) => {
+                lines.push(Line::from(sanitize::safe_line(error.message())));
+                lines.push(Line::from(""));
+                lines.push(Line::from("Esc/q closes"));
+            }
+            None => lines.push(Line::from("Loading commit details…")),
+        },
+    }
+
+    let popup = centered_rect(80, 70, area);
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: true })
+            .block(Block::default().title("Reflog Entry").borders(Borders::ALL)),
         popup,
     );
 }
@@ -1373,6 +1449,77 @@ fn render_commit_composer(frame: &mut Frame, area: Rect, app: &App) {
     );
 }
 
+/// Shows the amend composer (T-242/US-090), mirroring
+/// [`render_commit_composer`]'s own shape exactly: `HEAD`'s identity and the
+/// staged-file count that would be folded in (from the already-loaded
+/// [`gitsail_application::AmendPreview`] — US-090 criterion 1's read-only
+/// preview), the editable message, and a footer that reflects
+/// `app.operation()`. Unlike the commit composer, `Confirming` shows the
+/// exact same Destructive risk text/target label
+/// [`crate::operation::OperationKind::AmendCommit::target_label`] renders
+/// everywhere else (US-090 criterion 2: the commit being replaced and the
+/// publication risk are both named explicitly, never a generic "are you
+/// sure?").
+fn render_amend_overlay(frame: &mut Frame, area: Rect, app: &App) {
+    let mut lines = Vec::new();
+    match app.amend_preview() {
+        Some(preview) => {
+            lines.push(Line::from(format!(
+                "HEAD: {} — {}",
+                preview.head.short_hash.as_str(),
+                sanitize::safe_line(&preview.head.subject)
+            )));
+            lines.push(Line::from(format!(
+                "{} staged file{} will be folded into the amended commit.",
+                preview.staged_diff.files.len(),
+                if preview.staged_diff.files.len() == 1 { "" } else { "s" }
+            )));
+            lines.push(Line::from(""));
+            lines.push(Line::from("Message:"));
+            lines.push(Line::from(sanitize::safe_line(
+                app.amend_message().unwrap_or(""),
+            )));
+            lines.push(Line::from(""));
+        }
+        None => {
+            if let Some(error) = app.amend_error() {
+                lines.push(Line::from(sanitize::safe_line(error.message())));
+                lines.push(Line::from(""));
+            } else {
+                lines.push(Line::from("Loading HEAD's current commit and staged changes…"));
+                lines.push(Line::from(""));
+            }
+        }
+    }
+
+    let footer = match app.operation() {
+        OperationState::Idle => "Enter reviews · Esc discards".to_string(),
+        OperationState::Confirming(kind) => format!(
+            "{}\nrisk: {:?}\nEnter amends · Esc cancels (message kept)",
+            sanitize::safe_line(&kind.target_label()),
+            kind.risk()
+        ),
+        OperationState::InProgress(_) => "Amending…".to_string(),
+        OperationState::Succeeded(_) => "Done".to_string(),
+        OperationState::Failed(_, err) => format!(
+            "{} — Esc dismisses (message kept)",
+            sanitize::safe_line(err.message())
+        ),
+    };
+    for line in footer.split('\n') {
+        lines.push(Line::from(line.to_string()));
+    }
+
+    let popup = centered_rect(75, 65, area);
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: true })
+            .block(Block::default().title("Amend Last Commit").borders(Borders::ALL)),
+        popup,
+    );
+}
+
 fn render_help(frame: &mut Frame, area: Rect) {
     let popup = centered_rect(60, 75, area);
     let lines = vec![
@@ -1401,8 +1548,10 @@ fn render_help(frame: &mut Frame, area: Rect) {
         Line::from("x (Graph)         cherry-pick the highlighted commit onto the current branch"),
         Line::from("v (Graph)         revert the highlighted commit"),
         Line::from("z (Graph)         reset to the highlighted commit (choose soft/mixed/hard)"),
-        Line::from("t (References)    cycle Tags/Remotes/Stash"),
+        Line::from("t (References)    cycle Tags/Remotes/Stash/Reflog"),
         Line::from("Enter (References) view the highlighted entry's details"),
+        Line::from("  (Reflog) opens the entry's commit details, when it still exists"),
+        Line::from("A                 amend HEAD (compose the new message, then confirm)"),
         Line::from("r                 refresh status and branches"),
         Line::from("?                 toggle this help"),
         Line::from("q, Ctrl+C         quit"),

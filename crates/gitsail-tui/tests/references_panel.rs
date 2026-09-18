@@ -7,7 +7,7 @@
 
 mod support;
 
-use gitsail_application::{GetRepositoryStatus, OpenRepository};
+use gitsail_application::{GetCommit, GetRepositoryStatus, OpenRepository};
 use gitsail_tui::{ui, Action, App, Command, Panel, ReferenceView};
 use ratatui::backend::TestBackend;
 use ratatui::Terminal;
@@ -42,6 +42,9 @@ fn open_and_load(app: &mut App, dir: &std::path::Path) {
             }
             Command::LoadStashEntries(generation, repo) => {
                 app.on_stash_entries_loaded(generation, read.list_stash_entries(&repo));
+            }
+            Command::LoadReflog(generation, repo) => {
+                app.on_reflog_loaded(generation, read.reflog(&repo));
             }
             _ => {}
         }
@@ -210,6 +213,43 @@ fn a_repository_with_tags_remotes_and_stash_lists_and_navigates_all_three() {
     );
     app.update(Action::Dismiss);
     assert!(!app.reference_details_open());
+
+    // -- Reflog (T-241/US-089) --------------------------------------------
+    // Read-only: this never runs `reset` or checks anything out (History
+    // Editing Rules #10) — only the one commit made above shows up.
+    let read = read_port();
+    app.update(Action::CycleReferenceView);
+    assert_eq!(app.reference_view(), ReferenceView::Reflog);
+    // The initial commit plus the `stash push` above (which records its own
+    // "reset: moving to HEAD" entry, even though the commit itself never
+    // changes) — verified empirically against real Git.
+    assert_eq!(app.reflog().len(), 2);
+    assert!(app.reflog().iter().all(|entry| entry.is_available()));
+    let text = render(&app);
+    assert!(text.contains("HEAD@{0}"), "reflog entry not listed:\n{text}");
+
+    // Selecting it dispatches a real `GetCommit` read (US-089 criterion 2:
+    // reuses the existing use case, never a parallel implementation) —
+    // this is the one sub-view where activating an entry issues a
+    // `Command`, unlike Tags/Remotes/Stash above.
+    let commands = app.update(Action::Activate);
+    assert!(app.reflog_details_open());
+    assert_eq!(commands.len(), 1, "activating a reflog entry issues exactly one read");
+    for command in commands {
+        if let Command::LoadReflogCommit(repo, hash) = command {
+            let result = GetCommit::new(read.clone()).execute(&repo, &hash);
+            app.on_reflog_commit_loaded(hash, result);
+        } else {
+            panic!("expected Command::LoadReflogCommit, got {command:?}");
+        }
+    }
+    let details = render(&app);
+    assert!(
+        details.contains("initial commit"),
+        "reflog entry details must show the real commit's own subject:\n{details}"
+    );
+    app.update(Action::Dismiss);
+    assert!(!app.reflog_details_open());
 }
 
 #[test]
