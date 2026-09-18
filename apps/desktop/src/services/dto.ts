@@ -413,3 +413,22 @@ export interface StartupIntentDto {
   repoPath: string | null;
   commitHash: string | null;
 }
+
+// -- Forge (GitHub/GitLab) integration (EPIC-20; T-243/T-244, US-101/102) --
+//
+// Mirrors `crates/gitsail-protocol/src/dto.rs`'s forge section exactly,
+// including the `kind`-tagged shape of `ForgeLinkTargetDto`.
+
+export type ForgeLinkTargetDto =
+  | { kind: "repository" }
+  | { kind: "branch"; name: string }
+  | { kind: "commit"; hash: string };
+
+export type ForgeKindDto = "gitHub" | "gitLab";
+
+export interface ForgeAccountDto {
+  kind: ForgeKindDto;
+  host: string;
+}
+
+export type ForgeConnectionStatusDto = "connected" | "notConnected";

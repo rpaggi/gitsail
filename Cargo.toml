@@ -6,6 +6,7 @@ members = [
     "crates/gitsail-git",
     "crates/gitsail-protocol",
     "crates/gitsail-cli",
+    "crates/gitsail-forge",
     "crates/gitsail-tui",
     "apps/desktop/src-tauri",
 ]

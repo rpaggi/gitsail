@@ -153,6 +153,10 @@ pub enum Command {
     /// use case `apps/desktop`'s amend flow already uses (T-192), never a
     /// parallel Git implementation.
     AmendCommit(Repository, String, CommitHash),
+    /// Opens `url` in the OS default browser (T-243/US-101). Needs neither
+    /// `RepositoryReadPort` nor `RepositoryWritePort` — see
+    /// [`crate::browser::open_url`], which this delegates to.
+    OpenUrl(String),
 }
 
 /// Spawns one background thread per command in `commands`, each reporting
@@ -345,6 +349,10 @@ fn spawn_one(
             Command::AmendCommit(repo, message, expected_head) => {
                 let result = AmendCommit::new(write_port).execute(&repo, &message, &expected_head);
                 Message::AmendCommitFinished(result)
+            }
+            Command::OpenUrl(url) => {
+                let result = crate::browser::open_url(&url);
+                Message::UrlOpened(result)
             }
         };
         // The receiving end only disappears once the app is shutting down

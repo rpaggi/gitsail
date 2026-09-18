@@ -1,0 +1,28 @@
+[package]
+name = "gitsail-forge"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+gitsail-application = { path = "../gitsail-application" }
+gitsail-domain = { path = "../gitsail-domain" }
+
+# keyring's OS-storage backend is picked per platform via feature flags
+# (T-244/US-102 criterion 1). `crypto-rust` on Linux avoids a system
+# OpenSSL/libdbus-dev build dependency (the D-Bus Secret Service crypto
+# handshake is done in pure Rust instead), keeping this buildable in a
+# minimal/CI/sandboxed Linux environment that has no display session or
+# secret-service daemon running to actually exercise it against (see
+# module docs on the manual verification this still needs per target OS).
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { version = "3", default-features = false, features = ["sync-secret-service", "crypto-rust"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3", default-features = false, features = ["apple-native"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+keyring = { version = "3", default-features = false, features = ["windows-native"] }
+
+[lints]
+workspace = true

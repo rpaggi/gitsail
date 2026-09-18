@@ -7,6 +7,8 @@
 pub mod blame_cache;
 pub mod cache;
 pub mod concurrency;
+pub mod forge_credentials;
+pub mod forge_links;
 pub mod graph_cache;
 pub mod mutation;
 pub mod patch;
@@ -21,6 +23,11 @@ pub mod write_use_cases;
 pub use blame_cache::{BlameCache, BlameCacheKey, BlameQueryTicket};
 pub use cache::{GenerationCache, GenerationTicket};
 pub use concurrency::{global_lock_registry, Invalidatable, RepositoryLockRegistry};
+pub use forge_credentials::{
+    ConnectForgeAccount, DisconnectForgeAccount, ForgeAccountId, ForgeConnectionStatus,
+    ForgeCredentialPort, ForgeToken, GetForgeConnectionStatus,
+};
+pub use forge_links::GetForgeLink;
 pub use graph_cache::{GraphCache, GraphPageKey, DEFAULT_GRAPH_CACHE_CAPACITY};
 pub use mutation::{MutationKind, Precondition, RiskLevel};
 pub use patch::{export_patch, render_unified_diff, PatchExport};

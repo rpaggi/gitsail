@@ -205,6 +205,10 @@ fn run(
                 Vec::new()
             }
             Message::AmendCommitFinished(result) => app.on_amend_finished(result),
+            Message::UrlOpened(result) => {
+                app.on_url_opened(result);
+                Vec::new()
+            }
         };
         worker::dispatch(commands, &read_port, &write_port, &tx);
 

@@ -19,26 +19,27 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use gitsail_application::{
-    AbortOperation, AmendCommit, ApplyPatch, CherryPick, CommitQuery, ContinueOperation,
-    CreateBranch, CreateCommit, DeleteBranch, DetectInProgressOperation, DiffRequest,
-    ExecuteRebasePlan, Fetch, ForgetRecentRepository, GetCommit, GetCommitHistory,
-    GetConflictSides, GetDiff, ListBranches, ListRecentRepositories, MarkConflictResolved, Merge,
-    MergeParentPolicy, OpenRepository, PlanRebase, PreviewAmend, PreviewPatchApplication, Pull,
-    Push, Rebase, RebasePlan, RecordRecentRepository, RefreshReason, RenameBranch, Reset,
-    ResetMode, Revert, SkipOperation, StageFiles, StageHunks, SwitchBranch, TakeConflictSide,
-    UnstageFiles, UnstageHunks,
+    AbortOperation, AmendCommit, ApplyPatch, CherryPick, CommitQuery, ConnectForgeAccount,
+    ContinueOperation, CreateBranch, CreateCommit, DeleteBranch, DetectInProgressOperation,
+    DiffRequest, DisconnectForgeAccount, ExecuteRebasePlan, Fetch, ForgeToken,
+    ForgetRecentRepository, GetCommit, GetCommitHistory, GetConflictSides, GetDiff,
+    GetForgeConnectionStatus, GetForgeLink, ListBranches, ListRecentRepositories,
+    MarkConflictResolved, Merge, MergeParentPolicy, OpenRepository, PlanRebase, PreviewAmend,
+    PreviewPatchApplication, Pull, Push, Rebase, RebasePlan, RecordRecentRepository, RefreshReason,
+    RenameBranch, Reset, ResetMode, Revert, SkipOperation, StageFiles, StageHunks, SwitchBranch,
+    TakeConflictSide, UnstageFiles, UnstageHunks,
 };
 use gitsail_domain::{
     Branch, BranchKind, BranchName, CancellationToken, CommitHash, ConflictSide, ErrorCode,
-    FileDiff, GitSailError, GraphCommit, Remote, Repository,
+    FileDiff, ForgePath, GitSailError, GraphCommit, Remote, Repository,
 };
 use gitsail_protocol::{
     AmendPreviewDto, ApplyPatchResultDto, BranchDto, CherryPickResultDto, CommitDto,
     CommitGraphPageDto, CommitGraphRowDto, CommitResultDto, ConflictSidesDto, DiffDto,
-    ErrorPayload, FileDiffDto, InProgressOperationDto, MergeResultDto, PatchExportDto,
-    PatchPreviewDto, PullOutcomeDto, PullResultDto, RebasePlanDto, RebaseResultDto,
-    RecentRepositoryDto, RemoteDto, RepositoryDto, RepositoryStatusDto, RevertResultDto,
-    SyncTargetDto,
+    ErrorPayload, FileDiffDto, ForgeAccountDto, ForgeConnectionStatusDto, ForgeLinkTargetDto,
+    InProgressOperationDto, MergeResultDto, PatchExportDto, PatchPreviewDto, PullOutcomeDto,
+    PullResultDto, RebasePlanDto, RebaseResultDto, RecentRepositoryDto, RemoteDto, RepositoryDto,
+    RepositoryStatusDto, RevertResultDto, SyncTargetDto,
 };
 
 use crate::state::{AppState, StartupIntent};
@@ -763,6 +764,115 @@ fn list_remotes_impl(state: &AppState) -> Result<Vec<RemoteDto>, GitSailError> {
     Ok(remotes.iter().map(RemoteDto::from).collect())
 }
 
+// ---------------------------------------------------------------------
+// T-243/US-101: open a detected forge remote in the browser.
+// ---------------------------------------------------------------------
+
+/// Resolves the browser URL `target` would open, or `None` when no
+/// configured remote resolves to a known GitHub/GitLab forge (US-101
+/// criterion 3 — never an error). Used by the frontend to decide whether
+/// to show the "open in browser" action at all, and as the read half of
+/// [`open_forge_link`].
+#[tauri::command]
+pub fn get_forge_link(
+    target: ForgeLinkTargetDto,
+    state: tauri::State<AppState>,
+) -> Result<Option<String>, ErrorPayload> {
+    get_forge_link_impl(&state, &target).map_err(|err| ErrorPayload::from(&err))
+}
+
+fn get_forge_link_impl(
+    state: &AppState,
+    target: &ForgeLinkTargetDto,
+) -> Result<Option<String>, GitSailError> {
+    let (repository, _epoch) = state.repository_with_epoch()?;
+    let remotes = state.port().list_remotes(&repository)?;
+    let path = ForgePath::try_from(target)?;
+    Ok(GetForgeLink::execute(&remotes, path))
+}
+
+/// Resolves `target` exactly like [`get_forge_link`] and, when a link is
+/// found, launches it in the OS default browser. Returns `Ok(false)`
+/// (never an error) when no remote resolves to a known forge — this
+/// command never accepts a raw URL from the frontend, precisely so a
+/// caller can never smuggle a non-forge/non-https destination past
+/// [`gitsail_domain::forge::build_web_url`]'s own guarantees.
+#[tauri::command]
+pub fn open_forge_link(
+    target: ForgeLinkTargetDto,
+    state: tauri::State<AppState>,
+) -> Result<bool, ErrorPayload> {
+    open_forge_link_impl(&state, &target).map_err(|err| ErrorPayload::from(&err))
+}
+
+fn open_forge_link_impl(state: &AppState, target: &ForgeLinkTargetDto) -> Result<bool, GitSailError> {
+    match get_forge_link_impl(state, target)? {
+        Some(url) => {
+            crate::browser::open_url(&url)?;
+            Ok(true)
+        }
+        None => Ok(false),
+    }
+}
+
+// ---------------------------------------------------------------------
+// T-244/US-102: authorize forge API queries (connect/disconnect/status
+// only — no API call is made here; see `gitsail_application::forge_credentials`'s
+// module docs for the full scope decision).
+// ---------------------------------------------------------------------
+
+/// Whether `account` currently has a token connected (US-102 criterion 1).
+/// Never a hard error: a credential-store failure is folded into
+/// `NotConnected` by [`GetForgeConnectionStatus`] itself.
+#[tauri::command]
+pub fn forge_connection_status(
+    account: ForgeAccountDto,
+    state: tauri::State<AppState>,
+) -> ForgeConnectionStatusDto {
+    forge_connection_status_impl(&state, &account)
+}
+
+fn forge_connection_status_impl(state: &AppState, account: &ForgeAccountDto) -> ForgeConnectionStatusDto {
+    let status = GetForgeConnectionStatus::new(state.forge_credentials()).execute(&account.into());
+    ForgeConnectionStatusDto::from(status)
+}
+
+/// Connects `account`, storing `token` in OS-secure storage (US-102
+/// criterion 2) — an explicit, user-initiated action; this never validates
+/// `token` against the forge's live API (T-245, out of scope here).
+#[tauri::command]
+pub fn connect_forge_account(
+    account: ForgeAccountDto,
+    token: String,
+    state: tauri::State<AppState>,
+) -> Result<(), ErrorPayload> {
+    connect_forge_account_impl(&state, &account, token).map_err(|err| ErrorPayload::from(&err))
+}
+
+fn connect_forge_account_impl(
+    state: &AppState,
+    account: &ForgeAccountDto,
+    token: String,
+) -> Result<(), GitSailError> {
+    ConnectForgeAccount::new(state.forge_credentials()).execute(&account.into(), ForgeToken::new(token))
+}
+
+/// Disconnects `account`, removing its token from OS-secure storage
+/// (US-102 criterion 2: this is a real deletion, not just clearing a
+/// cache). Idempotent: disconnecting an account with no stored token is
+/// not an error.
+#[tauri::command]
+pub fn disconnect_forge_account(
+    account: ForgeAccountDto,
+    state: tauri::State<AppState>,
+) -> Result<(), ErrorPayload> {
+    disconnect_forge_account_impl(&state, &account).map_err(|err| ErrorPayload::from(&err))
+}
+
+fn disconnect_forge_account_impl(state: &AppState, account: &ForgeAccountDto) -> Result<(), GitSailError> {
+    DisconnectForgeAccount::new(state.forge_credentials()).execute(&account.into())
+}
+
 /// Resolves which remote (and current branch) fetch/pull/push would target,
 /// without mutating anything (US-060 criterion 2: the remote/branch/
 /// upstream that would be affected is shown *before* running the
@@ -1266,6 +1376,14 @@ mod tests {
         }
     }
 
+    /// A fresh in-memory [`gitsail_application::ForgeCredentialPort`] double
+    /// (T-244/US-102) for every test `AppState` built in this module — these
+    /// tests care about command wiring, never about a real OS keyring (see
+    /// `gitsail-forge`'s crate docs for why that can't be exercised here).
+    fn test_forge_credentials() -> Arc<dyn gitsail_application::ForgeCredentialPort> {
+        Arc::new(gitsail_forge::InMemoryForgeCredentialStore::new())
+    }
+
     /// A `RepositoryReadPort` double exercising `discover`, `status`, and
     /// (for this story) `commits` — every other method is unreachable from
     /// these tests and left `unimplemented!()`, matching the pattern
@@ -1481,7 +1599,7 @@ mod tests {
     fn state_from_port_and_write_port(port: FakePort, write_port: FakeWritePort) -> AppState {
         let port: Arc<dyn gitsail_application::RepositoryReadPort> = Arc::new(port);
         let write_port: Arc<dyn gitsail_application::RepositoryWritePort> = Arc::new(write_port);
-        AppState::new(port, write_port, InMemoryRecents::shared())
+        AppState::new(port, write_port, InMemoryRecents::shared(), test_forge_credentials())
     }
 
     /// A `RepositoryWritePort` double recording exactly what each call
@@ -2512,6 +2630,88 @@ mod tests {
         assert_eq!(remotes[0].name, "origin");
     }
 
+    // -- T-243/US-101: get_forge_link / open_forge_link --------------------
+
+    #[test]
+    fn get_forge_link_with_no_recognized_forge_remote_is_none_not_an_error() {
+        let state = state_from_port(FakePort {
+            remotes: vec![sample_remote("origin")],
+            ..FakePort::default()
+        });
+        open_repository_impl(&state, "/repo").unwrap();
+
+        let link = get_forge_link_impl(&state, &ForgeLinkTargetDto::Repository).unwrap();
+        assert_eq!(link, None);
+    }
+
+    #[test]
+    fn get_forge_link_resolves_the_repository_root_link_for_a_github_remote() {
+        let mut remote = sample_remote("origin");
+        remote.fetch_url = gitsail_domain::RemoteUrl::new("https://github.com/org/repo.git");
+        remote.push_url = remote.fetch_url.clone();
+        let state = state_from_port(FakePort {
+            remotes: vec![remote],
+            ..FakePort::default()
+        });
+        open_repository_impl(&state, "/repo").unwrap();
+
+        let link = get_forge_link_impl(&state, &ForgeLinkTargetDto::Repository).unwrap();
+        assert_eq!(link.as_deref(), Some("https://github.com/org/repo"));
+    }
+
+    #[test]
+    fn get_forge_link_rejects_a_malformed_commit_hash_target() {
+        let state = state_from_port(FakePort::default());
+        open_repository_impl(&state, "/repo").unwrap();
+
+        let target = ForgeLinkTargetDto::Commit { hash: "not-a-hash!".to_string() };
+        assert!(get_forge_link_impl(&state, &target).is_err());
+    }
+
+    #[test]
+    fn open_forge_link_returns_false_without_erroring_when_no_forge_is_recognized() {
+        let state = state_from_port(FakePort {
+            remotes: vec![sample_remote("origin")],
+            ..FakePort::default()
+        });
+        open_repository_impl(&state, "/repo").unwrap();
+
+        let opened = open_forge_link_impl(&state, &ForgeLinkTargetDto::Repository).unwrap();
+        assert!(!opened);
+    }
+
+    // -- T-244/US-102: forge account connect/disconnect/status -------------
+
+    fn sample_account() -> ForgeAccountDto {
+        ForgeAccountDto {
+            kind: gitsail_protocol::ForgeKindDto::GitHub,
+            host: "github.com".to_string(),
+        }
+    }
+
+    #[test]
+    fn forge_account_connect_status_disconnect_round_trip() {
+        let state = state_from_port(FakePort::default());
+        let account = sample_account();
+
+        assert_eq!(
+            forge_connection_status_impl(&state, &account),
+            ForgeConnectionStatusDto::NotConnected
+        );
+
+        connect_forge_account_impl(&state, &account, "sentinel-fake-token".to_string()).unwrap();
+        assert_eq!(
+            forge_connection_status_impl(&state, &account),
+            ForgeConnectionStatusDto::Connected
+        );
+
+        disconnect_forge_account_impl(&state, &account).unwrap();
+        assert_eq!(
+            forge_connection_status_impl(&state, &account),
+            ForgeConnectionStatusDto::NotConnected
+        );
+    }
+
     #[test]
     fn resolve_sync_target_reports_the_resolved_remote_and_current_branch() {
         let state = state_from_port(FakePort {
@@ -2714,7 +2914,7 @@ mod tests {
         let port: Arc<dyn gitsail_application::RepositoryReadPort> = Arc::new(FakePort::default());
         let write_port: Arc<dyn gitsail_application::RepositoryWritePort> =
             Arc::new(SwitchingWritePort { inner: FakeWritePort::new() });
-        let state = AppState::new(port, write_port, InMemoryRecents::shared());
+        let state = AppState::new(port, write_port, InMemoryRecents::shared(), test_forge_credentials());
         state.open_session(sample_repository());
 
         let (repository, epoch) = state.repository_with_epoch().unwrap();
@@ -2822,7 +3022,7 @@ mod tests {
             gate: Mutex::new(gate_rx),
         });
         let write_port: Arc<dyn gitsail_application::RepositoryWritePort> = Arc::new(FakeWritePort::new());
-        let state = Arc::new(AppState::new(port, write_port, InMemoryRecents::shared()));
+        let state = Arc::new(AppState::new(port, write_port, InMemoryRecents::shared(), test_forge_credentials()));
         state.open_session(sample_repository());
 
         let state_for_thread = Arc::clone(&state);
@@ -2973,7 +3173,7 @@ mod tests {
             let provider = Arc::new(GitCliProvider::new(runner));
             let port: Arc<dyn gitsail_application::RepositoryReadPort> = provider.clone();
             let write_port: Arc<dyn gitsail_application::RepositoryWritePort> = provider;
-            AppState::new(port, write_port, InMemoryRecents::shared())
+            AppState::new(port, write_port, InMemoryRecents::shared(), test_forge_credentials())
         }
 
         #[test]
@@ -3226,7 +3426,7 @@ mod tests {
             let provider = Arc::new(GitCliProvider::new(runner));
             let port: Arc<dyn gitsail_application::RepositoryReadPort> = provider.clone();
             let write_port: Arc<dyn gitsail_application::RepositoryWritePort> = provider;
-            AppState::new(port, write_port, InMemoryRecents::shared())
+            AppState::new(port, write_port, InMemoryRecents::shared(), test_forge_credentials())
         }
 
         /// Sets up two branches that both modify the same line of the same

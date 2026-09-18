@@ -13,17 +13,17 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use gitsail_application::{
-    AmendPreview, ApplyPatchResult, CherryPickResult, CommitDiff, MergeResult, PatchExport,
-    PatchPreview, PullOutcome, RebaseAction, RebasePlan, RebasePlanEntry, RebaseResult,
-    RecentRepositoryEntry, RevertResult,
+    AmendPreview, ApplyPatchResult, CherryPickResult, CommitDiff, ForgeAccountId,
+    ForgeConnectionStatus, MergeResult, PatchExport, PatchPreview, PullOutcome, RebaseAction,
+    RebasePlan, RebasePlanEntry, RebaseResult, RecentRepositoryEntry, RevertResult,
 };
 use gitsail_domain::{
-    Blame, BlameLine, BlameOrigin, Branch, BranchKind, ChangeType, Commit, CommitHash,
+    Blame, BlameLine, BlameOrigin, Branch, BranchKind, BranchName, ChangeType, Commit, CommitHash,
     ConflictSideContent, ConflictSides, ConflictStage, ConflictedFile, Decoration, Diff, DiffHunk,
     DiffLine, DiffLineOrigin, FileChange, FileContentAtRevision, FileContentKind, FileDiff,
-    FileStatusCode, GitSailError, GitTimestamp, GraphEdge, GraphRow, HeadState,
-    InProgressOperation, LineHistory, LineHistoryEntry, LineRange, OperationCapability, Remote,
-    Repository, RepositoryStatus, ShortHash, Signature,
+    FileStatusCode, ForgeKind, ForgePath, GitSailError, GitTimestamp, GraphEdge, GraphRow,
+    HeadState, InProgressOperation, LineHistory, LineHistoryEntry, LineRange, OperationCapability,
+    Remote, Repository, RepositoryStatus, ShortHash, Signature,
 };
 
 /// Converts a filesystem path to its wire representation.
@@ -1465,6 +1465,100 @@ impl From<&AmendPreview> for AmendPreviewDto {
     }
 }
 
+// ---------------------------------------------------------------------
+// Forge (GitHub/GitLab) integration (T-243/T-244, US-101/US-102).
+//
+// `ForgeLinkTargetDto` carries what a caller wants a browser link for, in
+// the exact same "typed destination, never a free-form path" shape
+// [`gitsail_domain::forge::ForgePath`] enforces domain-side (see that
+// module's doc comment for the full security rationale) — this DTO's
+// `TryFrom` is where a wire-supplied branch name/commit hash first gets
+// validated into [`BranchName`]/[`CommitHash`], the same as every other
+// hash/name-carrying command argument in this crate.
+// ---------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum ForgeLinkTargetDto {
+    Repository,
+    Branch { name: String },
+    Commit { hash: String },
+}
+
+impl TryFrom<&ForgeLinkTargetDto> for ForgePath {
+    type Error = GitSailError;
+
+    fn try_from(dto: &ForgeLinkTargetDto) -> Result<Self, Self::Error> {
+        match dto {
+            ForgeLinkTargetDto::Repository => Ok(ForgePath::Repository),
+            ForgeLinkTargetDto::Branch { name } => {
+                Ok(ForgePath::Branch(BranchName::new(name.clone())?))
+            }
+            ForgeLinkTargetDto::Commit { hash } => {
+                Ok(ForgePath::Commit(CommitHash::new(hash.clone())?))
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ForgeKindDto {
+    GitHub,
+    GitLab,
+}
+
+impl From<ForgeKind> for ForgeKindDto {
+    fn from(kind: ForgeKind) -> Self {
+        match kind {
+            ForgeKind::GitHub => Self::GitHub,
+            ForgeKind::GitLab => Self::GitLab,
+        }
+    }
+}
+
+impl From<ForgeKindDto> for ForgeKind {
+    fn from(dto: ForgeKindDto) -> Self {
+        match dto {
+            ForgeKindDto::GitHub => Self::GitHub,
+            ForgeKindDto::GitLab => Self::GitLab,
+        }
+    }
+}
+
+/// Identifies a connectable forge account on the wire (T-244/US-102):
+/// which forge, and which host — mirrors
+/// [`gitsail_application::ForgeAccountId`] exactly (see that type's own doc
+/// for why the host is part of the identity).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ForgeAccountDto {
+    pub kind: ForgeKindDto,
+    pub host: String,
+}
+
+impl From<&ForgeAccountDto> for ForgeAccountId {
+    fn from(dto: &ForgeAccountDto) -> Self {
+        ForgeAccountId::new(dto.kind.into(), dto.host.clone())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ForgeConnectionStatusDto {
+    Connected,
+    NotConnected,
+}
+
+impl From<ForgeConnectionStatus> for ForgeConnectionStatusDto {
+    fn from(status: ForgeConnectionStatus) -> Self {
+        match status {
+            ForgeConnectionStatus::Connected => Self::Connected,
+            ForgeConnectionStatus::NotConnected => Self::NotConnected,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2110,6 +2204,85 @@ mod tests {
         ] {
             let dto = RebaseActionDto::from(action);
             assert_eq!(RebaseAction::from(dto), action);
+        }
+    }
+
+    // -- T-243/US-101: ForgeLinkTargetDto ---------------------------------
+
+    #[test]
+    fn forge_link_target_dto_converts_every_variant_into_a_forge_path() {
+        assert_eq!(
+            ForgePath::try_from(&ForgeLinkTargetDto::Repository).unwrap(),
+            ForgePath::Repository
+        );
+        assert_eq!(
+            ForgePath::try_from(&ForgeLinkTargetDto::Branch { name: "main".to_string() }).unwrap(),
+            ForgePath::Branch(BranchName::new("main").unwrap())
+        );
+        assert_eq!(
+            ForgePath::try_from(&ForgeLinkTargetDto::Commit {
+                hash: "deadbeef".to_string()
+            })
+            .unwrap(),
+            ForgePath::Commit(CommitHash::new("deadbeef").unwrap())
+        );
+    }
+
+    /// A malformed commit hash (wire content is never trusted) is rejected
+    /// rather than silently producing an unusable `CommitHash` — mirrors
+    /// this file's other `TryFrom` validation tests.
+    #[test]
+    fn forge_link_target_dto_with_a_malformed_commit_hash_is_rejected() {
+        let dto = ForgeLinkTargetDto::Commit {
+            hash: "not-a-hash!".to_string(),
+        };
+        assert!(ForgePath::try_from(&dto).is_err());
+    }
+
+    #[test]
+    fn forge_link_target_dto_serializes_with_a_kind_tag() {
+        let dto = ForgeLinkTargetDto::Branch { name: "main".to_string() };
+        let json = serde_json::to_value(&dto).unwrap();
+        assert_eq!(json["kind"], "branch");
+        assert_eq!(json["name"], "main");
+
+        let round_tripped: ForgeLinkTargetDto = serde_json::from_value(json).unwrap();
+        assert_eq!(round_tripped, dto);
+    }
+
+    // -- T-244/US-102: ForgeAccountDto / ForgeConnectionStatusDto ----------
+
+    #[test]
+    fn forge_kind_dto_round_trips_every_variant() {
+        for kind in [ForgeKind::GitHub, ForgeKind::GitLab] {
+            let dto = ForgeKindDto::from(kind);
+            assert_eq!(ForgeKind::from(dto), kind);
+        }
+    }
+
+    #[test]
+    fn forge_account_dto_converts_into_a_forge_account_id() {
+        let dto = ForgeAccountDto {
+            kind: ForgeKindDto::GitHub,
+            host: "GitHub.com".to_string(),
+        };
+        let account = ForgeAccountId::from(&dto);
+        assert_eq!(account.host(), "github.com");
+        assert_eq!(account.kind, ForgeKind::GitHub);
+    }
+
+    #[test]
+    fn forge_connection_status_dto_round_trips_every_variant() {
+        for status in [
+            ForgeConnectionStatus::Connected,
+            ForgeConnectionStatus::NotConnected,
+        ] {
+            let dto = ForgeConnectionStatusDto::from(status);
+            let json = serde_json::to_value(dto).unwrap();
+            match status {
+                ForgeConnectionStatus::Connected => assert_eq!(json, "connected"),
+                ForgeConnectionStatus::NotConnected => assert_eq!(json, "notConnected"),
+            }
         }
     }
 }

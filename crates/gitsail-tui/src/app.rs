@@ -17,14 +17,15 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use gitsail_application::{
     export_patch, AmendPreview, ApplyPatchResult, BlameRequest, CherryPickResult, CommitQuery,
-    DiffRequest, MergeParentPolicy, MergeResult, Page, PatchPreview, PullOutcome, RebaseAction,
-    RebasePlan, RebaseResult, RefreshReason, RepositoryReadPort, RepositorySession, ResetMode,
-    RevertResult,
+    DiffRequest, GetForgeLink, MergeParentPolicy, MergeResult, Page, PatchPreview, PullOutcome,
+    RebaseAction, RebasePlan, RebaseResult, RefreshReason, RepositoryReadPort, RepositorySession,
+    ResetMode, RevertResult,
 };
 use gitsail_domain::{
     Blame, Branch, BranchKind, BranchName, Commit, CommitGraph, CommitHash, ConflictSide,
-    ConflictSides, Diff, ErrorCode, GitSailError, GraphCommit, HeadState, InProgressOperation,
-    OperationCapability, ReflogEntry, Remote, Repository, RepositoryStatus, Stash, Tag,
+    ConflictSides, Diff, ErrorCode, ForgePath, GitSailError, GraphCommit, HeadState,
+    InProgressOperation, OperationCapability, ReflogEntry, Remote, Repository, RepositoryStatus,
+    Stash, Tag,
 };
 
 use crate::action::Action;
@@ -290,6 +291,12 @@ pub struct App {
     /// [`Self::patch_export`]'s "transient banner, cleared by the next
     /// relevant action" convention.
     last_pull_outcome: Option<PullOutcome>,
+
+    // -- T-243/US-101: open a forge link in the browser ---------------------
+    /// A failure to actually launch the browser (T-243/US-101) — a
+    /// transient banner like [`Self::sync_error`], never a reason to
+    /// touch anything else in `App`'s state.
+    forge_link_error: Option<GitSailError>,
 
     // -- US-029: copy or export a patch -----------------------------------
     /// Presentation-only side effect, injected so tests can exercise both
@@ -573,6 +580,7 @@ impl App {
             reference_details_open: false,
             sync_error: None,
             last_pull_outcome: None,
+            forge_link_error: None,
             clipboard,
             patch_export: None,
             patch_apply_outcome: None,
@@ -935,6 +943,62 @@ impl App {
     /// The outcome of the last successful pull (US-049 criterion 1).
     pub fn last_pull_outcome(&self) -> Option<&PullOutcome> {
         self.last_pull_outcome.as_ref()
+    }
+
+    /// A failure to launch the browser for the last
+    /// [`Action::RequestOpenForgeLink`] (T-243/US-101), or `None` before
+    /// one has ever run or after it was superseded.
+    pub fn forge_link_error(&self) -> Option<&GitSailError> {
+        self.forge_link_error.as_ref()
+    }
+
+    /// The destination [`Action::RequestOpenForgeLink`] would currently
+    /// resolve to, from the focused panel's selection:
+    /// - Sidebar (Branches view), highlighted branch -> that branch's page.
+    /// - Graph panel, highlighted commit -> that commit's page.
+    /// - Anything else -> the repository's own root page.
+    ///
+    /// `None` means no configured remote resolves to a known forge (US-101
+    /// criterion 3) — this is the single source of truth for both whether
+    /// a "open in browser" hint/action is offered at all and what it opens,
+    /// so the two can never disagree.
+    fn forge_path(&self) -> ForgePath {
+        match self.focus {
+            Panel::Sidebar => self
+                .filtered_branches()
+                .get(self.sidebar_cursor)
+                .map(|b| ForgePath::Branch(b.name.clone())),
+            Panel::Graph => self
+                .selected_graph_commit()
+                .map(|c| ForgePath::Commit(c.hash.clone())),
+            _ => None,
+        }
+        .unwrap_or(ForgePath::Repository)
+    }
+
+    /// The actual browser URL [`Action::RequestOpenForgeLink`] would open,
+    /// or `None` when no configured remote resolves to a known forge.
+    pub fn forge_link_target(&self) -> Option<String> {
+        GetForgeLink::execute(&self.remotes, self.forge_path())
+    }
+
+    /// Opens [`Self::forge_link_target`] in the browser (`w`). A no-op —
+    /// never an error banner — when no remote resolves to a known forge
+    /// (US-101 criterion 3): this is the normal case for most
+    /// repositories, not a failure.
+    fn request_open_forge_link(&mut self) -> Vec<Command> {
+        self.forge_link_error = None;
+        match self.forge_link_target() {
+            Some(url) => vec![Command::OpenUrl(url)],
+            None => Vec::new(),
+        }
+    }
+
+    /// Handles [`crate::message::Message::UrlOpened`] (T-243/US-101):
+    /// surfaces a launch failure as a transient banner, never as anything
+    /// that blocks Git functionality.
+    pub fn on_url_opened(&mut self, result: Result<(), GitSailError>) {
+        self.forge_link_error = result.err();
     }
 
     /// The outcome of the last patch export/copy action (US-029 criterion
@@ -1330,6 +1394,7 @@ impl App {
                 }
                 Vec::new()
             }
+            Action::RequestOpenForgeLink => self.request_open_forge_link(),
         }
     }
 
@@ -1888,6 +1953,8 @@ impl App {
             self.conflicts_open = false;
             self.inspected_conflict = None;
             self.conflict_error = None;
+        } else if self.forge_link_error.is_some() {
+            self.forge_link_error = None;
         } else if self.sync_error.is_some() {
             self.sync_error = None;
         } else {
@@ -5125,6 +5192,62 @@ mod tests {
         assert!(app.tags().is_empty());
         assert!(app.remotes().is_empty());
         assert!(app.stashes().is_empty());
+    }
+
+    // -- T-243/US-101: open a detected forge remote in the browser ---------
+
+    #[test]
+    fn opening_in_browser_with_no_recognized_forge_remote_is_a_silent_no_op() {
+        let (mut app, _port) = new_app();
+        app.on_repository_opened(Ok(sample_repository()));
+        let generation = app.session().unwrap().generation();
+        app.on_remotes_loaded(generation, Ok(vec![sample_remote("origin")]));
+
+        assert!(app.forge_link_target().is_none());
+        let commands = app.update(Action::RequestOpenForgeLink);
+        assert!(commands.is_empty(), "no command must be dispatched");
+        assert!(
+            app.forge_link_error().is_none(),
+            "an unrecognized remote is not an error (US-101 criterion 3)"
+        );
+    }
+
+    #[test]
+    fn opening_in_browser_with_a_github_remote_resolves_the_repository_link() {
+        let (mut app, _port) = new_app();
+        app.on_repository_opened(Ok(sample_repository()));
+        let generation = app.session().unwrap().generation();
+        let mut remote = sample_remote("origin");
+        remote.fetch_url = gitsail_domain::RemoteUrl::new("https://github.com/org/repo.git");
+        remote.push_url = remote.fetch_url.clone();
+        app.on_remotes_loaded(generation, Ok(vec![remote]));
+
+        assert_eq!(
+            app.forge_link_target().as_deref(),
+            Some("https://github.com/org/repo")
+        );
+
+        let commands = app.update(Action::RequestOpenForgeLink);
+        assert_eq!(commands.len(), 1);
+        assert!(matches!(
+            &commands[0],
+            Command::OpenUrl(url) if url == "https://github.com/org/repo"
+        ));
+    }
+
+    #[test]
+    fn opening_in_browser_targets_the_highlighted_branch_when_sidebar_is_focused() {
+        let (mut app, _port) = new_app();
+        let mut remote = sample_remote("origin");
+        remote.fetch_url = gitsail_domain::RemoteUrl::new("git@github.com:org/repo.git");
+        remote.push_url = remote.fetch_url.clone();
+        open_with_branches_and_remotes(&mut app, vec![sample_branch("main", true)], vec![remote]);
+
+        assert_eq!(app.focus(), Panel::Sidebar);
+        assert_eq!(
+            app.forge_link_target().as_deref(),
+            Some("https://github.com/org/repo/tree/main")
+        );
     }
 
     #[test]

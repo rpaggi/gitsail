@@ -42,7 +42,8 @@
 use std::sync::{Arc, Mutex};
 
 use gitsail_application::{
-    RecentRepositoriesPort, RepositoryReadPort, RepositorySession, RepositoryWritePort,
+    ForgeCredentialPort, RecentRepositoriesPort, RepositoryReadPort, RepositorySession,
+    RepositoryWritePort,
 };
 use gitsail_domain::{CommitGraph, ErrorCode, GitSailError, GraphCommit, GraphRow, Repository};
 
@@ -90,6 +91,11 @@ pub struct AppState {
     /// port, matching every other `gitsail-application` abstraction it
     /// holds.
     recent_repositories: Arc<dyn RecentRepositoriesPort>,
+    /// Stores/retrieves forge (GitHub/GitLab) access tokens in OS-secure
+    /// storage (T-244/US-102). Desktop's concrete adapter (`keyring`-backed)
+    /// lives in `gitsail-forge`; `AppState` only depends on the port,
+    /// matching [`Self::recent_repositories`]'s own pattern.
+    forge_credentials: Arc<dyn ForgeCredentialPort>,
     /// The startup intent parsed from `--repo`/`--commit` (see this
     /// module's own `StartupIntent` doc). `take` semantics (via
     /// `Mutex<Option<_>>`) rather than a plain field: consumed exactly
@@ -104,6 +110,7 @@ impl AppState {
         port: Arc<dyn RepositoryReadPort>,
         write_port: Arc<dyn RepositoryWritePort>,
         recent_repositories: Arc<dyn RecentRepositoriesPort>,
+        forge_credentials: Arc<dyn ForgeCredentialPort>,
     ) -> Self {
         Self {
             port,
@@ -111,6 +118,7 @@ impl AppState {
             session: Mutex::new(SessionSlot { session: None, epoch: 0 }),
             commit_graph: Mutex::new(CommitGraph::new()),
             recent_repositories,
+            forge_credentials,
             startup_intent: Mutex::new(None),
         }
     }
@@ -125,6 +133,10 @@ impl AppState {
 
     pub fn recent_repositories(&self) -> Arc<dyn RecentRepositoriesPort> {
         self.recent_repositories.clone()
+    }
+
+    pub fn forge_credentials(&self) -> Arc<dyn ForgeCredentialPort> {
+        self.forge_credentials.clone()
     }
 
     /// Records the startup intent parsed from argv (`lib.rs::run`, once,
@@ -399,6 +411,7 @@ mod tests {
             Arc::new(UnimplementedPort),
             Arc::new(UnimplementedWritePort),
             Arc::new(InMemoryRecents::new()),
+            Arc::new(gitsail_forge::InMemoryForgeCredentialStore::new()),
         )
     }
 

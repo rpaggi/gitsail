@@ -206,6 +206,7 @@ pub fn action_for(key: KeyEvent, ctx: InputContext) -> Option<Action> {
             KeyCode::Char('v') => Some(Action::RequestRevert),
             KeyCode::Char('z') => Some(Action::RequestReset),
             KeyCode::Char('A') => Some(Action::StartAmend),
+            KeyCode::Char('w') => Some(Action::RequestOpenForgeLink),
             _ => None,
         },
     }

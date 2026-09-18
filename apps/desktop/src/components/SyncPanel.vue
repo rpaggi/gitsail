@@ -15,6 +15,7 @@ const sync = useSyncStore();
 onMounted(() => {
   void sync.loadRemotes();
   void sync.refreshTarget();
+  void sync.refreshForgeLink();
 });
 </script>
 
@@ -45,6 +46,12 @@ onMounted(() => {
       <button :disabled="sync.resolveError !== null" @click="sync.requestFetch()">Fetch</button>
       <button :disabled="sync.resolveError !== null" @click="sync.requestPull()">Pull</button>
       <button :disabled="sync.resolveError !== null" @click="sync.requestPush()">Push</button>
+      <!-- T-243/US-101: only shown once a configured remote resolves to a
+           known GitHub/GitLab forge — never offered for an unrecognized
+           remote (criterion 3). -->
+      <button v-if="sync.forgeLink" @click="sync.openRepositoryForgeLink()">
+        Open in browser
+      </button>
     </div>
 
     <p v-if="sync.lastFetchResult" class="sync-panel__result">

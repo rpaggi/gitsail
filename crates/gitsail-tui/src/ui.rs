@@ -733,6 +733,8 @@ fn render_overlays(frame: &mut Frame, area: Rect, app: &App) {
         render_branch_name_prompt(frame, area, app);
     } else if app.sync_error().is_some() {
         render_sync_error(frame, area, app);
+    } else if app.forge_link_error().is_some() {
+        render_forge_link_error(frame, area, app);
     }
 
     if app.help_visible() {
@@ -933,6 +935,32 @@ fn render_reflog_details(frame: &mut Frame, area: Rect, app: &App) {
         Paragraph::new(lines)
             .wrap(Wrap { trim: true })
             .block(Block::default().title("Reflog Entry").borders(Borders::ALL)),
+        popup,
+    );
+}
+
+/// Shows a browser-launch failure from [`crate::action::Action::RequestOpenForgeLink`]
+/// (T-243/US-101) — this is about the local OS process spawn failing, never
+/// about Git itself, which is exactly why it is its own banner rather than
+/// folded into [`render_sync_error`].
+fn render_forge_link_error(frame: &mut Frame, area: Rect, app: &App) {
+    let Some(error) = app.forge_link_error() else {
+        return;
+    };
+    let mut lines = vec![Line::from(sanitize::safe_line(error.message()))];
+    if let Some(remediation) = error.remediation() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(sanitize::safe_line(remediation)));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from("Esc dismisses"));
+
+    let popup = centered_rect(60, 40, area);
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: true })
+            .block(Block::default().title("Open in Browser").borders(Borders::ALL)),
         popup,
     );
 }
@@ -1552,6 +1580,7 @@ fn render_help(frame: &mut Frame, area: Rect) {
         Line::from("Enter (References) view the highlighted entry's details"),
         Line::from("  (Reflog) opens the entry's commit details, when it still exists"),
         Line::from("A                 amend HEAD (compose the new message, then confirm)"),
+        Line::from("w                 open in browser (branch/commit/repo, when a GitHub/GitLab remote is detected)"),
         Line::from("r                 refresh status and branches"),
         Line::from("?                 toggle this help"),
         Line::from("q, Ctrl+C         quit"),

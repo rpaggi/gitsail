@@ -226,4 +226,15 @@ pub enum Action {
     AmendMessageInput(char),
     /// Removes the last character from the amend message being edited.
     AmendMessageBackspace,
+
+    // -- T-243/US-101: open a detected forge remote in the browser ----------
+    /// Opens whatever the current focus/selection resolves to (a branch in
+    /// the Sidebar, a commit in the Graph panel, otherwise the repository
+    /// root) on its detected GitHub/GitLab remote's web UI (`w`). A no-op
+    /// when no configured remote resolves to a known forge (US-101
+    /// criterion 3) — [`crate::app::App::forge_link_target`] is the single
+    /// place that decides both whether this is offered and what URL it
+    /// opens, so the keymap/help hint and the actual action can never
+    /// disagree.
+    RequestOpenForgeLink,
 }

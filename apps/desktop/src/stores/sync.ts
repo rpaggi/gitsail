@@ -24,6 +24,7 @@ import {
   push as pushCommand,
   resolveSyncTarget,
 } from "../services/sync";
+import { getForgeLink, openForgeLink } from "../services/forge";
 import type { PullResultDto, RemoteDto, SyncTargetDto } from "../services/dto";
 import { isErrorPayload, type ErrorPayload } from "../services/errors";
 import { useOperationStore } from "./operation";
@@ -49,8 +50,39 @@ export const useSyncStore = defineStore("sync", {
     lastFetchResult: null as SyncTargetDto | null,
     lastPullResult: null as PullResultDto | null,
     lastPushResult: null as SyncTargetDto | null,
+    /** The repository's web URL on its detected GitHub/GitLab remote
+     * (T-243/US-101), or `null` when no configured remote resolves to a
+     * known forge — the single source of truth for whether the "open in
+     * browser" action is shown at all (US-101 criterion 3: this is never
+     * an error state). */
+    forgeLink: null as string | null,
   }),
   actions: {
+    /** Resolves and records the repository-root forge link, so the UI can
+     * show/hide the "open in browser" action without guessing (T-243/
+     * US-101). Called once up front (e.g. on mount) alongside
+     * `loadRemotes`/`refreshTarget`. */
+    async refreshForgeLink(): Promise<void> {
+      try {
+        this.forgeLink = await getForgeLink({ kind: "repository" });
+      } catch {
+        // Mirrors `loadRemotes`'s own "display convenience, never blocks
+        // anything else" handling — an unresolvable link just hides the
+        // action.
+        this.forgeLink = null;
+      }
+    },
+
+    /** Opens the repository's forge link in the browser (T-243/US-101). A
+     * no-op when `forgeLink` is `null` — the button calling this is only
+     * ever shown when it is not. */
+    async openRepositoryForgeLink(): Promise<void> {
+      if (this.forgeLink === null) {
+        return;
+      }
+      await openForgeLink({ kind: "repository" });
+    },
+
     async loadRemotes(): Promise<void> {
       this.isLoadingRemotes = true;
       try {

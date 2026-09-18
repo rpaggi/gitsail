@@ -140,4 +140,9 @@ pub enum Message {
     /// Carries the new commit's [`CommitHash`] on success — distinct from
     /// [`Self::OperationFinished`], mirroring [`Self::CommitCreated`].
     AmendCommitFinished(Result<CommitHash, GitSailError>),
+    /// [`crate::worker::Command::OpenUrl`] completed (T-243/US-101). Never
+    /// blocks anything else on failure (US-101/US-102's "never blocks
+    /// local Git" spirit applied to this side effect too) —
+    /// [`crate::app::App`] only ever surfaces it as a transient banner.
+    UrlOpened(Result<(), GitSailError>),
 }

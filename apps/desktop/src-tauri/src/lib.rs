@@ -7,13 +7,16 @@
 
 #![forbid(unsafe_code)]
 
+mod browser;
 mod commands;
 mod recent_repositories_store;
 mod state;
 
 use std::sync::Arc;
 
-use gitsail_application::{RecentRepositoriesPort, RepositoryReadPort, RepositoryWritePort};
+use gitsail_application::{
+    ForgeCredentialPort, RecentRepositoriesPort, RepositoryReadPort, RepositoryWritePort,
+};
 use gitsail_git::{GitCliProvider, GitProcessRunner, GitProcessRunnerConfig};
 
 use recent_repositories_store::JsonFileRecentRepositoriesStore;
@@ -68,7 +71,13 @@ pub fn run() {
     let recent_repositories: Arc<dyn RecentRepositoriesPort> =
         Arc::new(JsonFileRecentRepositoriesStore::new(recent_repositories_path));
 
-    let app_state = AppState::new(port, write_port, recent_repositories);
+    // T-244/US-102: OS-secure-storage-backed forge (GitHub/GitLab) token
+    // store — see `gitsail-forge`'s crate docs for the backend chosen per
+    // platform and why it needs manual verification per target OS.
+    let forge_credentials: Arc<dyn ForgeCredentialPort> =
+        Arc::new(gitsail_forge::KeyringForgeCredentialStore::new());
+
+    let app_state = AppState::new(port, write_port, recent_repositories, forge_credentials);
     app_state.set_startup_intent(parse_startup_args(std::env::args()));
 
     tauri::Builder::default()
@@ -102,6 +111,11 @@ pub fn run() {
             commands::delete_branch,
             commands::rename_branch,
             commands::list_remotes,
+            commands::get_forge_link,
+            commands::open_forge_link,
+            commands::forge_connection_status,
+            commands::connect_forge_account,
+            commands::disconnect_forge_account,
             commands::resolve_sync_target,
             commands::fetch,
             commands::pull,

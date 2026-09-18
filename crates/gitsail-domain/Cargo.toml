@@ -4,5 +4,13 @@ version = "0.0.0"
 edition.workspace = true
 rust-version.workspace = true
 
+[dependencies]
+# T-243/US-101: `forge.rs` builds forge web URLs through `url::Url`'s own
+# parser/serializer rather than free-form string concatenation, so
+# percent-encoding of path segments is handled by an audited crate instead
+# of a hand-rolled implementation. Pure data-structure crate, no I/O — does
+# not compromise this crate's "no infra/UI dependency" rule.
+url = "2"
+
 [lints]
 workspace = true
