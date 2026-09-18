@@ -6,39 +6,16 @@
 //! behavior sleeping.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU32, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use gitsail_domain::ErrorCode;
 use gitsail_git::{
     run_process, CancellationToken, GitProcessRunner, GitProcessRunnerConfig, ProcessRequest,
 };
-
-struct TempDir(PathBuf);
-
-impl TempDir {
-    fn new(label: &str) -> Self {
-        static COUNTER: AtomicU32 = AtomicU32::new(0);
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-        let path = std::env::temp_dir().join(format!("gitsail-git-test-{label}-{nanos}-{n}"));
-        std::fs::create_dir_all(&path).expect("create temp dir");
-        Self(path)
-    }
-
-    fn path(&self) -> &Path {
-        &self.0
-    }
-}
-
-impl Drop for TempDir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
+// T-252/US-119: `TempDir` used to be duplicated here (and in ~9 other
+// integration test files); it now lives in `gitsail-test-support`, this
+// crate's own test-only fixture crate (see that crate's `src/lib.rs` doc).
+use gitsail_test_support::TempDir;
 
 fn runner() -> GitProcessRunner {
     GitProcessRunner::new(GitProcessRunnerConfig::default()).expect("git must be installed")

@@ -11,97 +11,19 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicU32, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use gitsail_application::RepositoryReadPort;
-use gitsail_domain::{
-    CommitHash, ConflictStage, ErrorCode, InProgressOperation, OperationCapability,
-};
-use gitsail_git::{GitCliProvider, GitProcessRunner, GitProcessRunnerConfig};
-
-/// A uniquely named temporary directory, removed on drop.
-struct TempDir(PathBuf);
-
-impl TempDir {
-    fn new(label: &str) -> Self {
-        static COUNTER: AtomicU32 = AtomicU32::new(0);
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-        let path =
-            std::env::temp_dir().join(format!("gitsail-git-in-progress-op-{label}-{nanos}-{n}"));
-        std::fs::create_dir_all(&path).expect("create temp dir");
-        Self(path)
-    }
-
-    fn path(&self) -> &Path {
-        &self.0
-    }
-}
-
-impl Drop for TempDir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
-
-/// Runs `git <args>` directly (test fixture setup only — production code in
-/// this crate must always go through `GitProcessRunner`). Unlike the plain
-/// `t163_apply_patch.rs` helper, this never asserts success: several calls
-/// here (`git merge`, `git rebase`, `git cherry-pick`, `git revert`) are
-/// *expected* to exit non-zero because they deliberately stop on a
-/// conflict — the point of every scenario below.
-fn git(dir: &Path, args: &[&str]) -> std::process::Output {
-    Command::new("git")
-        .args(args)
-        .current_dir(dir)
-        .env("LC_ALL", "C")
-        .env("LANG", "C")
-        .output()
-        .unwrap_or_else(|e| panic!("failed to spawn git {args:?}: {e}"))
-}
-
-fn git_ok(dir: &Path, args: &[&str]) {
-    let output = git(dir, args);
-    assert!(
-        output.status.success(),
-        "git {args:?} failed in {dir:?}: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
-
-fn init_repo(label: &str) -> TempDir {
-    let dir = TempDir::new(label);
-    git_ok(dir.path(), &["init", "--quiet", "--initial-branch=main"]);
-    git_ok(dir.path(), &["config", "user.name", "Test User"]);
-    git_ok(dir.path(), &["config", "user.email", "test@example.com"]);
-    dir
-}
-
-fn write_file(dir: &Path, name: &str, contents: &str) {
-    std::fs::write(dir.join(name), contents).unwrap();
-}
-
-fn commit_all(dir: &Path, message: &str) {
-    git_ok(dir, &["add", "-A"]);
-    git_ok(dir, &["commit", "--quiet", "-m", message]);
-}
-
-fn rev_parse(dir: &Path, revision: &str) -> CommitHash {
-    let output = git(dir, &["rev-parse", revision]);
-    assert!(output.status.success(), "git rev-parse {revision} failed");
-    let hash = String::from_utf8(output.stdout).unwrap().trim().to_string();
-    CommitHash::new(hash).unwrap()
-}
-
-fn provider() -> GitCliProvider {
-    let runner = GitProcessRunner::new(GitProcessRunnerConfig::default())
-        .expect("git must be installed to run these integration tests");
-    GitCliProvider::new(runner)
-}
+use gitsail_domain::{CommitHash, ConflictStage, ErrorCode, InProgressOperation, OperationCapability};
+// T-252/US-119: this file's own `TempDir`/`git`/`git_ok`/`init_repo`/
+// `commit_all`/`rev_parse`/`provider` helpers used to be duplicated here
+// (and in ~8 other integration test files); they now live in
+// `gitsail-test-support`, this crate's own test-only fixture crate (see
+// that crate's `src/lib.rs` doc). `commit_all` here takes an extra
+// deterministic-sequence argument that this file's scenarios do not care
+// about (they only assert conflict detection, never a specific hash), so a
+// monotonically increasing counter is threaded through where the original
+// hard-coded no-argument version was called positionally.
+use gitsail_test_support::{commit_all, git, git_ok, init_repo, provider, rev_parse, write_file, TempDir};
 
 // ---------------------------------------------------------------------
 // Baseline: nothing in progress.
@@ -111,7 +33,7 @@ fn provider() -> GitCliProvider {
 fn a_clean_repository_reports_no_in_progress_operation() {
     let repo_dir = init_repo("clean");
     write_file(repo_dir.path(), "a.txt", "hello\n");
-    commit_all(repo_dir.path(), "init");
+    commit_all(repo_dir.path(), "init", 0);
     let provider = provider();
     let repo = provider.discover(repo_dir.path()).unwrap();
 
@@ -144,17 +66,17 @@ fn a_bare_repository_reports_an_explicit_limitation_rather_than_an_opaque_failur
 /// reliably conflicts.
 fn setup_diverging_branches(repo_dir: &Path, other_branch: &str) -> (CommitHash, CommitHash) {
     write_file(repo_dir, "f.txt", "line1\nline2\nline3\n");
-    commit_all(repo_dir, "base");
+    commit_all(repo_dir, "base", 0);
     let base = rev_parse(repo_dir, "HEAD");
 
     git_ok(repo_dir, &["checkout", "-q", "-b", other_branch]);
     write_file(repo_dir, "f.txt", "line1\nCHANGED-other\nline3\n");
-    commit_all(repo_dir, "other change");
+    commit_all(repo_dir, "other change", 1);
     let other_tip = rev_parse(repo_dir, "HEAD");
 
     git_ok(repo_dir, &["checkout", "-q", "main"]);
     write_file(repo_dir, "f.txt", "line1\nCHANGED-main\nline3\n");
-    commit_all(repo_dir, "main change");
+    commit_all(repo_dir, "main change", 2);
 
     let _ = base;
     (other_tip, rev_parse(repo_dir, "HEAD"))
@@ -377,14 +299,14 @@ fn a_conflicting_cherry_pick_is_detected_with_its_target_commit() {
 fn a_conflicting_revert_is_detected_with_its_target_commit() {
     let repo_dir = init_repo("revert-conflict");
     write_file(repo_dir.path(), "f.txt", "line1\nline2\nline3\n");
-    commit_all(repo_dir.path(), "adds f.txt");
+    commit_all(repo_dir.path(), "adds f.txt", 0);
     let adding_commit = rev_parse(repo_dir.path(), "HEAD");
 
     // A later commit changes the same line `adding_commit` introduced, so
     // reverting `adding_commit` (which would remove those exact lines)
     // conflicts with the newer content.
     write_file(repo_dir.path(), "f.txt", "line1\nCHANGED-later\nline3\n");
-    commit_all(repo_dir.path(), "changes the line later");
+    commit_all(repo_dir.path(), "changes the line later", 1);
 
     let revert_output = git(repo_dir.path(), &["revert", "--no-edit", adding_commit.as_str()]);
     assert!(
@@ -420,12 +342,12 @@ fn a_conflicting_revert_is_detected_with_its_target_commit() {
 fn a_bisect_run_in_progress_is_detected_without_continue() {
     let repo_dir = init_repo("bisect-run");
     write_file(repo_dir.path(), "f.txt", "v1\n");
-    commit_all(repo_dir.path(), "c1");
+    commit_all(repo_dir.path(), "c1", 0);
     let first = rev_parse(repo_dir.path(), "HEAD");
     write_file(repo_dir.path(), "f.txt", "v2\n");
-    commit_all(repo_dir.path(), "c2");
+    commit_all(repo_dir.path(), "c2", 1);
     write_file(repo_dir.path(), "f.txt", "v3\n");
-    commit_all(repo_dir.path(), "c3");
+    commit_all(repo_dir.path(), "c3", 2);
 
     git_ok(repo_dir.path(), &["bisect", "start"]);
     git_ok(repo_dir.path(), &["bisect", "bad", "HEAD"]);

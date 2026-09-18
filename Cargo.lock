@@ -1698,6 +1698,7 @@ version = "0.0.0"
 dependencies = [
  "gitsail-application",
  "gitsail-domain",
+ "gitsail-test-support",
  "tracing",
 ]
 
@@ -1709,6 +1710,15 @@ dependencies = [
  "gitsail-domain",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "gitsail-test-support"
+version = "0.0.0"
+dependencies = [
+ "gitsail-application",
+ "gitsail-domain",
+ "gitsail-git",
 ]
 
 [[package]]

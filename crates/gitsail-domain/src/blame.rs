@@ -39,6 +39,46 @@ pub enum BlameOrigin {
     Local,
 }
 
+#[cfg(test)]
+mod line_range_tests {
+    use super::*;
+
+    // T-253/US-120 criterion 1: closes the one domain invariant gap found in
+    // this crate that predated this story — every other `pub fn new`/
+    // validation-bearing type here already had unit tests; `LineRange` did
+    // not.
+
+    #[test]
+    fn a_single_line_range_is_valid() {
+        assert!(LineRange::new(1, 1).is_valid());
+    }
+
+    #[test]
+    fn an_ascending_range_is_valid() {
+        assert!(LineRange::new(1, 10).is_valid());
+        assert!(LineRange::new(5, 10).is_valid());
+    }
+
+    #[test]
+    fn a_range_starting_before_line_one_is_invalid() {
+        assert!(!LineRange::new(0, 5).is_valid());
+    }
+
+    #[test]
+    fn a_range_whose_start_comes_after_its_end_is_invalid() {
+        assert!(!LineRange::new(10, 5).is_valid());
+    }
+
+    #[test]
+    fn is_valid_never_checks_against_any_particular_files_line_count() {
+        // Deliberately: `LineRange` alone cannot know whether a range fits a
+        // given file at a given revision — that is the adapter's job,
+        // checked against the real line count (see this type's own doc).
+        // An enormous, structurally well-formed range is still `is_valid`.
+        assert!(LineRange::new(1, u32::MAX).is_valid());
+    }
+}
+
 /// A single attributed line of blame output.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BlameLine {

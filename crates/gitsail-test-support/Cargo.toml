@@ -1,0 +1,21 @@
+[package]
+name = "gitsail-test-support"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+# T-252/US-119: a dev-only crate consolidating the temporary Git fixture
+# machinery that had been hand-duplicated across ~9 `gitsail-git` integration
+# test files (see this crate's `src/lib.rs` doc). It is a *normal* (not
+# dev-) dependency of consumers' `[dev-dependencies]` — see
+# `crates/gitsail-git/Cargo.toml`'s own comment on why the resulting
+# dev-dependency cycle (this crate depends on `gitsail-git`; `gitsail-git`'s
+# *tests* depend on this crate) is fine.
+[dependencies]
+gitsail-application = { path = "../gitsail-application" }
+gitsail-domain = { path = "../gitsail-domain" }
+gitsail-git = { path = "../gitsail-git" }
+
+[lints]
+workspace = true
