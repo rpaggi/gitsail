@@ -17,8 +17,11 @@
 use std::path::{Path, PathBuf};
 
 use gitsail_domain::{
-    BranchName, CommitHash, ErrorCode, FileDiff, GitSailError, Repository, Stash, Worktree,
+    BranchName, CancellationToken, CommitHash, ErrorCode, FileDiff, GitSailError, Repository,
+    Stash, Worktree,
 };
+
+use crate::mutation::Precondition;
 
 /// Explicit scope for [`RepositoryWritePort::create_stash`] (US-092
 /// criterion 1). Every flag mirrors a real `git stash push` flag 1:1 and
@@ -88,6 +91,19 @@ pub enum WorktreeBranchSpec {
     },
     /// Checks out `commit` directly, detached.
     Detached(CommitHash),
+}
+
+/// Outcome of [`RepositoryWritePort::pull`] (US-097 criterion 2's "fast-
+/// forward only" policy). Mirrors [`StashApplyOutcome`]'s "legitimate,
+/// expected outcome, not an error" convention: a pull with nothing new to
+/// integrate is a success, not a special-cased failure.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PullOutcome {
+    /// The current branch was already even with (or ahead of) `remote`'s
+    /// tracked branch; nothing changed.
+    AlreadyUpToDate,
+    /// The current branch fast-forwarded to `new_head`.
+    FastForwarded { new_head: CommitHash },
 }
 
 /// The error every new-in-EPIC-18 mutation method below defaults to when a
@@ -322,5 +338,109 @@ pub trait RepositoryWritePort: Send + Sync {
     ) -> Result<(), GitSailError> {
         let _ = (repo, path, force);
         Err(unsupported("remove_worktree"))
+    }
+
+    // -------------------------------------------------------------------
+    // EPIC-19/T-211..T-214 (US-096..099): remote operations (fetch, pull,
+    // push, force-push-with-lease). Defaulted the same way as EPIC-18's own
+    // batch above, for the same reason (existing `RepositoryWritePort`
+    // implementers predating this epic — `gitsail-tui`'s and
+    // `apps/desktop`'s own fakes — keep compiling unchanged). Every method
+    // here takes an explicit `remote`/`branch` (never an implicit "the"
+    // remote/upstream — US-096 criterion 1, US-098 criterion 1) and a
+    // [`CancellationToken`] (a network-bound call can run long; a caller
+    // running it off its own render/event loop can still stop it, matching
+    // [`crate::ports::RepositoryReadPort::diff`]/`blame`'s own convention).
+    // [`gitsail_git::GitCliProvider`] overrides every one of these with a
+    // real `git` implementation.
+
+    /// Fetches `remote`'s refs into this repository's own remote-tracking
+    /// refs (`refs/remotes/<remote>/...`) via `git fetch` (US-096). `Safe`
+    /// per SAD §20's own named example: this never touches the working
+    /// tree, the index, or any ref a person has actually checked out — only
+    /// `refs/remotes/*` moves. A network/authentication failure is reported
+    /// with a distinct, classified [`gitsail_domain::ErrorCode`]
+    /// (`NetworkFailure`/`AuthenticationRequired`) rather than a bare
+    /// [`gitsail_domain::ErrorCode::ProcessFailure`] (US-096 criterion 2),
+    /// and cancellation via `cancel` is likewise distinct
+    /// (`ErrorCode::Cancelled`) from either.
+    fn fetch(
+        &self,
+        repo: &Repository,
+        remote: &str,
+        cancel: &CancellationToken,
+    ) -> Result<(), GitSailError> {
+        let _ = (repo, remote, cancel);
+        Err(unsupported("fetch"))
+    }
+
+    /// Integrates `remote`'s tracked `branch` into the current branch
+    /// (US-097). This version's policy is fixed and fast-forward-only
+    /// (US-097 criterion 2, documented here rather than left to each
+    /// caller to rediscover): it fetches `remote` first — so the
+    /// remote-tracking ref this compares against is current, not whatever a
+    /// caller last happened to observe — then integrates only when the
+    /// current branch can fast-forward to it. When the two have diverged,
+    /// this refuses outright (never merges, rebases, or resets — US-097
+    /// criterion 3) with [`gitsail_domain::ErrorCode::OperationConflict`];
+    /// automatic merge/rebase recovery is out of scope for this version (see
+    /// [`RepositoryWritePort`]'s module doc / the EPIC-19 session report).
+    fn pull(
+        &self,
+        repo: &Repository,
+        remote: &str,
+        branch: &BranchName,
+        cancel: &CancellationToken,
+    ) -> Result<PullOutcome, GitSailError> {
+        let _ = (repo, remote, branch, cancel);
+        Err(unsupported("pull"))
+    }
+
+    /// Publishes the current local `branch` to `remote` via a plain `git
+    /// push` (US-098). Never passes `--force`: when the remote already has
+    /// commits this branch does not (a non-fast-forward rejection), this
+    /// simply fails with [`gitsail_domain::ErrorCode::OperationConflict`]
+    /// (US-098 criterion 2) rather than ever escalating to force
+    /// automatically. A network/authentication failure never reports a
+    /// false success (US-098 criterion 3); the remote's real state can
+    /// always be reinspected afterward via [`Self::fetch`] regardless of how
+    /// this call resolved.
+    fn push(
+        &self,
+        repo: &Repository,
+        remote: &str,
+        branch: &BranchName,
+        cancel: &CancellationToken,
+    ) -> Result<(), GitSailError> {
+        let _ = (repo, remote, branch, cancel);
+        Err(unsupported("push"))
+    }
+
+    /// Force-publishes rewritten history for `branch` to `remote` via `git
+    /// push --force-with-lease` (US-099) — a name and
+    /// [`crate::mutation::MutationKind`] deliberately distinct from
+    /// [`Self::push`] (US-099 criterion 1: never conflated with a common
+    /// push). `expected_remote_head` is the commit hash a caller last
+    /// observed as `remote`'s tip for `branch` (typically from a prior
+    /// [`Self::fetch`] plus a read of the resulting remote-tracking ref);
+    /// this is a [`Precondition`] carried the same way
+    /// [`Self::amend_commit`]'s `expected_head` is, but checked by the
+    /// remote itself at push time (via `--force-with-lease=<branch>:
+    /// <expected>`) rather than compared locally first — a local-only
+    /// comparison could never be race-free against a server another
+    /// process/machine can also push to in between (US-099 criterion 2:
+    /// "compare and swap"). When the remote has moved since — another
+    /// push landed in the meantime — this is refused, and never silently
+    /// retried as an unconditional `--force` (US-099 criterion 3).
+    fn force_push_with_lease(
+        &self,
+        repo: &Repository,
+        remote: &str,
+        branch: &BranchName,
+        expected_remote_head: &Precondition<CommitHash>,
+        cancel: &CancellationToken,
+    ) -> Result<(), GitSailError> {
+        let _ = (repo, remote, branch, expected_remote_head, cancel);
+        Err(unsupported("force_push_with_lease"))
     }
 }

@@ -20,7 +20,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use gitsail_application::{
-    BlameRequest, CommitQuery, DiffRequest, LineHistoryRequest, Page, Precondition,
+    BlameRequest, CommitQuery, DiffRequest, LineHistoryRequest, Page, Precondition, PullOutcome,
     RepositoryReadPort, RepositoryWritePort, StashApplyOutcome, StashScope, TagAnnotation,
     WorktreeBranchSpec,
 };
@@ -1279,6 +1279,138 @@ impl RepositoryWritePort for GitCliProvider {
             .map_err(classify_remove_worktree_failure)?;
         Ok(())
     }
+
+    /// Fetches `remote` via `git fetch` (US-096). `--` ends option parsing
+    /// before `remote` (same rationale as `create_branch`'s own `--`): a
+    /// caller-supplied remote name that happens to look like a flag is
+    /// rejected as an unresolvable remote rather than parsed as an option.
+    /// Only `refs/remotes/<remote>/...` is ever touched — never the working
+    /// tree or index (US-096 criterion 3), which this adapter cannot
+    /// accidentally violate since `git fetch` itself has no working-tree
+    /// effect. Network/authentication failures are reclassified by
+    /// [`classify_remote_transport_failure`] into a clear, distinct
+    /// [`ErrorCode`] (US-096 criterion 2); a timeout or cancellation from
+    /// `cancel` passes through [`GitProcessRunner`](crate::runner::GitProcessRunner)
+    /// unclassified, already distinct from either (T-215/US-100 criterion
+    /// 1: never reclassified into a false reassurance either).
+    fn fetch(
+        &self,
+        repo: &Repository,
+        remote: &str,
+        cancel: &CancellationToken,
+    ) -> Result<(), GitSailError> {
+        let args = vec!["fetch".to_string(), "--".to_string(), remote.to_string()];
+        self.run_cancellable(args, &repo.root_path, cancel)
+            .map_err(classify_remote_transport_failure)?;
+        Ok(())
+    }
+
+    /// Integrates `remote`'s tracked `branch` via `git fetch` + `git merge
+    /// --ff-only` (US-097). Always fetches first (via [`Self::fetch`], so
+    /// network/auth failures there are already classified identically),
+    /// ensuring the remote-tracking ref this compares against reflects
+    /// `remote`'s *current* state rather than whatever was last observed —
+    /// this is what makes a retry after a failed/incomplete previous
+    /// attempt reconsult reality instead of repeating a stale decision
+    /// (T-215/US-100 criterion 2). `--end-of-options` (matching
+    /// `resolve_revision`'s own use, not a bare `--`) ends option parsing
+    /// before the remote-tracking ref name, which `git merge` treats as a
+    /// revision, not a path.
+    fn pull(
+        &self,
+        repo: &Repository,
+        remote: &str,
+        branch: &BranchName,
+        cancel: &CancellationToken,
+    ) -> Result<PullOutcome, GitSailError> {
+        require_worktree(repo, "pull")?;
+        self.fetch(repo, remote, cancel)?;
+
+        let remote_ref = format!("{remote}/{}", branch.as_str());
+        let args = vec![
+            "merge".to_string(),
+            "--ff-only".to_string(),
+            "--end-of-options".to_string(),
+            remote_ref,
+        ];
+        let output = self
+            .run_cancellable(args, &repo.root_path, cancel)
+            .map_err(classify_pull_failure)?;
+        let stdout = Self::stdout_string(&output)?;
+        if stdout.contains("Already up to date") {
+            Ok(PullOutcome::AlreadyUpToDate)
+        } else {
+            let new_head = RepositoryReadPort::resolve_revision(self, repo, "HEAD")?;
+            Ok(PullOutcome::FastForwarded { new_head })
+        }
+    }
+
+    /// Publishes the local `branch` to `remote` via a plain `git push`
+    /// (US-098), using an explicit `<branch>:<branch>` refspec so the
+    /// target is never left to an ambiguous/implicit upstream (US-098
+    /// criterion 1). Never passes `--force`: Git's own non-fast-forward
+    /// refusal is reclassified by [`classify_push_failure`] into a clear
+    /// [`ErrorCode::OperationConflict`] (US-098 criterion 2) rather than
+    /// ever retried with force automatically. A network/authentication
+    /// failure never reports a false success (US-098 criterion 3): this
+    /// call either returns `Ok(())` because Git itself reported the push
+    /// accepted, or an `Err` — there is no third, ambiguous outcome.
+    fn push(
+        &self,
+        repo: &Repository,
+        remote: &str,
+        branch: &BranchName,
+        cancel: &CancellationToken,
+    ) -> Result<(), GitSailError> {
+        let refspec = format!("{0}:{0}", branch.as_str());
+        let args = vec![
+            "push".to_string(),
+            "--".to_string(),
+            remote.to_string(),
+            refspec,
+        ];
+        self.run_cancellable(args, &repo.root_path, cancel)
+            .map_err(classify_push_failure)?;
+        Ok(())
+    }
+
+    /// Force-publishes rewritten history for `branch` to `remote` via `git
+    /// push --force-with-lease=<branch>:<expected>` (US-099) — the explicit
+    /// two-part lease form (not the bare `--force-with-lease`, which
+    /// compares against whatever this repository's own remote-tracking ref
+    /// last happened to record) so the compare-and-swap is against exactly
+    /// the hash `expected_remote_head` captured (US-099 criterion 2), not a
+    /// possibly-stale local cache of it. When the remote's real tip for
+    /// `branch` no longer matches — another push landed there since —
+    /// Git's own server-side refusal is reclassified by
+    /// [`classify_force_push_failure`] into a clear
+    /// [`ErrorCode::OperationConflict`]; this is never retried as an
+    /// unconditional `--force` (US-099 criterion 3).
+    fn force_push_with_lease(
+        &self,
+        repo: &Repository,
+        remote: &str,
+        branch: &BranchName,
+        expected_remote_head: &Precondition<CommitHash>,
+        cancel: &CancellationToken,
+    ) -> Result<(), GitSailError> {
+        let lease = format!(
+            "{}:{}",
+            branch.as_str(),
+            expected_remote_head.expected().as_str()
+        );
+        let refspec = format!("{0}:{0}", branch.as_str());
+        let args = vec![
+            "push".to_string(),
+            format!("--force-with-lease={lease}"),
+            "--".to_string(),
+            remote.to_string(),
+            refspec,
+        ];
+        self.run_cancellable(args, &repo.root_path, cancel)
+            .map_err(classify_force_push_failure)?;
+        Ok(())
+    }
 }
 
 /// Direction in which a reconstructed hunk patch is applied to the index:
@@ -1855,6 +1987,167 @@ fn classify_index_lock_conflict(err: GitSailError) -> GitSailError {
             "another Git process is currently using this repository",
         )
         .with_remediation("wait for the other Git operation to finish, then retry")
+        .with_source(err)
+    } else {
+        err
+    }
+}
+
+// ---------------------------------------------------------------------
+// EPIC-19/T-211..T-215 (US-096..100): remote operation (fetch/pull/push/
+// force-push-with-lease) failure reclassification.
+// ---------------------------------------------------------------------
+
+/// Reclassifies a failed remote-transport Git invocation (`fetch`, the
+/// `fetch` half of `pull`, `push`, or `force_push_with_lease`) as
+/// [`ErrorCode::AuthenticationRequired`] or [`ErrorCode::NetworkFailure`]
+/// when Git's own diagnostic clearly indicates one of those two — US-096
+/// criterion 2's "network/auth failure has a distinct, identifiable result,
+/// not one generic failure for every case" applies identically to every
+/// remote operation, so this is the one shared implementation each
+/// operation-specific classifier below (`classify_pull_failure`,
+/// `classify_push_failure`, `classify_force_push_failure`) delegates to
+/// first, rather than repeating the same text matching four times
+/// (T-215/US-100: consolidated once here rather than per-operation).
+///
+/// Deliberately conservative: only recognizes text patterns actually
+/// produced by real Git invocations against a local `file://`/path remote
+/// requiring credentials, an unresolvable host, or a nonexistent/
+/// inaccessible repository (verified directly against real Git while this
+/// was written) — patterns Git's own SSH/HTTPS transports and credential
+/// prompting produce, not a guess. Any other failure — including a
+/// legitimate non-fast-forward/lease rejection, which is not a transport
+/// problem at all — passes through unclassified (`ErrorCode::ProcessFailure`)
+/// for the caller's own, operation-specific reclassification. A
+/// [`ErrorCode::Timeout`]/[`ErrorCode::Cancelled`] result is not a
+/// `ProcessFailure` at all and is returned completely untouched here: this
+/// adapter never claims a timed-out or cancelled remote operation left
+/// "nothing changed" (T-215/US-100 criterion 1) — Git may have already
+/// applied something server-side by the time the connection was cut, and
+/// this function has no way to know either way.
+fn classify_remote_transport_failure(err: GitSailError) -> GitSailError {
+    if err.code() != ErrorCode::ProcessFailure {
+        return err;
+    }
+    let diagnostic_text = err.diagnostic().map(|d| d.to_string()).unwrap_or_default();
+
+    let looks_like_authentication_failure = diagnostic_text.contains("Authentication failed")
+        || diagnostic_text.contains("could not read Username")
+        || diagnostic_text.contains("could not read Password")
+        || diagnostic_text.contains("Invalid username or")
+        || diagnostic_text.contains("Permission denied (publickey)")
+        || diagnostic_text.contains("Permission denied, please try again");
+    if looks_like_authentication_failure {
+        return GitSailError::new(
+            ErrorCode::AuthenticationRequired,
+            "the remote refused this operation for lack of valid credentials",
+        )
+        .with_remediation(
+            "check the credentials, SSH key, or SSH agent configured for this remote, then retry",
+        )
+        .with_source(err);
+    }
+
+    let looks_unreachable = diagnostic_text.contains("Could not resolve host")
+        || diagnostic_text.contains("Could not read from remote repository")
+        || diagnostic_text.contains("does not appear to be a git repository")
+        || diagnostic_text.contains("unable to access")
+        || diagnostic_text.contains("Connection refused")
+        || diagnostic_text.contains("Connection timed out")
+        || diagnostic_text.contains("Network is unreachable")
+        || diagnostic_text.contains("not found");
+    if looks_unreachable {
+        return GitSailError::new(
+            ErrorCode::NetworkFailure,
+            "the remote could not be reached, or does not exist",
+        )
+        .with_remediation(
+            "verify the remote's name/URL and your network connection, then retry",
+        )
+        .with_source(err);
+    }
+
+    err
+}
+
+/// Reclassifies a failed `git merge --ff-only` (the second half of
+/// [`GitCliProvider::pull`]) as [`ErrorCode::OperationConflict`] when it
+/// failed because the local and remote branches have diverged — US-097
+/// criterion 2's fixed fast-forward-only policy. Applies
+/// [`classify_remote_transport_failure`] first, though in practice the
+/// preceding `fetch` call already surfaces any transport failure before
+/// this merge step ever runs; kept here too so this function alone is a
+/// complete classifier for whatever `git merge --ff-only` itself can fail
+/// with. Any other failure passes through unchanged.
+fn classify_pull_failure(err: GitSailError) -> GitSailError {
+    let err = classify_remote_transport_failure(err);
+    if err.code() != ErrorCode::ProcessFailure {
+        return err;
+    }
+    let diagnostic_text = err.diagnostic().map(|d| d.to_string()).unwrap_or_default();
+    if diagnostic_text.contains("Not possible to fast-forward") {
+        GitSailError::new(
+            ErrorCode::OperationConflict,
+            "local and remote branches have diverged; this version only supports fast-forward pulls",
+        )
+        .with_remediation(
+            "merge or rebase manually to reconcile the diverged histories yourself, then retry — automatic merge/rebase recovery is out of scope for this version",
+        )
+        .with_source(err)
+    } else {
+        err
+    }
+}
+
+/// Reclassifies a failed `git push` as [`ErrorCode::OperationConflict`]
+/// when the remote rejected it because it has commits this branch does not
+/// (a non-fast-forward rejection) — US-098 criterion 2: this never falls
+/// back to `--force` on its own. Any other failure passes through
+/// [`classify_remote_transport_failure`] unchanged.
+fn classify_push_failure(err: GitSailError) -> GitSailError {
+    let err = classify_remote_transport_failure(err);
+    if err.code() != ErrorCode::ProcessFailure {
+        return err;
+    }
+    let diagnostic_text = err.diagnostic().map(|d| d.to_string()).unwrap_or_default();
+    if diagnostic_text.contains("(fetch first)")
+        || diagnostic_text.contains("Updates were rejected because the remote contains work")
+        || diagnostic_text.contains("non-fast-forward")
+    {
+        GitSailError::new(
+            ErrorCode::OperationConflict,
+            "push rejected: the remote has commits this branch does not have",
+        )
+        .with_remediation("pull to integrate the remote's changes, then retry the push")
+        .with_source(err)
+    } else {
+        err
+    }
+}
+
+/// Reclassifies a failed `git push --force-with-lease` as
+/// [`ErrorCode::OperationConflict`] when the lease was refused — the
+/// remote's real tip for this branch no longer matches the hash the caller
+/// captured as `expected_remote_head`, i.e. another push landed there since
+/// (US-099 criterion 2's compare-and-swap actually failing the compare).
+/// Never reclassified into anything that would suggest retrying with an
+/// unconditional `--force` (US-099 criterion 3: this port simply has no
+/// such call to fall back to). Any other failure passes through
+/// [`classify_remote_transport_failure`] unchanged.
+fn classify_force_push_failure(err: GitSailError) -> GitSailError {
+    let err = classify_remote_transport_failure(err);
+    if err.code() != ErrorCode::ProcessFailure {
+        return err;
+    }
+    let diagnostic_text = err.diagnostic().map(|d| d.to_string()).unwrap_or_default();
+    if diagnostic_text.contains("(stale info)") {
+        GitSailError::new(
+            ErrorCode::OperationConflict,
+            "force push refused: the remote branch has moved since this operation's expected state was captured",
+        )
+        .with_remediation(
+            "fetch the remote's current state, review what changed, and retry only if you still intend to overwrite it",
+        )
         .with_source(err)
     } else {
         err
@@ -3288,6 +3581,172 @@ mod tests {
         let classified = classify_index_lock_conflict(err);
 
         assert_eq!(classified.code(), ErrorCode::ProcessFailure);
+    }
+
+    // -----------------------------------------------------------------
+    // EPIC-19/T-211..T-215 (US-096..100): remote operation reclassification.
+    // -----------------------------------------------------------------
+
+    /// Captured verbatim from a real `git fetch`/`push` against an HTTPS
+    /// remote with `GIT_TERMINAL_PROMPT=0` and no credential helper
+    /// configured.
+    #[test]
+    fn classifies_missing_credentials_as_authentication_required() {
+        let err = process_failure(
+            "fatal: could not read Username for 'https://github.com': terminal prompts disabled\n",
+        );
+
+        let classified = classify_remote_transport_failure(err);
+
+        assert_eq!(classified.code(), ErrorCode::AuthenticationRequired);
+        assert!(classified.diagnostic().is_some());
+    }
+
+    /// Captured verbatim from a real rejected HTTPS push with a bad token.
+    #[test]
+    fn classifies_a_rejected_credential_as_authentication_required() {
+        let err = process_failure(
+            "remote: Invalid username or token. Password authentication is not supported for Git operations.\nfatal: Authentication failed for 'https://github.com/org/repo.git/'\n",
+        );
+
+        let classified = classify_remote_transport_failure(err);
+
+        assert_eq!(classified.code(), ErrorCode::AuthenticationRequired);
+    }
+
+    /// Captured verbatim from a real `git fetch` against an unresolvable
+    /// hostname.
+    #[test]
+    fn classifies_an_unresolvable_host_as_network_failure() {
+        let err = process_failure(
+            "fatal: unable to access 'https://nonexistent.invalid.example/repo.git/': Could not resolve host: nonexistent.invalid.example\n",
+        );
+
+        let classified = classify_remote_transport_failure(err);
+
+        assert_eq!(classified.code(), ErrorCode::NetworkFailure);
+    }
+
+    /// Captured verbatim from a real `git fetch` against a nonexistent
+    /// local path used as a remote (DoD: "fetch de remote inexistente ...
+    /// comprova erro claro").
+    #[test]
+    fn classifies_a_nonexistent_local_remote_as_network_failure() {
+        let err = process_failure(
+            "fatal: '/no/such/path' does not appear to be a git repository\nfatal: Could not read from remote repository.\n",
+        );
+
+        let classified = classify_remote_transport_failure(err);
+
+        assert_eq!(classified.code(), ErrorCode::NetworkFailure);
+    }
+
+    #[test]
+    fn leaves_an_unrelated_failure_unclassified_by_remote_transport_check() {
+        let err = process_failure("fatal: some unrelated git failure\n");
+
+        let classified = classify_remote_transport_failure(err);
+
+        assert_eq!(classified.code(), ErrorCode::ProcessFailure);
+    }
+
+    /// T-215/US-100 criterion 1: a timeout or cancellation must never be
+    /// reclassified into anything else, and in particular must never gain
+    /// wording implying a guaranteed rollback — it simply passes through.
+    #[test]
+    fn a_timeout_passes_through_remote_transport_classification_unchanged() {
+        let err = GitSailError::new(ErrorCode::Timeout, "git process timed out after 30s");
+
+        let classified = classify_remote_transport_failure(err);
+
+        assert_eq!(classified.code(), ErrorCode::Timeout);
+        assert_eq!(classified.message(), "git process timed out after 30s");
+    }
+
+    #[test]
+    fn a_cancellation_passes_through_remote_transport_classification_unchanged() {
+        let err = GitSailError::new(ErrorCode::Cancelled, "git process was cancelled");
+
+        let classified = classify_remote_transport_failure(err);
+
+        assert_eq!(classified.code(), ErrorCode::Cancelled);
+    }
+
+    /// Captured verbatim from a real diverged `git merge --ff-only`.
+    #[test]
+    fn classifies_a_diverged_fast_forward_only_merge_as_operation_conflict() {
+        let err = process_failure(
+            "hint: Diverging branches can't be fast-forwarded, you need to either:\nfatal: Not possible to fast-forward, aborting.\n",
+        );
+
+        let classified = classify_pull_failure(err);
+
+        assert_eq!(classified.code(), ErrorCode::OperationConflict);
+        assert!(classified.remediation().unwrap().contains("rebase"));
+    }
+
+    #[test]
+    fn pull_failure_classification_still_recognizes_transport_failures() {
+        let err = process_failure("fatal: Authentication failed for 'https://example.com/repo.git/'\n");
+
+        let classified = classify_pull_failure(err);
+
+        assert_eq!(classified.code(), ErrorCode::AuthenticationRequired);
+    }
+
+    /// Captured verbatim from a real non-fast-forward `git push` rejection
+    /// against a bare remote.
+    #[test]
+    fn classifies_a_non_fast_forward_push_rejection_as_operation_conflict() {
+        let err = process_failure(
+            " ! [rejected]        main -> main (fetch first)\nerror: failed to push some refs to '/tmp/remote'\nhint: Updates were rejected because the remote contains work that you do not\nhint: have locally.\n",
+        );
+
+        let classified = classify_push_failure(err);
+
+        assert_eq!(classified.code(), ErrorCode::OperationConflict);
+        assert!(classified.remediation().unwrap().contains("pull"));
+    }
+
+    #[test]
+    fn push_failure_classification_still_recognizes_transport_failures() {
+        let err = process_failure(
+            "fatal: unable to access 'https://example.com/repo.git/': Could not resolve host: example.com\n",
+        );
+
+        let classified = classify_push_failure(err);
+
+        assert_eq!(classified.code(), ErrorCode::NetworkFailure);
+    }
+
+    /// Captured verbatim from a real `--force-with-lease` rejection when the
+    /// remote had already moved (DoD: "teste com um avanço concorrente do
+    /// remote simulado").
+    #[test]
+    fn classifies_a_stale_lease_rejection_as_operation_conflict_never_suggesting_plain_force() {
+        let err = process_failure(
+            " ! [rejected]        main -> main (stale info)\nerror: failed to push some refs to '/tmp/remote'\n",
+        );
+
+        let classified = classify_force_push_failure(err);
+
+        assert_eq!(classified.code(), ErrorCode::OperationConflict);
+        let remediation = classified.remediation().unwrap().to_lowercase();
+        assert!(
+            !remediation.contains("--force ") && !remediation.contains("unconditional"),
+            "a refused lease must never be advised to retry as an unconditional force push: {remediation:?}"
+        );
+    }
+
+    #[test]
+    fn force_push_failure_classification_still_recognizes_transport_failures() {
+        let err = process_failure(
+            "fatal: could not read Username for 'https://example.com': terminal prompts disabled\n",
+        );
+
+        let classified = classify_force_push_failure(err);
+
+        assert_eq!(classified.code(), ErrorCode::AuthenticationRequired);
     }
 
     /// T-226/US-115 criterion 2: cancellation during diff/blame parsing

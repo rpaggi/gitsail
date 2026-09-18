@@ -132,6 +132,34 @@ pub enum MutationKind {
         path: PathBuf,
         force: bool,
     },
+    /// EPIC-19/US-096: `RepositoryWritePort::fetch`. SAD §20 explicitly
+    /// lists fetch among its own canonical `Safe` examples.
+    Fetch {
+        remote: String,
+    },
+    /// EPIC-19/US-097: `RepositoryWritePort::pull` — a fast-forward-only
+    /// integration of `remote`'s tracked `branch` in this version (see that
+    /// method's doc for why divergence is refused rather than merged/
+    /// rebased automatically).
+    Pull {
+        remote: String,
+        branch: String,
+    },
+    /// EPIC-19/US-098: `RepositoryWritePort::push` — a plain, non-force
+    /// push that never rewrites history.
+    Push {
+        remote: String,
+        branch: String,
+    },
+    /// EPIC-19/US-099: `RepositoryWritePort::force_push_with_lease`. Named
+    /// distinctly from [`MutationKind::Push`] so a confirmation prompt is
+    /// never generic (US-099 criterion 1): this is the one operation in
+    /// this module that can discard *remote* history another collaborator
+    /// already observed.
+    ForcePushWithLease {
+        remote: String,
+        branch: String,
+    },
 }
 
 impl MutationKind {
@@ -206,6 +234,30 @@ impl MutationKind {
                     RiskLevel::Moderate
                 }
             }
+            // SAD §20's own named `Safe` example: fetch only updates
+            // remote-tracking refs, never the working tree, index, or any
+            // ref a person is actually standing on.
+            MutationKind::Fetch { .. } => RiskLevel::Safe,
+            // A fast-forward-only integration mutates the current branch
+            // and working tree, but — by construction — only ever moves
+            // them forward along history everyone already agrees on (this
+            // version refuses anything else rather than merging/rebasing
+            // automatically): the same "mutates, but not irreversibly or
+            // surprisingly" character `SwitchBranch`/`CreateCommit` already
+            // have.
+            MutationKind::Pull { .. } => RiskLevel::Moderate,
+            // A plain push never rewrites history (it can only fast-forward
+            // the remote, and is refused otherwise — see
+            // `RepositoryWritePort::push`'s doc), so it is no riskier than
+            // any other ref-advancing mutation already classified
+            // `Moderate` here.
+            MutationKind::Push { .. } => RiskLevel::Moderate,
+            // The one remote mutation that can discard commits a
+            // collaborator already published (that is exactly what
+            // `--force-with-lease` protects against racing, not what it
+            // makes safe to do) — SAD §20's own "force push" example of a
+            // `Destructive` operation.
+            MutationKind::ForcePushWithLease { .. } => RiskLevel::Destructive,
         }
     }
 
@@ -231,6 +283,16 @@ impl MutationKind {
             MutationKind::CreateWorktree { path } => format!("worktree at '{}'", path.display()),
             MutationKind::RemoveWorktree { path, .. } => {
                 format!("worktree at '{}'", path.display())
+            }
+            MutationKind::Fetch { remote } => format!("remote '{remote}'"),
+            MutationKind::Pull { remote, branch } => {
+                format!("branch '{branch}' from remote '{remote}'")
+            }
+            MutationKind::Push { remote, branch } => {
+                format!("branch '{branch}' to remote '{remote}'")
+            }
+            MutationKind::ForcePushWithLease { remote, branch } => {
+                format!("branch '{branch}' on remote '{remote}' (force push with lease)")
             }
         }
     }
@@ -397,6 +459,80 @@ mod tests {
         }
         .target_label()
         .contains("/repos/feature"));
+    }
+
+    /// EPIC-19: the remote-operation mutations classify per this module's
+    /// doc rationale — `Fetch` is `Safe` (SAD §20's own named example),
+    /// `Pull`/`Push` are `Moderate` (a fast-forward-only integration and a
+    /// non-force push both only ever move refs forward along agreed
+    /// history), and `ForcePushWithLease` is the one `Destructive` case
+    /// (SAD §20's own "force push" example) — distinct from `Push` so a
+    /// confirmation prompt is never generic.
+    #[test]
+    fn epic_19_remote_operation_mutations_classify_per_sad_section_20() {
+        assert!(MutationKind::Fetch {
+            remote: "origin".into()
+        }
+        .risk()
+        .skips_confirmation());
+        assert_eq!(
+            MutationKind::Pull {
+                remote: "origin".into(),
+                branch: "main".into()
+            }
+            .risk(),
+            RiskLevel::Moderate
+        );
+        assert_eq!(
+            MutationKind::Push {
+                remote: "origin".into(),
+                branch: "main".into()
+            }
+            .risk(),
+            RiskLevel::Moderate
+        );
+        assert!(MutationKind::ForcePushWithLease {
+            remote: "origin".into(),
+            branch: "main".into()
+        }
+        .risk()
+        .requires_reinforced_confirmation());
+        assert_ne!(
+            MutationKind::Push {
+                remote: "origin".into(),
+                branch: "main".into()
+            },
+            MutationKind::ForcePushWithLease {
+                remote: "origin".into(),
+                branch: "main".into()
+            },
+            "push and force-push-with-lease must remain distinct MutationKind values"
+        );
+    }
+
+    #[test]
+    fn epic_19_target_labels_name_the_exact_remote_and_branch() {
+        assert_eq!(
+            MutationKind::Fetch {
+                remote: "upstream".into()
+            }
+            .target_label(),
+            "remote 'upstream'"
+        );
+        let push_label = MutationKind::Push {
+            remote: "origin".into(),
+            branch: "feature/x".into(),
+        }
+        .target_label();
+        assert!(push_label.contains("feature/x"));
+        assert!(push_label.contains("origin"));
+        let force_label = MutationKind::ForcePushWithLease {
+            remote: "origin".into(),
+            branch: "feature/x".into(),
+        }
+        .target_label();
+        assert!(force_label.contains("feature/x"));
+        assert!(force_label.contains("force"));
     }
 
     #[test]

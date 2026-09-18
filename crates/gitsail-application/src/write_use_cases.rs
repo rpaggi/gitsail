@@ -6,10 +6,14 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use gitsail_domain::{BranchName, CommitHash, FileDiff, GitSailError, Repository, Stash, Worktree};
+use gitsail_domain::{
+    BranchName, CancellationToken, CommitHash, FileDiff, GitSailError, Repository, Stash, Worktree,
+};
 
+use crate::mutation::Precondition;
 use crate::write_ports::{
-    RepositoryWritePort, StashApplyOutcome, StashScope, TagAnnotation, WorktreeBranchSpec,
+    PullOutcome, RepositoryWritePort, StashApplyOutcome, StashScope, TagAnnotation,
+    WorktreeBranchSpec,
 };
 
 pub struct StageFiles {
@@ -302,6 +306,96 @@ impl RemoveWorktree {
     }
 }
 
+/// Fetches a remote's refs (US-096). See [`RepositoryWritePort::fetch`].
+pub struct Fetch {
+    port: Arc<dyn RepositoryWritePort>,
+}
+
+impl Fetch {
+    pub fn new(port: Arc<dyn RepositoryWritePort>) -> Self {
+        Self { port }
+    }
+
+    pub fn execute(
+        &self,
+        repo: &Repository,
+        remote: &str,
+        cancel: &CancellationToken,
+    ) -> Result<(), GitSailError> {
+        self.port.fetch(repo, remote, cancel)
+    }
+}
+
+/// Integrates a remote branch via a fast-forward-only pull (US-097). See
+/// [`RepositoryWritePort::pull`] for the policy this delegates to unchanged.
+pub struct Pull {
+    port: Arc<dyn RepositoryWritePort>,
+}
+
+impl Pull {
+    pub fn new(port: Arc<dyn RepositoryWritePort>) -> Self {
+        Self { port }
+    }
+
+    pub fn execute(
+        &self,
+        repo: &Repository,
+        remote: &str,
+        branch: &BranchName,
+        cancel: &CancellationToken,
+    ) -> Result<PullOutcome, GitSailError> {
+        self.port.pull(repo, remote, branch, cancel)
+    }
+}
+
+/// Publishes a local branch via a plain push (US-098). See
+/// [`RepositoryWritePort::push`].
+pub struct Push {
+    port: Arc<dyn RepositoryWritePort>,
+}
+
+impl Push {
+    pub fn new(port: Arc<dyn RepositoryWritePort>) -> Self {
+        Self { port }
+    }
+
+    pub fn execute(
+        &self,
+        repo: &Repository,
+        remote: &str,
+        branch: &BranchName,
+        cancel: &CancellationToken,
+    ) -> Result<(), GitSailError> {
+        self.port.push(repo, remote, branch, cancel)
+    }
+}
+
+/// Force-publishes rewritten history behind a compare-and-swap lease
+/// (US-099; `Destructive`, see
+/// [`crate::mutation::MutationKind::ForcePushWithLease`]). See
+/// [`RepositoryWritePort::force_push_with_lease`].
+pub struct ForcePushWithLease {
+    port: Arc<dyn RepositoryWritePort>,
+}
+
+impl ForcePushWithLease {
+    pub fn new(port: Arc<dyn RepositoryWritePort>) -> Self {
+        Self { port }
+    }
+
+    pub fn execute(
+        &self,
+        repo: &Repository,
+        remote: &str,
+        branch: &BranchName,
+        expected_remote_head: &Precondition<CommitHash>,
+        cancel: &CancellationToken,
+    ) -> Result<(), GitSailError> {
+        self.port
+            .force_push_with_lease(repo, remote, branch, expected_remote_head, cancel)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -339,6 +433,11 @@ mod tests {
         received_create_worktree: Mutex<Option<(PathBuf, WorktreeBranchSpec)>>,
         created_worktree: Worktree,
         received_remove_worktree: Mutex<Option<(PathBuf, bool)>>,
+        received_fetch: Mutex<Option<String>>,
+        received_pull: Mutex<Option<(String, BranchName)>>,
+        pull_outcome: PullOutcome,
+        received_push: Mutex<Option<(String, BranchName)>>,
+        received_force_push: Mutex<Option<(String, BranchName, CommitHash)>>,
     }
 
     fn sample_stash() -> Stash {
@@ -390,6 +489,13 @@ mod tests {
                 received_create_worktree: Mutex::new(None),
                 created_worktree: sample_worktree(),
                 received_remove_worktree: Mutex::new(None),
+                received_fetch: Mutex::new(None),
+                received_pull: Mutex::new(None),
+                pull_outcome: PullOutcome::FastForwarded {
+                    new_head: CommitHash::new("cafef00dcafef00dcafef00dcafef00dcafef00").unwrap(),
+                },
+                received_push: Mutex::new(None),
+                received_force_push: Mutex::new(None),
             }
         }
 
@@ -628,6 +734,78 @@ mod tests {
                 return Err(GitSailError::new(
                     ErrorCode::OperationConflict,
                     "worktree has uncommitted changes",
+                ));
+            }
+            Ok(())
+        }
+
+        fn fetch(
+            &self,
+            _repo: &Repository,
+            remote: &str,
+            _cancel: &CancellationToken,
+        ) -> Result<(), GitSailError> {
+            *self.received_fetch.lock().unwrap() = Some(remote.to_string());
+            if self.fail {
+                return Err(GitSailError::new(
+                    ErrorCode::NetworkFailure,
+                    "the remote could not be reached",
+                ));
+            }
+            Ok(())
+        }
+
+        fn pull(
+            &self,
+            _repo: &Repository,
+            remote: &str,
+            branch: &BranchName,
+            _cancel: &CancellationToken,
+        ) -> Result<PullOutcome, GitSailError> {
+            *self.received_pull.lock().unwrap() = Some((remote.to_string(), branch.clone()));
+            if self.fail {
+                return Err(GitSailError::new(
+                    ErrorCode::OperationConflict,
+                    "local and remote branches have diverged",
+                ));
+            }
+            Ok(self.pull_outcome.clone())
+        }
+
+        fn push(
+            &self,
+            _repo: &Repository,
+            remote: &str,
+            branch: &BranchName,
+            _cancel: &CancellationToken,
+        ) -> Result<(), GitSailError> {
+            *self.received_push.lock().unwrap() = Some((remote.to_string(), branch.clone()));
+            if self.fail {
+                return Err(GitSailError::new(
+                    ErrorCode::OperationConflict,
+                    "push rejected: remote has commits this branch does not have",
+                ));
+            }
+            Ok(())
+        }
+
+        fn force_push_with_lease(
+            &self,
+            _repo: &Repository,
+            remote: &str,
+            branch: &BranchName,
+            expected_remote_head: &Precondition<CommitHash>,
+            _cancel: &CancellationToken,
+        ) -> Result<(), GitSailError> {
+            *self.received_force_push.lock().unwrap() = Some((
+                remote.to_string(),
+                branch.clone(),
+                expected_remote_head.expected().clone(),
+            ));
+            if self.fail {
+                return Err(GitSailError::new(
+                    ErrorCode::OperationConflict,
+                    "force push refused: the remote branch has moved since this lease was captured",
                 ));
             }
             Ok(())
@@ -1068,6 +1246,155 @@ mod tests {
 
         let err = use_case
             .execute(&sample_repository(), Path::new("/repo-wt"), false)
+            .unwrap_err();
+
+        assert_eq!(err.code(), ErrorCode::OperationConflict);
+    }
+
+    // -----------------------------------------------------------------
+    // EPIC-19: fetch, pull, push, force-push-with-lease use cases.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn fetch_delegates_to_port_with_the_explicit_remote() {
+        let port = Arc::new(FakeWritePort::new());
+        let use_case = Fetch::new(port.clone());
+
+        use_case
+            .execute(&sample_repository(), "origin", &CancellationToken::new())
+            .unwrap();
+
+        assert_eq!(*port.received_fetch.lock().unwrap(), Some("origin".to_string()));
+    }
+
+    #[test]
+    fn fetch_propagates_a_network_failure_without_a_false_success() {
+        let port = Arc::new(FakeWritePort::failing());
+        let use_case = Fetch::new(port);
+
+        let err = use_case
+            .execute(&sample_repository(), "origin", &CancellationToken::new())
+            .unwrap_err();
+
+        assert_eq!(err.code(), ErrorCode::NetworkFailure);
+    }
+
+    #[test]
+    fn pull_delegates_to_port_with_remote_and_branch_and_returns_its_outcome() {
+        let port = Arc::new(FakeWritePort::new());
+        let use_case = Pull::new(port.clone());
+        let branch = BranchName::new("main").unwrap();
+
+        let outcome = use_case
+            .execute(
+                &sample_repository(),
+                "origin",
+                &branch,
+                &CancellationToken::new(),
+            )
+            .unwrap();
+
+        assert_eq!(outcome, port.pull_outcome);
+        assert_eq!(
+            *port.received_pull.lock().unwrap(),
+            Some(("origin".to_string(), branch))
+        );
+    }
+
+    #[test]
+    fn pull_propagates_a_divergence_conflict_without_a_false_success() {
+        let port = Arc::new(FakeWritePort::failing());
+        let use_case = Pull::new(port);
+
+        let err = use_case
+            .execute(
+                &sample_repository(),
+                "origin",
+                &BranchName::new("main").unwrap(),
+                &CancellationToken::new(),
+            )
+            .unwrap_err();
+
+        assert_eq!(err.code(), ErrorCode::OperationConflict);
+    }
+
+    #[test]
+    fn push_delegates_to_port_with_the_explicit_remote_and_branch() {
+        let port = Arc::new(FakeWritePort::new());
+        let use_case = Push::new(port.clone());
+        let branch = BranchName::new("feature").unwrap();
+
+        use_case
+            .execute(
+                &sample_repository(),
+                "origin",
+                &branch,
+                &CancellationToken::new(),
+            )
+            .unwrap();
+
+        assert_eq!(
+            *port.received_push.lock().unwrap(),
+            Some(("origin".to_string(), branch))
+        );
+    }
+
+    #[test]
+    fn push_propagates_a_non_fast_forward_rejection_without_a_false_success() {
+        let port = Arc::new(FakeWritePort::failing());
+        let use_case = Push::new(port);
+
+        let err = use_case
+            .execute(
+                &sample_repository(),
+                "origin",
+                &BranchName::new("feature").unwrap(),
+                &CancellationToken::new(),
+            )
+            .unwrap_err();
+
+        assert_eq!(err.code(), ErrorCode::OperationConflict);
+    }
+
+    #[test]
+    fn force_push_with_lease_delegates_to_port_with_the_expected_remote_head() {
+        let port = Arc::new(FakeWritePort::new());
+        let use_case = ForcePushWithLease::new(port.clone());
+        let branch = BranchName::new("feature").unwrap();
+        let expected =
+            Precondition::new(CommitHash::new("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef").unwrap());
+
+        use_case
+            .execute(
+                &sample_repository(),
+                "origin",
+                &branch,
+                &expected,
+                &CancellationToken::new(),
+            )
+            .unwrap();
+
+        assert_eq!(
+            *port.received_force_push.lock().unwrap(),
+            Some(("origin".to_string(), branch, expected.expected().clone()))
+        );
+    }
+
+    #[test]
+    fn force_push_with_lease_propagates_a_stale_lease_rejection_without_a_false_success() {
+        let port = Arc::new(FakeWritePort::failing());
+        let use_case = ForcePushWithLease::new(port);
+        let expected =
+            Precondition::new(CommitHash::new("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef").unwrap());
+
+        let err = use_case
+            .execute(
+                &sample_repository(),
+                "origin",
+                &BranchName::new("feature").unwrap(),
+                &expected,
+                &CancellationToken::new(),
+            )
             .unwrap_err();
 
         assert_eq!(err.code(), ErrorCode::OperationConflict);
