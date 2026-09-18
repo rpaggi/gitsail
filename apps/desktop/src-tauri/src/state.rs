@@ -356,6 +356,14 @@ mod tests {
         fn delete_branch(&self, _repo: &Repository, _name: &BranchName, _force: bool) -> Result<(), GitSailError> {
             unimplemented!()
         }
+        fn rename_branch(
+            &self,
+            _repo: &Repository,
+            _old_name: &BranchName,
+            _new_name: &BranchName,
+        ) -> Result<(), GitSailError> {
+            unimplemented!()
+        }
         fn amend_commit(
             &self,
             _repo: &Repository,

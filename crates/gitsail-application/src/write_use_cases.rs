@@ -133,6 +133,28 @@ impl DeleteBranch {
     }
 }
 
+/// Renames a local branch (T-157/US-024). See
+/// [`RepositoryWritePort::rename_branch`] for the collision/upstream
+/// contract this delegates to unchanged.
+pub struct RenameBranch {
+    port: Arc<dyn RepositoryWritePort>,
+}
+
+impl RenameBranch {
+    pub fn new(port: Arc<dyn RepositoryWritePort>) -> Self {
+        Self { port }
+    }
+
+    pub fn execute(
+        &self,
+        repo: &Repository,
+        old_name: &BranchName,
+        new_name: &BranchName,
+    ) -> Result<(), GitSailError> {
+        self.port.rename_branch(repo, old_name, new_name)
+    }
+}
+
 /// Amends `HEAD` (US-059). See [`RepositoryWritePort::amend_commit`] for the
 /// `expected_head` revalidation contract this delegates to unchanged.
 pub struct AmendCommit {
@@ -452,6 +474,7 @@ mod tests {
         received_switch_target: Mutex<Option<BranchName>>,
         received_create_branch: Mutex<Option<(BranchName, Option<CommitHash>)>>,
         received_delete_branch: Mutex<Option<(BranchName, bool)>>,
+        received_rename_branch: Mutex<Option<(BranchName, BranchName)>>,
         received_amend: Mutex<Option<(String, CommitHash)>>,
         amended_hash: CommitHash,
         received_create_stash: Mutex<Option<(Option<String>, StashScope)>>,
@@ -510,6 +533,7 @@ mod tests {
                 received_switch_target: Mutex::new(None),
                 received_create_branch: Mutex::new(None),
                 received_delete_branch: Mutex::new(None),
+                received_rename_branch: Mutex::new(None),
                 received_amend: Mutex::new(None),
                 amended_hash: CommitHash::new("cafef00dcafef00dcafef00dcafef00dcafef00").unwrap(),
                 received_create_stash: Mutex::new(None),
@@ -648,6 +672,22 @@ mod tests {
                 return Err(GitSailError::new(
                     ErrorCode::OperationConflict,
                     "not fully merged",
+                ));
+            }
+            Ok(())
+        }
+
+        fn rename_branch(
+            &self,
+            _repo: &Repository,
+            old_name: &BranchName,
+            new_name: &BranchName,
+        ) -> Result<(), GitSailError> {
+            *self.received_rename_branch.lock().unwrap() = Some((old_name.clone(), new_name.clone()));
+            if self.fail {
+                return Err(GitSailError::new(
+                    ErrorCode::InvalidRepositoryState,
+                    "already exists",
                 ));
             }
             Ok(())
@@ -1075,6 +1115,39 @@ mod tests {
             .unwrap_err();
 
         assert_eq!(err.code(), ErrorCode::OperationConflict);
+    }
+
+    #[test]
+    fn rename_branch_delegates_to_port_with_both_names() {
+        let port = Arc::new(FakeWritePort::new());
+        let use_case = RenameBranch::new(port.clone());
+        let old_name = BranchName::new("old-name").unwrap();
+        let new_name = BranchName::new("new-name").unwrap();
+
+        use_case
+            .execute(&sample_repository(), &old_name, &new_name)
+            .unwrap();
+
+        assert_eq!(
+            *port.received_rename_branch.lock().unwrap(),
+            Some((old_name, new_name))
+        );
+    }
+
+    #[test]
+    fn rename_branch_propagates_port_error_on_name_collision() {
+        let port = Arc::new(FakeWritePort::failing());
+        let use_case = RenameBranch::new(port);
+
+        let err = use_case
+            .execute(
+                &sample_repository(),
+                &BranchName::new("feature").unwrap(),
+                &BranchName::new("main").unwrap(),
+            )
+            .unwrap_err();
+
+        assert_eq!(err.code(), ErrorCode::InvalidRepositoryState);
     }
 
     #[test]

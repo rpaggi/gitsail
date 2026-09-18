@@ -302,6 +302,26 @@ pub struct App {
     // -- US-048: branch administration ----------------------------------
     branch_input: Option<String>,
 
+    // -- T-157/US-024: rename branch --------------------------------------
+    /// The branch's previous name, set while its rename prompt is open —
+    /// `branch_input` (above) doubles as the editable new-name field for
+    /// both create and rename, and this is what tells the two apart
+    /// (`Some` means "renaming", `None` means "creating"). Pre-filled into
+    /// `branch_input` when the prompt opens ([`Self::request_rename_branch`])
+    /// so the field always shows both the previous and new name at once
+    /// (criterion 1).
+    rename_source: Option<String>,
+    /// Set right before dispatching a confirmed [`OperationKind::RenameBranch`]
+    /// (both names already validated), consumed the next time
+    /// [`Self::on_branches_loaded`] applies a fresh list — that is the one
+    /// place both `session.selection()` and `sidebar_cursor` can be
+    /// re-pointed at the branch's new name without losing track of it
+    /// (criterion 3: a renamed selected/current branch must never be
+    /// "lost"). Cleared unconditionally at the top of every
+    /// [`Self::dispatch_operation`] call and on a failed rename (no refresh
+    /// follows a failure, so nothing would ever consume it otherwise).
+    pending_branch_rename: Option<(BranchName, BranchName)>,
+
     // -- US-047: stage/unstage/commit -----------------------------------
     commit_message: Option<String>,
     pending_paths: Vec<PathBuf>,
@@ -390,6 +410,8 @@ impl App {
             patch_apply_outcome: None,
             pending_patch_text: None,
             branch_input: None,
+            rename_source: None,
+            pending_branch_rename: None,
             commit_message: None,
             pending_paths: Vec::new(),
             help_visible: false,
@@ -693,6 +715,8 @@ impl App {
             InputContext::ReferenceDetails
         } else if self.commit_message.is_some() && self.operation.is_idle() {
             InputContext::CommitMessage
+        } else if self.branch_input.is_some() && self.rename_source.is_some() {
+            InputContext::RenameBranch
         } else if self.branch_input.is_some() {
             InputContext::BranchName
         } else if self.commit_search.is_some() {
@@ -772,7 +796,12 @@ impl App {
             Action::StartCreateBranch => {
                 if self.focus == Panel::Sidebar {
                     self.branch_input = Some(String::new());
+                    self.rename_source = None;
                 }
+                Vec::new()
+            }
+            Action::StartRenameBranch => {
+                self.request_rename_branch();
                 Vec::new()
             }
             Action::BranchNameInput(c) => {
@@ -997,6 +1026,13 @@ impl App {
     /// starting a branch name means confirming it, confirming a pending
     /// operation means dispatching it, otherwise the active panel decides.
     fn handle_activate(&mut self) -> Vec<Command> {
+        if self.input_context() == InputContext::RenameBranch {
+            let new_name = self.branch_input.take().unwrap_or_default();
+            let old_name = self.rename_source.take().unwrap_or_default();
+            self.operation
+                .begin(OperationKind::RenameBranch { old_name, new_name });
+            return Vec::new();
+        }
         if self.input_context() == InputContext::BranchName {
             let name = self.branch_input.take().unwrap_or_default();
             self.operation.begin(OperationKind::CreateBranch { name });
@@ -1219,6 +1255,7 @@ impl App {
             self.commit_message = None;
         } else if self.branch_input.is_some() {
             self.branch_input = None;
+            self.rename_source = None;
         } else if self.commit_search.is_some() {
             // Closes the box without touching `active_commit_filter`/the
             // loaded graph — an unsubmitted edit is discarded exactly like
@@ -1315,6 +1352,30 @@ impl App {
             name: branch.name.as_str().to_string(),
             force: false,
         });
+    }
+
+    /// Opens the rename prompt for the highlighted branch (T-157/US-024),
+    /// pre-filling `branch_input` with its current name so the field always
+    /// shows both the previous name (as the starting text) and the new name
+    /// (as whatever the person edits it to) — criterion 1. Unlike
+    /// [`Self::request_checkout`]/[`Self::request_delete_branch`], this is
+    /// never a no-op on the current branch: renaming the branch a person is
+    /// standing on is exactly as valid as renaming any other local branch
+    /// (`RepositoryWritePort::rename_branch`'s own doc).
+    fn request_rename_branch(&mut self) {
+        if self.focus != Panel::Sidebar {
+            return;
+        }
+        let Some(branch) = self
+            .filtered_branches()
+            .get(self.sidebar_cursor)
+            .map(|b| (*b).clone())
+        else {
+            return;
+        };
+        let name = branch.name.as_str().to_string();
+        self.rename_source = Some(name.clone());
+        self.branch_input = Some(name);
     }
 
     /// Resolves which remote fetch/pull/push should target (US-049
@@ -1493,6 +1554,13 @@ impl App {
     /// reaching the write port (criterion 3: nothing is discarded, and
     /// nothing is attempted with data known to be invalid).
     fn dispatch_operation(&mut self, kind: OperationKind) -> Vec<Command> {
+        // Bounds `pending_branch_rename`'s lifetime to the one rename it was
+        // set for: any *other* confirmed operation dispatched before that
+        // rename's own refresh cycle completed must never let a later,
+        // unrelated `BranchesLoaded` reconcile against a stale pair (see
+        // this field's own doc). The `RenameBranch` arm below re-sets it
+        // immediately after, once both names are known to be valid.
+        self.pending_branch_rename = None;
         let Some(session) = self.session.as_ref() else {
             self.operation.cancel();
             return Vec::new();
@@ -1532,6 +1600,19 @@ impl App {
                     Vec::new()
                 }
             },
+            OperationKind::RenameBranch { old_name, new_name } => {
+                match (BranchName::new(old_name), BranchName::new(new_name)) {
+                    (Ok(old_name), Ok(new_name)) => {
+                        self.pending_branch_rename = Some((old_name.clone(), new_name.clone()));
+                        vec![Command::RenameBranch(repo, old_name, new_name)]
+                    }
+                    (old_result, new_result) => {
+                        let err = old_result.and(new_result).unwrap_err();
+                        self.operation.fail(err);
+                        Vec::new()
+                    }
+                }
+            }
             OperationKind::Fetch { remote } => vec![Command::Fetch(repo, remote)],
             OperationKind::Pull { remote, branch } => match BranchName::new(branch) {
                 Ok(name) => vec![Command::Pull(repo, remote, name)],
@@ -1711,6 +1792,25 @@ impl App {
         }
         if let Ok(branches) = result {
             self.branches = branches;
+            // T-157/US-024 criterion 3: a branch renamed while it was the
+            // session's selected branch, or highlighted in the Sidebar,
+            // must still be found afterward — under its *new* name, not
+            // lost. This is the one place both are reconciled, since this
+            // is the first fresh list to actually contain the new name.
+            if let Some((old_name, new_name)) = self.pending_branch_rename.take() {
+                if let Some(session) = self.session.as_mut() {
+                    if session.selection().branch.as_ref() == Some(&old_name) {
+                        session.select_branch(new_name.clone());
+                    }
+                }
+                if let Some(idx) = self
+                    .filtered_branches()
+                    .iter()
+                    .position(|b| b.name == new_name)
+                {
+                    self.sidebar_cursor = idx;
+                }
+            }
             let max = self.filtered_branches().len().saturating_sub(1);
             self.sidebar_cursor = self.sidebar_cursor.min(max);
         }
@@ -2583,6 +2683,211 @@ mod tests {
             [Command::CreateBranch(_, name, None)] => assert_eq!(name.as_str(), "feature/x"),
             other => panic!("expected exactly one CreateBranch command, got {other:?}"),
         }
+    }
+
+    // -- T-157/US-024: rename branch --------------------------------------
+
+    #[test]
+    fn renaming_a_branch_pre_fills_the_previous_name_then_confirms_then_dispatches() {
+        let (mut app, _port) = new_app();
+        app.on_repository_opened(Ok(sample_repository()));
+        app.on_branches_loaded(
+            app.session().unwrap().generation(),
+            Ok(vec![
+                sample_branch("main", true),
+                sample_branch("develop", false),
+            ]),
+        );
+        app.update(Action::MoveDown); // highlight "develop"
+
+        app.update(Action::StartRenameBranch);
+        assert_eq!(
+            app.branch_input(),
+            Some("develop"),
+            "the prompt must pre-fill the branch's previous name (criterion 1)"
+        );
+        assert_eq!(app.input_context(), InputContext::RenameBranch);
+
+        // Edit the pre-filled text down to a new name.
+        for _ in 0.."develop".len() {
+            app.update(Action::BranchNameBackspace);
+        }
+        for c in "develop-renamed".chars() {
+            app.update(Action::BranchNameInput(c));
+        }
+
+        app.update(Action::Activate);
+        assert!(matches!(
+            app.operation(),
+            OperationState::Confirming(OperationKind::RenameBranch { .. })
+        ));
+        assert!(
+            app.branch_input().is_none(),
+            "the prompt closes once both names are committed to the confirmation"
+        );
+
+        let commands = app.update(Action::Activate);
+        match commands.as_slice() {
+            [Command::RenameBranch(_, old_name, new_name)] => {
+                assert_eq!(old_name.as_str(), "develop");
+                assert_eq!(new_name.as_str(), "develop-renamed");
+            }
+            other => panic!("expected exactly one RenameBranch command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn renaming_the_current_branch_is_allowed_unlike_checkout_and_delete() {
+        let (mut app, _port) = new_app();
+        app.on_repository_opened(Ok(sample_repository()));
+        app.on_branches_loaded(
+            app.session().unwrap().generation(),
+            Ok(vec![sample_branch("main", true)]),
+        );
+
+        app.update(Action::StartRenameBranch);
+
+        assert_eq!(
+            app.branch_input(),
+            Some("main"),
+            "renaming the current branch must never be a no-op"
+        );
+    }
+
+    #[test]
+    fn dismissing_a_pending_rename_clears_the_prompt_without_dispatching_anything() {
+        let (mut app, _port) = new_app();
+        app.on_repository_opened(Ok(sample_repository()));
+        app.on_branches_loaded(
+            app.session().unwrap().generation(),
+            Ok(vec![sample_branch("main", true)]),
+        );
+
+        app.update(Action::StartRenameBranch);
+        app.update(Action::BranchNameInput('x'));
+        app.update(Action::Dismiss);
+
+        assert!(app.branch_input().is_none());
+        assert_eq!(
+            app.input_context(),
+            InputContext::Normal,
+            "cancelling a rename must never leave a stale rename-source lingering"
+        );
+
+        // A fresh create-branch prompt right after must behave like an
+        // ordinary create, never accidentally resuming the cancelled rename.
+        app.update(Action::StartCreateBranch);
+        assert_eq!(app.input_context(), InputContext::BranchName);
+    }
+
+    #[test]
+    fn a_successful_rename_of_the_selected_current_branch_follows_selection_and_cursor_to_the_new_name(
+    ) {
+        let (mut app, _port) = new_app();
+        app.on_repository_opened(Ok(sample_repository()));
+        app.on_branches_loaded(
+            app.session().unwrap().generation(),
+            Ok(vec![
+                sample_branch("develop", false),
+                sample_branch("main", true),
+            ]),
+        );
+        // Select "main" explicitly (Sidebar Enter), matching the session
+        // selection this reconciliation must follow.
+        app.update(Action::MoveDown); // "develop" -> "main"
+        app.update(Action::Activate);
+        assert_eq!(
+            app.session()
+                .unwrap()
+                .selection()
+                .branch
+                .as_ref()
+                .map(BranchName::as_str),
+            Some("main")
+        );
+
+        app.update(Action::StartRenameBranch);
+        for _ in 0.."main".len() {
+            app.update(Action::BranchNameBackspace);
+        }
+        for c in "trunk".chars() {
+            app.update(Action::BranchNameInput(c));
+        }
+        app.update(Action::Activate); // -> Confirming
+        app.update(Action::Activate); // -> InProgress, dispatches RenameBranch
+
+        app.on_operation_finished(Ok(()));
+        assert!(matches!(
+            app.operation(),
+            OperationState::Succeeded(OperationKind::RenameBranch { .. })
+        ));
+
+        // The refresh this success triggered reports the renamed branch
+        // under its new name, still current.
+        app.on_branches_loaded(
+            app.session().unwrap().generation(),
+            Ok(vec![
+                sample_branch("develop", false),
+                sample_branch("trunk", true),
+            ]),
+        );
+
+        assert_eq!(
+            app.session()
+                .unwrap()
+                .selection()
+                .branch
+                .as_ref()
+                .map(BranchName::as_str),
+            Some("trunk"),
+            "the selection must follow the rename to the new name, not be lost"
+        );
+        let cursor_branch = app
+            .filtered_branches()
+            .get(app.sidebar_cursor())
+            .map(|b| b.name.as_str());
+        assert_eq!(
+            cursor_branch,
+            Some("trunk"),
+            "the sidebar cursor must still highlight the renamed branch"
+        );
+    }
+
+    #[test]
+    fn a_failed_rename_never_refreshes_and_never_leaves_a_stale_pending_reconciliation() {
+        let (mut app, _port) = new_app();
+        app.on_repository_opened(Ok(sample_repository()));
+        app.on_branches_loaded(
+            app.session().unwrap().generation(),
+            Ok(vec![sample_branch("main", true)]),
+        );
+
+        app.update(Action::StartRenameBranch);
+        app.update(Action::BranchNameInput('x'));
+        app.update(Action::Activate); // Confirming
+        let commands = app.update(Action::Activate); // InProgress, dispatches
+        assert!(!commands.is_empty());
+
+        let refresh_commands = app.on_operation_finished(Err(GitSailError::new(
+            ErrorCode::InvalidRepositoryState,
+            "a branch with that name already exists",
+        )));
+        assert!(
+            refresh_commands.is_empty(),
+            "a failed rename must never refresh (criterion 2: nothing discarded)"
+        );
+        assert!(matches!(
+            app.operation(),
+            OperationState::Failed(OperationKind::RenameBranch { .. }, _)
+        ));
+
+        // A later, unrelated branches load (e.g. a manual refresh) must
+        // never be misinterpreted as this failed rename's own reconciliation.
+        app.on_branches_loaded(
+            app.session().unwrap().generation(),
+            Ok(vec![sample_branch("main", true)]),
+        );
+        assert_eq!(app.sidebar_cursor(), 0);
     }
 
     #[test]

@@ -240,6 +240,28 @@ pub trait RepositoryWritePort: Send + Sync {
         force: bool,
     ) -> Result<(), GitSailError>;
 
+    /// Renames the local branch `old_name` to `new_name` via `git branch
+    /// -m` (T-157/US-024). Never overwrites a colliding reference — Git
+    /// itself refuses `-m` when `new_name` already names another branch,
+    /// and this port never passes `-M`/force to work around that refusal
+    /// (US-024 criterion 2: "colisão de nome não sobrescreve a
+    /// referência"). Works whether or not `old_name` is the currently
+    /// checked-out branch: Git's own `-m` renames the checked-out branch in
+    /// place (still current, under its new name) exactly as it renames any
+    /// other local branch, so this port needs no special-casing for either
+    /// case, unlike [`Self::delete_branch`]'s current-branch protection.
+    /// Any configured upstream on `old_name` survives the rename (Git
+    /// itself carries `branch.<name>.remote`/`.merge` over to the new
+    /// name) — presenting that, and the branch's new current-ness, to the
+    /// person afterward is a presentation-layer concern (US-024 criterion
+    /// 2's "contexto resultante ... fica visível"), not this port's.
+    fn rename_branch(
+        &self,
+        repo: &Repository,
+        old_name: &BranchName,
+        new_name: &BranchName,
+    ) -> Result<(), GitSailError>;
+
     /// Replaces `HEAD`'s commit with a new one carrying `message` and
     /// whatever is currently staged (US-059). `expected_head` is the commit
     /// hash the caller last observed as `HEAD` (typically from a prior

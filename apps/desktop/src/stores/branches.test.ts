@@ -122,4 +122,50 @@ describe("branches store", () => {
     expect(operation.current?.risk).toBe("moderate");
     expect(operation.current?.impact).toBeUndefined();
   });
+
+  it("requestRename (Moderate) waits for explicit confirmation, then renames and reloads the list", async () => {
+    const received: string[] = [];
+    mockIPC((cmd) => {
+      received.push(cmd);
+      if (cmd === "list_branches") return [branch("feature/renamed", false)];
+      return null;
+    });
+    const store = useBranchesStore();
+
+    await store.requestRename("feature/old", "feature/renamed");
+
+    expect(received).toEqual([]);
+    const { useOperationStore } = await import("./operation");
+    const operation = useOperationStore();
+    expect(operation.status).toBe("confirming");
+    expect(operation.current?.risk).toBe("moderate");
+    expect(operation.current?.targetLabel).toContain("feature/old");
+    expect(operation.current?.targetLabel).toContain("feature/renamed");
+
+    await operation.confirm();
+
+    expect(received).toContain("rename_branch");
+    expect(received).toContain("list_branches");
+    expect(operation.status).toBe("succeeded");
+    expect(store.branches.some((b) => b.name === "feature/renamed")).toBe(true);
+  });
+
+  it("requestRename never overwrites a colliding branch: a refused rename surfaces as a failed operation", async () => {
+    mockIPC((cmd) => {
+      if (cmd === "rename_branch") {
+        throw { code: "invalid_repository_state", message: "a branch with that name already exists" };
+      }
+      if (cmd === "list_branches") return [branch("main", true), branch("feature/x", false)];
+      return null;
+    });
+    const store = useBranchesStore();
+
+    await store.requestRename("feature/y", "feature/x");
+    const { useOperationStore } = await import("./operation");
+    const operation = useOperationStore();
+    await operation.confirm();
+
+    expect(operation.status).toBe("failed");
+    expect(operation.error?.message).toContain("already exists");
+  });
 });

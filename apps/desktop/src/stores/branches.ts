@@ -6,7 +6,13 @@
 
 import { defineStore } from "pinia";
 
-import { createBranch, deleteBranch, listBranches, switchBranch } from "../services/branches";
+import {
+  createBranch,
+  deleteBranch,
+  listBranches,
+  renameBranch,
+  switchBranch,
+} from "../services/branches";
 import type { BranchDto } from "../services/dto";
 import { isErrorPayload, type ErrorPayload } from "../services/errors";
 import { useOperationStore } from "./operation";
@@ -86,6 +92,29 @@ export const useBranchesStore = defineStore("branches", {
         run: async () => {
           await deleteBranch(name, force);
           await this.load();
+        },
+      });
+    },
+
+    /** Requests renaming `oldName` to `newName` (Moderate risk, T-157/
+     * US-024): a confirmed, non-destructive ref change Git itself refuses
+     * to let collide with an existing branch (never overwritten, never
+     * forced). A refresh of both the branch list and the repository
+     * status follows a successful rename, mirroring `requestSwitch` —
+     * renaming the current branch changes what `currentBranch` reports
+     * elsewhere in the UI, and any upstream `oldName` had configured
+     * survives under `newName`, visible in the refreshed list. */
+    async requestRename(oldName: string, newName: string): Promise<void> {
+      const operation = useOperationStore();
+      const session = useRepositorySessionStore();
+      await operation.request({
+        kind: "renameBranch",
+        risk: "moderate",
+        targetLabel: `branch '${oldName}' to '${newName}'`,
+        run: async () => {
+          await renameBranch(oldName, newName);
+          await this.load();
+          await session.refreshStatus("after_mutation");
         },
       });
     },

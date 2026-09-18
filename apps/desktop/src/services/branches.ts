@@ -37,3 +37,14 @@ export async function switchBranch(target: string): Promise<void> {
 export async function deleteBranch(name: string, force: boolean): Promise<void> {
   return invoke<void>("delete_branch", { name, force });
 }
+
+/**
+ * Renames the local branch `oldName` to `newName` (T-157/US-024). Never
+ * overwrites a colliding `newName` — the Core refuses that outright (never
+ * force) — and preserves any upstream `oldName` had configured; refreshing
+ * the branch list after this resolves is the caller's job (mirrors
+ * `switchBranch`/`deleteBranch`'s own contract).
+ */
+export async function renameBranch(oldName: string, newName: string): Promise<void> {
+  return invoke<void>("rename_branch", { oldName, newName });
+}

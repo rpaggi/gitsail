@@ -979,6 +979,31 @@ impl RepositoryWritePort for GitCliProvider {
         Ok(())
     }
 
+    fn rename_branch(
+        &self,
+        repo: &Repository,
+        old_name: &BranchName,
+        new_name: &BranchName,
+    ) -> Result<(), GitSailError> {
+        // `--` ends option parsing before either positional (same rationale
+        // as `switch_branch`/`create_branch`/`delete_branch` above): neither
+        // a caller-supplied old nor new name is ever parsed as a `git
+        // branch` option, even if it happens to look like one (US-024/
+        // EPIC-22 US-110 convention). `-m`, never `-M`: a colliding
+        // `new_name` is Git's own refusal, and this port never escalates
+        // past it (US-024 criterion 2).
+        let args = vec![
+            "branch".to_string(),
+            "-m".to_string(),
+            "--".to_string(),
+            old_name.as_str().to_string(),
+            new_name.as_str().to_string(),
+        ];
+        self.run(args, &repo.root_path)
+            .map_err(classify_rename_branch_failure)?;
+        Ok(())
+    }
+
     fn amend_commit(
         &self,
         repo: &Repository,
@@ -2031,6 +2056,31 @@ fn classify_delete_branch_failure(err: GitSailError) -> GitSailError {
         )
         .with_remediation("merge the branch first, or delete it with force if you are sure")
         .with_source(err)
+    } else {
+        err
+    }
+}
+
+/// Reclassifies a failed `git branch -m <old> <new>` when it failed because
+/// `new` already names another branch (US-024 criterion 2: "colisão de
+/// nome não sobrescreve a referência") or `old` does not name an existing
+/// branch. Any other failure passes through unchanged.
+fn classify_rename_branch_failure(err: GitSailError) -> GitSailError {
+    if err.code() != ErrorCode::ProcessFailure {
+        return err;
+    }
+    let diagnostic_text = err.diagnostic().map(|d| d.to_string()).unwrap_or_default();
+    if diagnostic_text.contains("already exists") {
+        GitSailError::new(
+            ErrorCode::InvalidRepositoryState,
+            "a branch with that name already exists",
+        )
+        .with_remediation("choose a different new branch name")
+        .with_source(err)
+    } else if diagnostic_text.contains("no branch named") {
+        GitSailError::new(ErrorCode::RepositoryNotFound, "no such branch")
+            .with_remediation("verify the branch name")
+            .with_source(err)
     } else {
         err
     }

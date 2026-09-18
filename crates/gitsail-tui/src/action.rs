@@ -50,6 +50,12 @@ pub enum Action {
     RequestCheckout,
     /// Requests a confirmation to delete the highlighted branch (`d`).
     RequestDeleteBranch,
+    /// Opens the rename prompt for the highlighted branch (`R`, Sidebar
+    /// only), pre-filled with its current name (T-157/US-024). Unlike
+    /// [`Action::RequestDeleteBranch`], this is never a no-op on the
+    /// current branch — renaming the branch a person is standing on is
+    /// exactly as valid as renaming any other local branch.
+    StartRenameBranch,
 
     // -- US-047: stage/unstage/commit -----------------------------------
     /// Stages or unstages the status entry under the cursor, depending on

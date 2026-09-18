@@ -22,8 +22,8 @@ use gitsail_application::{
     AmendCommit, ApplyPatch, CommitQuery, CreateBranch, CreateCommit, DeleteBranch, DiffRequest,
     Fetch, ForgetRecentRepository, GetCommit, GetCommitHistory, GetDiff, ListBranches,
     ListRecentRepositories, OpenRepository, PreviewAmend, PreviewPatchApplication, Pull, Push,
-    RecordRecentRepository, RefreshReason, StageFiles, StageHunks, SwitchBranch, UnstageFiles,
-    UnstageHunks,
+    RecordRecentRepository, RefreshReason, RenameBranch, StageFiles, StageHunks, SwitchBranch,
+    UnstageFiles, UnstageHunks,
 };
 use gitsail_domain::{
     Branch, BranchKind, BranchName, CancellationToken, CommitHash, ErrorCode, FileDiff,
@@ -653,6 +653,28 @@ fn delete_branch_impl(state: &AppState, name: &str, force: bool) -> Result<(), G
     })
 }
 
+/// Renames a local branch (T-157/US-024). See
+/// [`gitsail_application::RepositoryWritePort::rename_branch`] for the
+/// collision/upstream contract this delegates to unchanged; the frontend is
+/// expected to have already shown both names and their risk (US-024
+/// criterion 1) before this runs.
+#[tauri::command]
+pub fn rename_branch(
+    old_name: String,
+    new_name: String,
+    state: tauri::State<AppState>,
+) -> Result<(), ErrorPayload> {
+    rename_branch_impl(&state, &old_name, &new_name).map_err(|err| ErrorPayload::from(&err))
+}
+
+fn rename_branch_impl(state: &AppState, old_name: &str, new_name: &str) -> Result<(), GitSailError> {
+    let old_name = BranchName::new(old_name)?;
+    let new_name = BranchName::new(new_name)?;
+    run_mutation(state, |repository| {
+        RenameBranch::new(state.write_port()).execute(repository, &old_name, &new_name)
+    })
+}
+
 // -- US-060: remote sync (fetch/pull/push), EPIC-19 -----------------------
 //
 // Every command below resolves which remote (and, for pull/push, which
@@ -1108,6 +1130,7 @@ mod tests {
         received_switch_target: Mutex<Option<BranchName>>,
         received_create_branch: Mutex<Option<(BranchName, Option<CommitHash>)>>,
         received_delete_branch: Mutex<Option<(BranchName, bool)>>,
+        received_rename_branch: Mutex<Option<(BranchName, BranchName)>>,
         received_fetch: Mutex<Option<String>>,
         received_pull: Mutex<Option<(String, BranchName)>>,
         received_push: Mutex<Option<(String, BranchName)>>,
@@ -1132,6 +1155,7 @@ mod tests {
                 received_switch_target: Mutex::new(None),
                 received_create_branch: Mutex::new(None),
                 received_delete_branch: Mutex::new(None),
+                received_rename_branch: Mutex::new(None),
                 received_fetch: Mutex::new(None),
                 received_pull: Mutex::new(None),
                 received_push: Mutex::new(None),
@@ -1232,6 +1256,19 @@ mod tests {
             *self.received_delete_branch.lock().unwrap() = Some((name.clone(), force));
             if self.fail {
                 return Err(GitSailError::new(ErrorCode::OperationConflict, "not fully merged"));
+            }
+            Ok(())
+        }
+
+        fn rename_branch(
+            &self,
+            _repo: &Repository,
+            old_name: &BranchName,
+            new_name: &BranchName,
+        ) -> Result<(), GitSailError> {
+            *self.received_rename_branch.lock().unwrap() = Some((old_name.clone(), new_name.clone()));
+            if self.fail {
+                return Err(GitSailError::new(ErrorCode::InvalidRepositoryState, "already exists"));
             }
             Ok(())
         }
@@ -2002,6 +2039,25 @@ mod tests {
         assert_eq!(err.code(), ErrorCode::OperationConflict);
     }
 
+    #[test]
+    fn rename_branch_delegates_both_parsed_names() {
+        let state = state_from_port_and_write_port(FakePort::default(), FakeWritePort::new());
+        open_repository_impl(&state, "/repo").unwrap();
+
+        rename_branch_impl(&state, "old-name", "new-name").unwrap();
+    }
+
+    #[test]
+    fn rename_branch_propagates_a_name_collision_error() {
+        let state =
+            state_from_port_and_write_port(FakePort::default(), FakeWritePort::failing());
+        open_repository_impl(&state, "/repo").unwrap();
+
+        let err = rename_branch_impl(&state, "feature/x", "main").unwrap_err();
+
+        assert_eq!(err.code(), ErrorCode::InvalidRepositoryState);
+    }
+
     // -- US-060: remote sync resolution (`resolve_remote_name`), mirroring
     // `gitsail_tui::App::resolve_sync_remote`'s own four scenarios ----------
 
@@ -2275,6 +2331,9 @@ mod tests {
             }
             fn delete_branch(&self, repo: &Repository, name: &BranchName, force: bool) -> Result<(), GitSailError> {
                 self.inner.delete_branch(repo, name, force)
+            }
+            fn rename_branch(&self, repo: &Repository, old_name: &BranchName, new_name: &BranchName) -> Result<(), GitSailError> {
+                self.inner.rename_branch(repo, old_name, new_name)
             }
             fn amend_commit(&self, repo: &Repository, message: &str, expected_head: &CommitHash) -> Result<CommitHash, GitSailError> {
                 self.inner.amend_commit(repo, message, expected_head)

@@ -23,8 +23,8 @@ use std::thread;
 use gitsail_application::{
     ApplyPatch, BlameRequest, CommitQuery, CreateBranch, CreateCommit, DeleteBranch, DiffRequest,
     Fetch, GetCommitHistory, GetDiff, GetFileBlame, GetRepositoryStatus, ListBranches,
-    OpenRepository, PreviewPatchApplication, Pull, Push, RefreshTicket, RepositoryReadPort,
-    RepositoryWritePort, StageFiles, SwitchBranch, UnstageFiles,
+    OpenRepository, PreviewPatchApplication, Pull, Push, RefreshTicket, RenameBranch,
+    RepositoryReadPort, RepositoryWritePort, StageFiles, SwitchBranch, UnstageFiles,
 };
 use gitsail_domain::{BranchName, CancellationToken, CommitHash, Repository};
 
@@ -59,6 +59,8 @@ pub enum Command {
     SwitchBranch(Repository, BranchName),
     CreateBranch(Repository, BranchName, Option<CommitHash>),
     DeleteBranch(Repository, BranchName, bool),
+    /// Renames a local branch (T-157/US-024).
+    RenameBranch(Repository, BranchName, BranchName),
     /// Loads local tags (US-050), tagged with the session generation active
     /// when it was requested, matching [`Self::LoadBranches`].
     LoadTags(u64, Repository),
@@ -164,6 +166,10 @@ fn spawn_one(
             }
             Command::DeleteBranch(repo, name, force) => {
                 let result = DeleteBranch::new(write_port).execute(&repo, &name, force);
+                Message::OperationFinished(result)
+            }
+            Command::RenameBranch(repo, old_name, new_name) => {
+                let result = RenameBranch::new(write_port).execute(&repo, &old_name, &new_name);
                 Message::OperationFinished(result)
             }
             Command::LoadTags(generation, repo) => {

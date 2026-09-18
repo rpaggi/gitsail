@@ -20,6 +20,12 @@ pub enum InputContext {
     Search,
     /// The new-branch name prompt is active (US-048).
     BranchName,
+    /// The rename-branch prompt is active, pre-filled with the branch's
+    /// previous name (T-157/US-024). Routes identically to
+    /// [`Self::BranchName`] here — [`crate::app::App`] is what tells the
+    /// two apart (whether a rename source is pending) and gives them
+    /// distinct meaning on `Enter`.
+    RenameBranch,
     /// The commit-message composer is active (US-047).
     CommitMessage,
     /// The commit-search box is active (`/` on the Graph panel, US-045
@@ -56,7 +62,7 @@ pub fn action_for(key: KeyEvent, ctx: InputContext) -> Option<Action> {
             KeyCode::Char(c) => Some(Action::SearchInput(c)),
             _ => None,
         },
-        InputContext::BranchName => match key.code {
+        InputContext::BranchName | InputContext::RenameBranch => match key.code {
             KeyCode::Esc => Some(Action::Dismiss),
             KeyCode::Enter => Some(Action::Activate),
             KeyCode::Backspace => Some(Action::BranchNameBackspace),
@@ -102,6 +108,7 @@ pub fn action_for(key: KeyEvent, ctx: InputContext) -> Option<Action> {
             KeyCode::Char('n') => Some(Action::StartCreateBranch),
             KeyCode::Char('c') => Some(Action::RequestCheckout),
             KeyCode::Char('d') => Some(Action::RequestDeleteBranch),
+            KeyCode::Char('R') => Some(Action::StartRenameBranch),
             KeyCode::Char('s') => Some(Action::ToggleStage),
             KeyCode::Char('C') => Some(Action::StartCommit),
             KeyCode::Char('y') => Some(Action::ExportPatch),
@@ -286,6 +293,34 @@ mod tests {
             action_for(press(KeyCode::Char('j')), InputContext::ReferenceDetails),
             None,
             "movement must not leak through the reference-details overlay"
+        );
+    }
+
+    #[test]
+    fn shift_r_starts_rename_branch_in_the_normal_context() {
+        assert_eq!(
+            action_for(press(KeyCode::Char('R')), InputContext::Normal),
+            Some(Action::StartRenameBranch)
+        );
+    }
+
+    #[test]
+    fn rename_branch_context_routes_exactly_like_branch_name() {
+        assert_eq!(
+            action_for(press(KeyCode::Char('a')), InputContext::RenameBranch),
+            Some(Action::BranchNameInput('a'))
+        );
+        assert_eq!(
+            action_for(press(KeyCode::Backspace), InputContext::RenameBranch),
+            Some(Action::BranchNameBackspace)
+        );
+        assert_eq!(
+            action_for(press(KeyCode::Enter), InputContext::RenameBranch),
+            Some(Action::Activate)
+        );
+        assert_eq!(
+            action_for(press(KeyCode::Esc), InputContext::RenameBranch),
+            Some(Action::Dismiss)
         );
     }
 

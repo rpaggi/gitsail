@@ -49,6 +49,11 @@ pub enum OperationKind {
     SwitchBranch { target: String },
     CreateBranch { name: String },
     DeleteBranch { name: String, force: bool },
+    /// T-157/US-024: `RepositoryWritePort::rename_branch`. Carries both
+    /// names so the confirmation prompt (and [`Self::target_label`]) always
+    /// names the exact source and destination, never a generic "rename a
+    /// branch".
+    RenameBranch { old_name: String, new_name: String },
     /// T-182/US-049: `RepositoryWritePort::fetch`. `Safe` per SAD §20's own
     /// named example — see [`Self::risk`].
     Fetch { remote: String },
@@ -91,6 +96,11 @@ impl OperationKind {
                     OperationRisk::Moderate
                 }
             }
+            // Mirrors `gitsail_application::MutationKind::RenameBranch`: a
+            // confirmed, non-destructive ref rename Git itself refuses to
+            // let collide with an existing branch (never overwritten,
+            // never forced) — the same tier `CreateBranch` already has.
+            OperationKind::RenameBranch { .. } => OperationRisk::Moderate,
             // Mirrors `gitsail_application::MutationKind`'s canonical
             // classification (SAD §20's own named examples: fetch is
             // explicitly `Safe`; a fast-forward-only pull and a plain,
@@ -116,6 +126,9 @@ impl OperationKind {
             OperationKind::SwitchBranch { target } => format!("branch '{target}'"),
             OperationKind::CreateBranch { name } => format!("branch '{name}'"),
             OperationKind::DeleteBranch { name, .. } => format!("branch '{name}'"),
+            OperationKind::RenameBranch { old_name, new_name } => {
+                format!("branch '{old_name}' to '{new_name}'")
+            }
             OperationKind::Fetch { remote } => format!("remote '{remote}'"),
             OperationKind::Pull { remote, branch } => {
                 format!("branch '{branch}' from remote '{remote}'")
@@ -235,6 +248,21 @@ mod tests {
             .risk(),
             OperationRisk::Moderate
         );
+    }
+
+    /// T-157/US-024: `RenameBranch` classifies `Moderate` and its label
+    /// names both the previous and new branch names, never a generic
+    /// "rename a branch".
+    #[test]
+    fn rename_branch_classifies_moderate_with_both_names_in_the_label() {
+        let kind = OperationKind::RenameBranch {
+            old_name: "old-name".into(),
+            new_name: "new-name".into(),
+        };
+        assert_eq!(kind.risk(), OperationRisk::Moderate);
+        let label = kind.target_label();
+        assert!(label.contains("old-name"));
+        assert!(label.contains("new-name"));
     }
 
     /// T-163/US-030: `ApplyPatch` classifies `Moderate` and its label names

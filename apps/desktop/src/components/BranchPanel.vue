@@ -11,6 +11,15 @@ import { useBranchesStore } from "../stores/branches";
 const branches = useBranchesStore();
 const newBranchName = ref("");
 
+// Rename (T-157/US-024): at most one branch is being renamed at a time,
+// identified by its *previous* name (`renamingBranch`); `renameInput` holds
+// the editable new name, pre-filled with the previous one so the field
+// always shows both — the previous name as the starting text, the new name
+// as whatever the person edits it to (criterion 1: "campo para nome
+// anterior e novo").
+const renamingBranch = ref<string | null>(null);
+const renameInput = ref("");
+
 function createBranch(): void {
   const name = newBranchName.value.trim();
   if (name.length === 0) {
@@ -18,6 +27,26 @@ function createBranch(): void {
   }
   void branches.requestCreate(name);
   newBranchName.value = "";
+}
+
+function startRename(name: string): void {
+  renamingBranch.value = name;
+  renameInput.value = name;
+}
+
+function cancelRename(): void {
+  renamingBranch.value = null;
+  renameInput.value = "";
+}
+
+function confirmRename(): void {
+  const oldName = renamingBranch.value;
+  const newName = renameInput.value.trim();
+  if (oldName === null || newName.length === 0) {
+    return;
+  }
+  void branches.requestRename(oldName, newName);
+  cancelRename();
 }
 
 onMounted(() => {
@@ -31,15 +60,31 @@ onMounted(() => {
     <p v-if="branches.lastError" class="error">{{ branches.lastError.message }}</p>
     <ul>
       <li v-for="branch in branches.branches" :key="branch.name" :class="{ current: branch.isCurrent }">
-        <span>{{ branch.name }}</span>
-        <span class="branch-panel__actions">
-          <button v-if="!branch.isCurrent" @click="branches.requestSwitch(branch.name)">
-            Switch
-          </button>
-          <button v-if="!branch.isCurrent" @click="branches.requestDelete(branch.name, false)">
-            Delete
-          </button>
-        </span>
+        <template v-if="renamingBranch === branch.name">
+          <input
+            v-model="renameInput"
+            type="text"
+            :placeholder="branch.name"
+            @keyup.enter="confirmRename"
+            @keyup.esc="cancelRename"
+          />
+          <span class="branch-panel__actions">
+            <button :disabled="renameInput.trim().length === 0" @click="confirmRename">Save</button>
+            <button @click="cancelRename">Cancel</button>
+          </span>
+        </template>
+        <template v-else>
+          <span>{{ branch.name }}</span>
+          <span class="branch-panel__actions">
+            <button v-if="!branch.isCurrent" @click="branches.requestSwitch(branch.name)">
+              Switch
+            </button>
+            <button @click="startRename(branch.name)">Rename</button>
+            <button v-if="!branch.isCurrent" @click="branches.requestDelete(branch.name, false)">
+              Delete
+            </button>
+          </span>
+        </template>
       </li>
     </ul>
     <div class="branch-panel__create">

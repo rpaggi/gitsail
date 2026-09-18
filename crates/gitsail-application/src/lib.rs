@@ -43,6 +43,6 @@ pub use write_ports::{
 pub use write_use_cases::{
     AmendCommit, ApplyPatch, ApplyStash, CreateBranch, CreateCommit, CreateStash, CreateTag,
     CreateWorktree, DeleteBranch, DeleteTag, DropStash, Fetch, ForcePushWithLease, PopStash,
-    PreviewPatchApplication, Pull, Push, RemoveWorktree, StageFiles, StageHunks, SwitchBranch,
-    UnstageFiles, UnstageHunks,
+    PreviewPatchApplication, Pull, Push, RemoveWorktree, RenameBranch, StageFiles, StageHunks,
+    SwitchBranch, UnstageFiles, UnstageHunks,
 };

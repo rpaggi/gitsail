@@ -95,6 +95,11 @@ pub enum MutationKind {
         name: String,
         force: bool,
     },
+    /// T-157/US-024: `RepositoryWritePort::rename_branch`.
+    RenameBranch {
+        old_name: String,
+        new_name: String,
+    },
     /// Rewrites `HEAD` in place (SAD §20's "history rewrite" category of
     /// destructive action, via `RepositoryWritePort::amend_commit`).
     AmendCommit,
@@ -195,6 +200,14 @@ impl MutationKind {
                     RiskLevel::Moderate
                 }
             }
+            // Renaming moves a ref/checkout-shaped identity, not content: no
+            // commit becomes unreachable, no working-tree/index state
+            // changes, and Git itself refuses a colliding name outright
+            // (never overwritten) — the same "confirmed, deliberate,
+            // non-destructive ref change" character `CreateBranch` already
+            // has, hence `Moderate` rather than `Destructive` (T-157/US-024
+            // task scope note).
+            MutationKind::RenameBranch { .. } => RiskLevel::Moderate,
             MutationKind::AmendCommit => RiskLevel::Destructive,
             // Creating a stash rewrites the working tree/index back to
             // `HEAD` (recoverably — the removed content is captured in the
@@ -289,6 +302,9 @@ impl MutationKind {
             MutationKind::SwitchBranch { target } => format!("branch '{target}'"),
             MutationKind::CreateBranch { name } => format!("branch '{name}'"),
             MutationKind::DeleteBranch { name, .. } => format!("branch '{name}'"),
+            MutationKind::RenameBranch { old_name, new_name } => {
+                format!("branch '{old_name}' to '{new_name}'")
+            }
             MutationKind::AmendCommit => "the current HEAD commit".to_string(),
             MutationKind::CreateStash => "a new stash entry".to_string(),
             MutationKind::ApplyStash { index } => format!("stash@{{{index}}}"),
@@ -574,6 +590,23 @@ mod tests {
             affected_file_count: 3,
         };
         assert_eq!(three_files.target_label(), "3 files affected by the patch");
+    }
+
+    /// T-157/US-024: `RenameBranch` classifies `Moderate` (a confirmed ref
+    /// rename Git itself refuses to let collide, not a destructive/
+    /// irreversible action) and its label names both the old and new name,
+    /// never a generic "rename a branch".
+    #[test]
+    fn rename_branch_classifies_moderate_with_both_names_in_the_label() {
+        let kind = MutationKind::RenameBranch {
+            old_name: "old-name".into(),
+            new_name: "new-name".into(),
+        };
+        assert_eq!(kind.risk(), RiskLevel::Moderate);
+        assert!(!kind.risk().requires_reinforced_confirmation());
+        let label = kind.target_label();
+        assert!(label.contains("old-name"));
+        assert!(label.contains("new-name"));
     }
 
     #[test]

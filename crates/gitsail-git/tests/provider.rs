@@ -3021,6 +3021,200 @@ fn delete_branch_refuses_unmerged_commits_without_force_but_allows_with_force() 
 }
 
 // ---------------------------------------------------------------------
+// Rename branch (T-157/US-024).
+// ---------------------------------------------------------------------
+
+#[test]
+fn rename_branch_renames_the_current_branch_and_keeps_it_current() {
+    let repo_dir = init_repo("rename-branch-current");
+    write_file(repo_dir.path(), "a.txt", "hello\n");
+    commit_all(repo_dir.path(), "first commit");
+    let commit_a = head_commit_hash(repo_dir.path());
+
+    let provider = provider();
+    let repo = provider.discover(repo_dir.path()).unwrap();
+
+    provider
+        .rename_branch(
+            &repo,
+            &BranchName::new("main").unwrap(),
+            &BranchName::new("renamed-main").unwrap(),
+        )
+        .expect("renaming the current branch should succeed");
+
+    let repo_after = provider.discover(repo_dir.path()).unwrap();
+    assert_eq!(
+        repo_after.current_branch.as_ref().map(BranchName::as_str),
+        Some("renamed-main"),
+        "the current branch must still be current, under its new name"
+    );
+
+    let branches = provider.branches(&repo_after).unwrap();
+    assert!(
+        !branches.iter().any(|b| b.name.as_str() == "main"),
+        "the old name must no longer exist"
+    );
+    let renamed = branches
+        .iter()
+        .find(|b| b.name.as_str() == "renamed-main")
+        .expect("the new name should be listed");
+    assert_eq!(renamed.target, commit_a);
+    assert!(renamed.is_current);
+}
+
+#[test]
+fn rename_branch_renames_a_branch_other_than_the_current_one() {
+    let repo_dir = init_repo("rename-branch-other");
+    write_file(repo_dir.path(), "a.txt", "hello\n");
+    commit_all(repo_dir.path(), "first commit");
+    let commit_a = head_commit_hash(repo_dir.path());
+    git(repo_dir.path(), &["branch", "feature"]);
+
+    let provider = provider();
+    let repo = provider.discover(repo_dir.path()).unwrap();
+
+    provider
+        .rename_branch(
+            &repo,
+            &BranchName::new("feature").unwrap(),
+            &BranchName::new("feature-renamed").unwrap(),
+        )
+        .expect("renaming a non-current branch should succeed");
+
+    let repo_after = provider.discover(repo_dir.path()).unwrap();
+    assert_eq!(
+        repo_after.current_branch.as_ref().map(BranchName::as_str),
+        Some("main"),
+        "renaming another branch must never change the current branch"
+    );
+    let branches = provider.branches(&repo_after).unwrap();
+    assert!(!branches.iter().any(|b| b.name.as_str() == "feature"));
+    let renamed = branches
+        .iter()
+        .find(|b| b.name.as_str() == "feature-renamed")
+        .expect("the new name should be listed");
+    assert_eq!(renamed.target, commit_a);
+    assert!(!renamed.is_current);
+}
+
+#[test]
+fn rename_branch_preserves_upstream_tracking_configuration() {
+    let remote_dir = init_bare_repo("rename-branch-upstream-remote");
+    let repo_dir = init_repo("rename-branch-upstream");
+    write_file(repo_dir.path(), "a.txt", "hello\n");
+    commit_all(repo_dir.path(), "first commit");
+    git(
+        repo_dir.path(),
+        &["remote", "add", "origin", remote_dir.path().to_str().unwrap()],
+    );
+    git(
+        repo_dir.path(),
+        &["push", "--quiet", "-u", "origin", "main"],
+    );
+
+    let provider = provider();
+    let repo = provider.discover(repo_dir.path()).unwrap();
+
+    provider
+        .rename_branch(
+            &repo,
+            &BranchName::new("main").unwrap(),
+            &BranchName::new("renamed-main").unwrap(),
+        )
+        .expect("renaming a branch with an upstream should succeed");
+
+    let repo_after = provider.discover(repo_dir.path()).unwrap();
+    let branches = provider.branches(&repo_after).unwrap();
+    let renamed = branches
+        .iter()
+        .find(|b| b.name.as_str() == "renamed-main")
+        .expect("the new name should be listed");
+    assert_eq!(
+        renamed.upstream.as_ref().map(BranchName::as_str),
+        Some("origin/main"),
+        "the upstream configured before the rename must still be visible after it"
+    );
+}
+
+#[test]
+fn rename_branch_rejects_a_colliding_new_name_without_overwriting_it() {
+    let repo_dir = init_repo("rename-branch-collision");
+    write_file(repo_dir.path(), "a.txt", "hello\n");
+    commit_all(repo_dir.path(), "first commit");
+    let commit_a = head_commit_hash(repo_dir.path());
+    git(repo_dir.path(), &["branch", "feature"]);
+    write_file(repo_dir.path(), "a.txt", "hello again\n");
+    commit_all(repo_dir.path(), "second commit");
+    let commit_b = head_commit_hash(repo_dir.path());
+
+    let provider = provider();
+    let repo = provider.discover(repo_dir.path()).unwrap();
+
+    let err = provider
+        .rename_branch(
+            &repo,
+            &BranchName::new("main").unwrap(),
+            &BranchName::new("feature").unwrap(),
+        )
+        .expect_err("must refuse to overwrite an existing branch with the new name");
+
+    assert_eq!(err.code(), ErrorCode::InvalidRepositoryState);
+    let branches = provider.branches(&repo).unwrap();
+    let feature = branches.iter().find(|b| b.name.as_str() == "feature").unwrap();
+    assert_eq!(
+        feature.target, commit_a,
+        "the colliding existing branch must still point at its original commit"
+    );
+    assert_eq!(
+        repo.current_branch.as_ref().map(BranchName::as_str),
+        Some("main"),
+        "a refused rename must leave the current branch's name untouched"
+    );
+    let _ = commit_b;
+}
+
+#[test]
+fn rename_branch_with_a_nonexistent_old_name_fails_clearly() {
+    let repo_dir = init_repo("rename-branch-nonexistent-old");
+    write_file(repo_dir.path(), "a.txt", "hello\n");
+    commit_all(repo_dir.path(), "first commit");
+
+    let provider = provider();
+    let repo = provider.discover(repo_dir.path()).unwrap();
+
+    let err = provider
+        .rename_branch(
+            &repo,
+            &BranchName::new("does-not-exist").unwrap(),
+            &BranchName::new("also-irrelevant").unwrap(),
+        )
+        .expect_err("renaming a branch that does not exist must fail");
+
+    assert_eq!(err.code(), ErrorCode::RepositoryNotFound);
+    let branches = provider.branches(&repo).unwrap();
+    assert!(!branches.iter().any(|b| b.name.as_str() == "also-irrelevant"));
+}
+
+#[test]
+fn rename_branch_with_a_flag_like_name_fails_without_renaming_anything() {
+    let repo_dir = init_repo("rename-branch-flag-like-name");
+    write_file(repo_dir.path(), "a.txt", "one\n");
+    commit_all(repo_dir.path(), "first commit");
+    git(repo_dir.path(), &["branch", "feature-a"]);
+
+    let provider = provider();
+    let repo = provider.discover(repo_dir.path()).unwrap();
+    let name = BranchName::new("-D").unwrap();
+
+    provider
+        .rename_branch(&repo, &name, &BranchName::new("safe-name").unwrap())
+        .expect_err("a flag-like rename source must never be accepted as a real option");
+
+    // The unrelated real branch must still exist under its original name.
+    assert!(git_output(repo_dir.path(), &["branch", "--list"]).contains("feature-a"));
+}
+
+// ---------------------------------------------------------------------
 // Patch export round-trip (US-029/T-162): `gitsail_application::export_patch`
 // renders a full `FileDiff` set (not just the hunks selected for staging),
 // but shares the exact same renderer `stage_hunks`/`unstage_hunks` already
