@@ -148,9 +148,12 @@ export const useMergeStore = defineStore("merge", {
   actions: {
     /** Re-reads whatever merge/rebase/cherry-pick/revert/bisect is
      * currently pending (T-230/US-078), never from cached/assumed state.
-     * Called after every mutation in this store, and should also be called
-     * once on repository open/focus alongside the rest of the session
-     * refresh. */
+     * Called after every mutation in this store, and also called from
+     * `stores/session.ts`'s `openRepository` (on open/restart) and
+     * `refreshStatus("focus")` (on regaining window focus) alongside the
+     * rest of the session refresh (T-234/US-082 criterion 2) — this store
+     * never registers its own open/focus listener, so there is exactly one
+     * place deciding when a re-detection happens. */
     async refreshInProgressOperation(): Promise<void> {
       this.isLoadingOperation = true;
       try {

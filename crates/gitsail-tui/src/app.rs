@@ -2779,6 +2779,24 @@ impl App {
         ]
     }
 
+    /// Handles the terminal regaining OS-level focus (`crossterm::event::
+    /// Event::FocusGained`, enabled by `terminal::init`) — the TUI's
+    /// counterpart to `apps/desktop`'s own window-focus refresh (T-234/
+    /// US-082 criterion 2). A no-op while no repository is open yet, exactly
+    /// like [`Self::refresh_commands_for`]'s own guard.
+    ///
+    /// Without this, switching away to run `git merge`/`git rebase` in
+    /// another terminal and back would leave the TUI showing whatever it
+    /// last loaded until the person either mutates something here or
+    /// presses the manual refresh key (`r`) themselves — this makes that
+    /// re-detection automatic, matching what already happens on open and
+    /// after every mutation, rather than depending on stale in-memory state
+    /// (T-230/US-078 criterion 2's own "never a cached/in-memory flag"
+    /// applies just as much to a refresh trigger as to the read itself).
+    pub fn on_focus_gained(&mut self) -> Vec<Command> {
+        self.refresh_commands_for(RefreshReason::Focus)
+    }
+
     // -- Background results ---------------------------------------------
 
     /// Handles [`crate::message::Message::RepositoryOpened`]: on success,
@@ -3781,6 +3799,47 @@ mod tests {
         );
 
         assert_eq!(app.view_phase(), ViewPhase::Empty);
+    }
+
+    #[test]
+    fn focus_gained_is_a_no_op_without_an_open_session() {
+        let (mut app, _port) = new_app();
+        assert!(app.on_focus_gained().is_empty());
+    }
+
+    #[test]
+    fn focus_gained_re_detects_the_in_progress_operation_alongside_the_rest_of_the_refresh() {
+        // T-234/US-082 criterion 2: regaining the terminal's OS-level focus
+        // must re-run the exact same refresh set `Action::Refresh` (the
+        // manual key) and a post-mutation refresh already run — including
+        // `LoadInProgressOperation`, so an operation started in another
+        // terminal while this one merely sat unfocused is picked up without
+        // requiring the person to press `r` themselves.
+        let (mut app, _port) = new_app();
+        app.on_repository_opened(Ok(sample_repository()));
+
+        let commands = app.on_focus_gained();
+
+        assert!(
+            matches!(
+                commands.as_slice(),
+                [
+                    Command::RefreshStatus(_, _),
+                    Command::LoadBranches(_, _),
+                    Command::LoadTags(_, _),
+                    Command::LoadRemotes(_, _),
+                    Command::LoadStashEntries(_, _),
+                    Command::LoadReflog(_, _),
+                    Command::LoadInProgressOperation(_, _),
+                ]
+            ),
+            "unexpected commands: {commands:?}"
+        );
+        let generation_after = app.session().unwrap().generation();
+        assert!(
+            matches!(commands.last(), Some(Command::LoadInProgressOperation(g, _)) if *g == generation_after),
+            "the in-progress-operation reload must be tagged with the session's new generation"
+        );
     }
 
     #[test]

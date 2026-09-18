@@ -25,7 +25,10 @@ const session = useRepositorySessionStore();
 // Refresh-on-window-focus (US-054 criterion 2): regaining focus refreshes
 // through the same shared `refreshStatus` action a manual click uses.
 // `refreshStatus` itself is a no-op when no repository is open yet, so
-// this is safe to register unconditionally.
+// this is safe to register unconditionally. `refreshStatus` itself also
+// re-detects the in-progress operation for a `"focus"` reason (T-234/
+// US-082 criterion 2) — see `stores/session.ts` — so this one call already
+// covers both.
 function handleFocus(): void {
   void session.refreshStatus("focus");
 }

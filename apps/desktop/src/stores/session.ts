@@ -27,6 +27,17 @@ import {
 } from "../services/repository";
 import { isErrorPayload, type ErrorPayload } from "../services/errors";
 import type { RepositoryDto, RepositoryStatusDto } from "../services/dto";
+// `stores/merge.ts` imports this module too (for `useRepositorySessionStore`
+// inside its own actions), so this is a circular import — safe here because
+// neither module touches the other's export at module-evaluation time, only
+// inside action bodies invoked well after both have finished loading (same
+// reasoning `stores/merge.ts`'s own import of this module already relies
+// on). Kept instead of routing through `App.vue`'s window-focus/open-repo
+// handlers so the in-progress-operation refresh lives in exactly one place
+// — importable by a store test with the same `mockIPC` harness every other
+// store test already uses, rather than only reachable by mounting the Vue
+// tree (T-234/US-082 criterion 2).
+import { useMergeStore } from "./merge";
 
 function toErrorPayload(error: unknown): ErrorPayload {
   return isErrorPayload(error) ? error : { code: "internal", message: String(error) };
@@ -82,6 +93,20 @@ export const useRepositorySessionStore = defineStore("repositorySession", {
         }
         this.repository = repository;
         await this.refreshStatus("manual", generation);
+        if (this.isCurrent(generation)) {
+          // Restart or a switch to a different repository must reconstruct
+          // *every* piece of state from real Git, never carry over
+          // whatever the previously open repository's session last showed
+          // (T-234/US-082 criterion 2) — the merge/rebase/cherry-pick/
+          // revert/bisect operation currently pending is exactly such a
+          // piece, and it has no other trigger of its own on open besides
+          // this one. Awaited (like `refreshStatus` above) so a caller that
+          // awaits `openRepository` always observes the merge store already
+          // reflecting the newly opened repository — `refreshInProgressOperation`
+          // never throws (it catches internally), so this cannot turn a
+          // successful open into a failure.
+          await useMergeStore().refreshInProgressOperation();
+        }
         return { status: "opened" };
       } catch (error) {
         const payload = toErrorPayload(error);
@@ -104,6 +129,19 @@ export const useRepositorySessionStore = defineStore("repositorySession", {
      * this one action, so there is exactly one status-reading code path —
      * none of them re-implements its own fetch.
      *
+     * A `"focus"` reason (regaining OS-level window focus — `App.vue`'s
+     * `handleFocus`) also re-detects the in-progress operation (T-234/
+     * US-082 criterion 2): restart or a change made from another terminal
+     * while this window sat unfocused must be picked up on the very next
+     * regained focus, never left depending on in-memory state until some
+     * unrelated mutation happens to run `refreshInProgressOperation`
+     * itself. `"manual"`/`"after_mutation"` don't repeat that here: a
+     * manual click's own component (`StatusPanel.vue`) isn't the merge
+     * UI, and every mutation that can change the pending operation already
+     * calls `refreshInProgressOperation` itself right after this refresh
+     * (`stores/merge.ts`), so doing it again here would only be a
+     * redundant read.
+     *
      * `expectedGeneration` defaults to the session's current generation;
      * `openRepository` passes the generation it captured so a switch that
      * happens mid-open is still honored (the chained refresh below is for
@@ -123,6 +161,13 @@ export const useRepositorySessionStore = defineStore("repositorySession", {
       }
       this.isRefreshing = true;
       try {
+        if (reason === "focus") {
+          // Awaited (not fire-and-forget) so a caller that awaits this
+          // `refreshStatus("focus")` call always observes both the status
+          // *and* the in-progress operation already reconstructed from
+          // real Git before it resolves.
+          await useMergeStore().refreshInProgressOperation();
+        }
         const status = await getRepositoryStatus(reason);
         if (this.isCurrent(generation)) {
           this.status = status;

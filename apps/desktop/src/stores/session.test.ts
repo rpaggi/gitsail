@@ -3,7 +3,8 @@ import { createPinia, setActivePinia } from "pinia";
 import { clearMocks, mockIPC } from "@tauri-apps/api/mocks";
 
 import { useRepositorySessionStore } from "./session";
-import type { RepositoryDto, RepositoryStatusDto } from "../services/dto";
+import { useMergeStore } from "./merge";
+import type { InProgressOperationDto, RepositoryDto, RepositoryStatusDto } from "../services/dto";
 
 function repo(rootPath: string): RepositoryDto {
   return {
@@ -22,6 +23,15 @@ function status(isClean: boolean): RepositoryStatusDto {
     headState: { state: "attached", branch: "main" },
     files: [],
     isClean,
+  };
+}
+
+function pendingMerge(): InProgressOperationDto {
+  return {
+    kind: "merge",
+    heads: ["a".repeat(40)],
+    conflictedFiles: [{ path: "f.txt", stage: "bothModified" }],
+    capabilities: ["continue", "abort"],
   };
 }
 
@@ -219,6 +229,72 @@ describe("repository session store", () => {
         store.status?.isClean,
         "a stale refresh for the old repository must never overwrite the new repository's status",
       ).toBe(false);
+    },
+  );
+
+  // -- T-234/US-082: re-detect the in-progress operation at the right times --
+
+  it(
+    "openRepository re-detects the in-progress operation for the newly opened repository " +
+      "(criterion 2: restart/reopen reconstructs state from real Git, never from memory)",
+    async () => {
+      mockIPC((cmd) => {
+        if (cmd === "open_repository") return repo("/repo");
+        if (cmd === "get_repository_status") return status(true);
+        if (cmd === "detect_in_progress_operation") return pendingMerge();
+        throw new Error(`unexpected command ${cmd}`);
+      });
+
+      const session = useRepositorySessionStore();
+      const merge = useMergeStore();
+      // Simulates the merge/rebase/cherry-pick UI having *not* independently
+      // detected anything yet — e.g. its own component hasn't mounted since
+      // the app started, or this is simply a stale in-memory leftover from
+      // whatever repository was open before.
+      expect(merge.inProgressOperation.kind).toBe("none");
+
+      const result = await session.openRepository("/repo");
+
+      expect(result).toEqual({ status: "opened" });
+      expect(merge.inProgressOperation.kind).toBe("merge");
+      expect(merge.hasConflicts).toBe(true);
+      expect(merge.supportsContinue).toBe(true);
+      expect(merge.supportsSkip).toBe(false);
+    },
+  );
+
+  it(
+    "refreshStatus(\"focus\") re-detects the in-progress operation, but " +
+      "refreshStatus(\"manual\") does not (T-234/US-082 criterion 2: regaining focus, " +
+      "not every refresh, is what must pick up a change made from another terminal)",
+    async () => {
+      mockIPC((cmd) => {
+        if (cmd === "open_repository") return repo("/repo");
+        if (cmd === "get_repository_status") return status(true);
+        if (cmd === "detect_in_progress_operation") return { kind: "none" } satisfies InProgressOperationDto;
+        throw new Error(`unexpected command ${cmd}`);
+      });
+      const session = useRepositorySessionStore();
+      const merge = useMergeStore();
+      await session.openRepository("/repo"); // consumes the initial detect call above
+
+      let detectCalls = 0;
+      mockIPC((cmd) => {
+        if (cmd === "get_repository_status") return status(true);
+        if (cmd === "detect_in_progress_operation") {
+          detectCalls += 1;
+          return pendingMerge();
+        }
+        throw new Error(`unexpected command ${cmd}`);
+      });
+
+      await session.refreshStatus("manual");
+      expect(detectCalls).toBe(0);
+      expect(merge.inProgressOperation.kind).toBe("none");
+
+      await session.refreshStatus("focus");
+      expect(detectCalls).toBe(1);
+      expect(merge.inProgressOperation.kind).toBe("merge");
     },
   );
 });

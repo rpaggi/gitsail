@@ -5,6 +5,7 @@
 
 use std::io::{self, Stdout};
 
+use crossterm::event::{DisableFocusChange, EnableFocusChange};
 use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -23,6 +24,14 @@ pub fn init() -> io::Result<Tui> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
+    // Enables `crossterm::event::Event::FocusGained`/`FocusLost` (T-234/
+    // US-082 criterion 2): regaining OS-level focus re-detects the
+    // in-progress operation and the rest of the refresh set, the same way
+    // `apps/desktop`'s window `focus` event already does. Best-effort — a
+    // terminal emulator that does not report focus changes simply never
+    // sends the event, and the person still has the manual refresh key
+    // (`r`) and the after-mutation/on-open refreshes as before.
+    execute!(stdout, EnableFocusChange)?;
 
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |panic_info| {
@@ -42,6 +51,6 @@ pub fn init() -> io::Result<Tui> {
 /// path was taken. Safe to call more than once.
 pub fn restore() -> io::Result<()> {
     disable_raw_mode()?;
-    execute!(io::stdout(), LeaveAlternateScreen)?;
+    execute!(io::stdout(), DisableFocusChange, LeaveAlternateScreen)?;
     Ok(())
 }

@@ -59,6 +59,30 @@ const expandedPath = ref<string | null>(null);
 
 const conflictedFiles = computed<ConflictedFileDto[]>(() => merge.conflictedFiles);
 
+/** Names which operation the conflicts below belong to (T-234/US-082
+ * criterion 1) — mirrors `gitsail_domain::InProgressOperation::kind_label`/
+ * `gitsail-tui`'s conflicts overlay ("{kind} — N conflicted file(s)")
+ * exactly, so switching between the TUI and this panel for the *same* Git
+ * state never shows a different operation identity or file count. `null`
+ * only while `merge.hasConflicts` is itself false, which already hides the
+ * section this labels. */
+const operationKindLabel = computed<string | null>(() => {
+  switch (merge.inProgressOperation.kind) {
+    case "merge":
+      return "Merge";
+    case "rebase":
+      return "Rebase";
+    case "cherryPick":
+      return "Cherry-pick";
+    case "revert":
+      return "Revert";
+    case "bisectRun":
+      return "Bisect";
+    case "none":
+      return null;
+  }
+});
+
 function stageLabel(stage: ConflictedFileDto["stage"]): string {
   switch (stage) {
     case "bothModified":
@@ -199,7 +223,7 @@ onMounted(() => {
     </p>
 
     <section v-if="merge.hasConflicts" class="merge-panel__conflicts">
-      <h4>Conflicted files ({{ conflictedFiles.length }})</h4>
+      <h4>{{ operationKindLabel }} — {{ conflictedFiles.length }} conflicted file{{ conflictedFiles.length === 1 ? "" : "s" }}</h4>
       <ul>
         <li v-for="file in conflictedFiles" :key="file.path" class="merge-panel__conflict">
           <div class="merge-panel__conflict-header">

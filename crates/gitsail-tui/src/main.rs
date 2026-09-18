@@ -122,6 +122,11 @@ fn run(
                 app.handle_resize(width, height);
                 Vec::new()
             }
+            // Regaining OS-level focus re-detects the in-progress operation
+            // and the rest of the refresh set (T-234/US-082 criterion 2),
+            // mirroring `apps/desktop`'s own window-focus refresh. Enabled
+            // by `terminal::init`'s `EnableFocusChange`.
+            Message::Term(crossterm::event::Event::FocusGained) => app.on_focus_gained(),
             Message::Term(_) => Vec::new(),
             Message::Tick => Vec::new(),
             Message::RepositoryOpened(result) => app.on_repository_opened(result),
