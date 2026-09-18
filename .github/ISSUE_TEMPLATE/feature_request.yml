@@ -1,0 +1,66 @@
+name: Feature request
+description: Propose a new capability or a change to existing behavior in GitSail.
+title: "[Feature] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        GitSail's roadmap is tracked as epics/user stories in
+        `docs/product/GitSail_Product_Backlog_v1.0.md` (Portuguese, the
+        product-planning source of truth) and mirrored as tasks in the
+        project's Takumi board. Check there first — your idea may already
+        be planned (with a target milestone and MoSCoW priority) or may
+        overlap with an existing, undelivered story.
+
+        **Never paste a token, password, or credential-bearing URL** in this
+        issue, including in any example output.
+
+  - type: input
+    id: related-story
+    attributes:
+      label: Related User Story / Epic (existing or proposed)
+      description: >
+        If this maps to an existing backlog entry, name it (e.g. `US-133`,
+        `EPIC-26`). If it's genuinely new, say "new" — a maintainer will
+        assign it a stable ID before it's accepted, per `CONTRIBUTING.md`'s
+        "Updating PRD/SAD/ADRs" rule (IDs are never reused or renumbered).
+      placeholder: "US-133 / EPIC-26 / new"
+    validations:
+      required: false
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What can't you do today, or what's awkward, and for whom (user, contributor, both)?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: >
+        What you'd like to see. If it affects the CLI's protocol
+        (`gitsail-protocol`) or crosses the Ports & Adapters boundary
+        (`docs/architecture/GitSail_SAD_and_ADRs_v0.1.md`, ADR-002), say so
+        — it may need an ADR, not just a code change.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Other approaches you thought about, and why you didn't propose them instead.
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: no-secrets
+    attributes:
+      label: Confirmation
+      options:
+        - label: I have redacted any token, password, credential-bearing URL, or other secret from everything I pasted above.
+          required: true

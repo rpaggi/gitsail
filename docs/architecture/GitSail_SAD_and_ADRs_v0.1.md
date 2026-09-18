@@ -5,6 +5,37 @@
 **Product:** GitSail  
 **Tagline:** *Navigate your Git history.*
 
+## ADR Index
+
+This document holds both the Software Architecture Document (§1–§38) and every Architecture Decision Record (after §38), in one file, by original design. This index exists so all 22 ADRs are accessible with their status from the top of the document, without scrolling past the SAD body first (T-264/US-131 criterion 2). All 22 are `Accepted`; none has been superseded or rejected as of this writing.
+
+| ADR | Title | Status | Summary |
+| --- | --- | --- | --- |
+| [ADR-001](#adr-001--rust-for-the-shared-core) | Rust for the shared core | Accepted | Use Rust for domain, application, Git infrastructure, protocol support, CLI and TUI. |
+| [ADR-002](#adr-002--ports--adapters-architecture) | Ports & Adapters architecture | Accepted | Domain, Application, Ports, Infrastructure Adapters and Presentation as separate layers. |
+| [ADR-003](#adr-003--git-cli-as-initial-git-provider) | Git CLI as initial Git provider | Accepted | Use the installed `git` executable through a dedicated adapter, not a native Git library. |
+| [ADR-004](#adr-004--monorepo) | Monorepo | Accepted | Keep GitSail components in one repository initially. |
+| [ADR-005](#adr-005--ratatui-for-tui) | Ratatui for TUI | Accepted | Use Ratatui for terminal rendering and interaction. |
+| [ADR-006](#adr-006--tauri--vue-3-for-desktop) | Tauri + Vue 3 for Desktop | Accepted | Tauri as desktop shell/backend integration, Vue 3 for the frontend. |
+| [ADR-007](#adr-007--typescript-for-vs-code-extension) | TypeScript for VS Code extension | Accepted | Implement the extension in TypeScript, consuming GitSail through a structured external boundary. |
+| [ADR-008](#adr-008--versioned-structured-protocol) | Versioned structured protocol | Accepted | Explicit versioned DTOs in `gitsail-protocol`; JSON as the initial serialization format. |
+| [ADR-009](#adr-009--separate-read-and-mutation-capabilities) | Separate read and mutation capabilities | Accepted | Separate read-oriented and mutation-oriented ports/use cases where practical. |
+| [ADR-010](#adr-010--gitsail-does-not-own-credentials) | GitSail does not own credentials | Accepted | Delegate Git transport credentials to Git/SSH/OS credential helpers; future forge tokens use secure OS storage. |
+| [ADR-011](#adr-011--graph-layout-separated-from-rendering) | Graph layout separated from rendering | Accepted | Implement graph semantics/layout independently of UI rendering. |
+| [ADR-012](#adr-012--cli-json-before-daemonipc) | CLI JSON before daemon/IPC | Accepted | Use CLI JSON as the first cross-process transport; revisit a local daemon/IPC later. |
+| [ADR-013](#adr-013--clap-for-cli-argument-parsing) | clap for CLI argument parsing | Accepted | `clap` (derive API) for `gitsail-cli`; usage errors keep clap's own exit code `2`, distinct from domain-error codes. |
+| [ADR-014](#adr-014--protocol-envelope-correlation-and-cursor-shape) | Protocol envelope, correlation and cursor shape | Accepted | `Envelope<T>` tagged by `status`, always carrying `schemaVersion` and `requestId`; opaque `nextCursor`/`hasMore` pagination. |
+| [ADR-015](#adr-015--vs-code-binary-distribution-for-v04) | VS Code binary distribution for v0.4 | Accepted | The extension discovers `gitsail`/`gitsail.exe` on `PATH` or an explicit setting, and verifies its version before use — no bundled binary. |
+| [ADR-016](#adr-016--protocol-compatibility-policy-and-contract-tests) | Protocol compatibility policy and contract tests | Accepted | `SCHEMA_VERSION` bump policy: bump only for a change an existing consumer could misinterpret; additive changes don't bump it. |
+| [ADR-017](#adr-017--tracing-for-structured-local-logging-with-centralized-redaction) | `tracing` for structured local logging, with centralized redaction | Accepted | Adopt `tracing` as the structured logging facade; one process-wide subscriber, stderr only, never raw stdout/stderr content. |
+| [ADR-018](#adr-018--local-first-privacy-telemetry-opt-in-and-crash-report-consent) | Local-first privacy: telemetry opt-in and crash-report consent | Accepted | GitSail v0.1–v1.0 sends no telemetry and no crash report, period; verified by the absence of any network client dependency. |
+| [ADR-019](#adr-019--per-repository-mutation-lock-keyed-by-the-real-git-common-directory) | Per-repository mutation lock, keyed by the real Git common directory | Accepted | `lock_key` resolves the real Git common directory (`git rev-parse --git-common-dir`), correct across linked worktrees. |
+| [ADR-020](#adr-020--generic-generation-guarded-cache-performance-budgets-are-measured-never-invented) | Generic generation-guarded cache; performance budgets are measured, never invented | Accepted | `GenerationCache<K, V>` factors out a reusable, bounded, generation-guarded cache pattern; `GraphCache` is its first new consumer. |
+| [ADR-021](#adr-021--license-minimum-git-version-rust-msrv-repository-identity-and-pre-10-versioning) | License, minimum Git version, Rust MSRV, repository identity and pre-1.0 versioning | Accepted | Apache License 2.0; minimum Git 2.31; Rust MSRV 1.97.0; repository `rpaggi/gitsail`; Cargo crate versions stay `0.0.0` pre-1.0. |
+| [ADR-022](#adr-022--multi-platform-ci-and-architectural-fitness-functions) | Multi-platform CI and architectural fitness functions | Accepted | `.github/workflows/ci.yml`'s five jobs (`rust` matrix, `desktop`, `vscode`, `architecture-fitness`, `dependency-audit`) and what each one checks. |
+
+**On ever splitting this document:** if the SAD and its ADRs are ever separated into different files (e.g. one file per ADR, or a `docs/architecture/adrs/` directory), the original text of every section and every ADR must be preserved verbatim, and ADR numbers must not be reassigned or reused — see `CONTRIBUTING.md`'s "Updating PRD/SAD/ADRs" section for the exact rule this index exists to keep enforceable. Nothing about that split needs to happen now; this paragraph only documents that the door stays open.
+
 ## 1. Purpose
 
 This document defines the initial software architecture for GitSail: an open-source Git client ecosystem composed of a shared Rust core, a keyboard-first TUI, a Tauri/Vue desktop application, and a Visual Studio Code extension focused initially on blame and history.

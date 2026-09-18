@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Project backlog and architecture decisions
+    url: https://github.com/rpaggi/gitsail/blob/main/docs/product/GitSail_Product_Backlog_v1.0.md
+    about: Check the backlog (epics/user stories) and the SAD/ADR index before filing, in case this is already planned or already decided.
+  - name: Contribution and setup guide
+    url: https://github.com/rpaggi/gitsail/blob/main/CONTRIBUTING.md
+    about: Build/test setup, architecture boundaries, and the review process.

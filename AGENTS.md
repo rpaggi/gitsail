@@ -17,6 +17,7 @@ The canonical installed skills live under `.agents/skills/`. They are imported f
 
 ## Architecture and workflow
 
+- `CONTRIBUTING.md` is the canonical setup/test/review process (build and test commands, Ports & Adapters boundaries, the PR/issue templates under `.github/`, and the process for updating the PRD/SAD/ADRs without reusing or renumbering an ID). Follow it for any change that will be reviewed as a pull request.
 - Read the applicable document under `docs/architecture/` and `docs/product/` before changing product behavior.
 - Preserve the accepted architecture: Rust shared core, Ports & Adapters boundaries, and Git CLI as the initial provider.
 - Keep dependency direction inward. Domain code must not depend on infrastructure or presentation code.

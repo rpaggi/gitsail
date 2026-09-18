@@ -1,0 +1,92 @@
+name: Bug report
+description: Something in GitSail (CLI, TUI, Desktop, or the VS Code extension) doesn't behave as documented.
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug. See `CONTRIBUTING.md` for how the project
+        is organized before filing, if you haven't already.
+
+        **Never paste a token, password, credential-bearing URL, or private
+        repository content you don't intend to make public.** Redact it
+        first — this applies to command output, screenshots, and log/debug
+        output alike (`--debug` output is redacted of obvious secrets, but
+        redaction is best-effort, not a guarantee).
+
+  - type: input
+    id: related-story
+    attributes:
+      label: Related User Story / Epic / Task (if known)
+      description: >
+        e.g. `US-037`, `EPIC-08`, or a Takumi task code like `T-168`. See
+        `docs/product/GitSail_Product_Backlog_v1.0.md` for the backlog if
+        you're not sure which area this falls under. Leave blank if this is
+        a new problem with no existing backlog entry.
+      placeholder: "US-037 / EPIC-08 / T-168"
+    validations:
+      required: false
+
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened
+      description: A clear description of the bug and what you expected instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      description: >
+        Exact commands and, if practical, a minimal repository/fixture that
+        reproduces this (not a link to a private or sensitive repository —
+        describe its shape instead, or attach a small disposable example).
+      placeholder: |
+        1. `gitsail --repo <path> <command> ...`
+        2. ...
+        3. ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected-vs-actual
+    attributes:
+      label: Expected vs. actual output
+      description: >
+        Paste the actual command output (human and/or `--json`), with any
+        secret/credential/private-path content redacted, plus what you
+        expected instead.
+    validations:
+      required: true
+
+  - type: input
+    id: component
+    attributes:
+      label: Component
+      description: Which interface/crate does this affect?
+      placeholder: "gitsail-cli / gitsail-tui / apps/desktop / apps/vscode / gitsail-git / other"
+    validations:
+      required: false
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, `gitsail --version`, `git --version`, and (for Desktop/VS Code) the app/extension version.
+      placeholder: |
+        OS: Linux / Windows / macOS (version)
+        gitsail --version:
+        git --version:
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: no-secrets
+    attributes:
+      label: Confirmation
+      options:
+        - label: I have redacted any token, password, credential-bearing URL, or other secret from everything I pasted above.
+          required: true
