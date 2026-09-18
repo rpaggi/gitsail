@@ -7,11 +7,13 @@
 
 #![forbid(unsafe_code)]
 
+pub mod compat;
 pub mod dto;
 pub mod envelope;
 pub mod error;
 pub mod request_id;
 
+pub use compat::{parse_envelope, EnvelopeDecodeError, SUPPORTED_SCHEMA_VERSIONS};
 pub use dto::{
     BlameDto, BlameLineDto, BlameOriginDto, BranchDto, BranchKindDto, ChangeTypeDto, CommitDto,
     CommitGraphPageDto, CommitGraphRowDto, DecorationDto, DiffDto, DiffHunkDto, DiffLineDto,

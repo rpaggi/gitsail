@@ -10,8 +10,53 @@ use serde::{Deserialize, Serialize};
 use crate::error::ErrorPayload;
 use crate::request_id::RequestId;
 
-/// The schema version this crate currently produces. A breaking change to
-/// any DTO or envelope shape must increment this (SAD §14, US-039).
+/// The schema version this crate currently produces (SAD §14; ADR-014;
+/// ADR-016; US-039).
+///
+/// # Compatibility policy
+///
+/// This is the single number every consumer (the CLI's own `--json`
+/// output, `apps/vscode/src/protocol.ts`'s `SUPPORTED_SCHEMA_VERSIONS`, and
+/// any future daemon/IPC transport per ADR-012) checks before trusting the
+/// shape of `data`/`error`. The full matrix of which component supports
+/// which version in which release lives in
+/// `docs/architecture/protocol-compatibility.md` — update it whenever this
+/// constant changes.
+///
+/// **Increment `SCHEMA_VERSION` when a change could make an unmodified
+/// existing consumer misinterpret bytes it receives**, for example:
+/// - Removing or renaming an existing struct field, enum variant, or
+///   `#[serde(tag/rename/rename_all)]` value.
+/// - Changing an existing field's type or unit (e.g. seconds to
+///   milliseconds) without renaming it.
+/// - Changing how an enum is tagged (internally/externally/adjacently) or
+///   how `Envelope`/`Page` themselves are shaped.
+/// - Adding a new variant to an already-shipped DTO enum. Serde's derived
+///   `Deserialize` fails closed on an unrecognized tag (none of these enums
+///   use `#[serde(other)]`), so a strict Rust consumer on an older
+///   `gitsail-protocol` breaks the moment it sees the new variant — this is
+///   a breaking change even though it looks additive.
+///
+/// **Do not increment it** for a genuinely additive change an existing
+/// consumer already tolerates:
+/// - Adding a new optional struct field (serde ignores unknown JSON keys by
+///   default on the way in, and `skip_serializing_if` keeps it out of the
+///   wire format on the way out when absent).
+/// - Adding an entirely new DTO type, command, or `Output` variant that no
+///   existing consumer path decodes yet.
+///
+/// When genuinely unsure which bucket a change falls into, increment it:
+/// this constant is cheap to bump and expensive to get wrong, per SAD
+/// §14's "breaking protocol changes require a new schema version."
+///
+/// `crates/gitsail-protocol/tests/compatibility.rs` pins the exact wire
+/// shape of representative DTOs (one covering each `#[serde(...)]` pattern
+/// used in `dto.rs`) against checked-in JSON. It exists specifically so
+/// that changing a DTO's wire shape fails a test right here, forcing the
+/// author to consciously apply this policy — bump `SCHEMA_VERSION` and
+/// update the fixture, or confirm the change is additive and only update
+/// the fixture — rather than letting an incompatible shape slip out
+/// unnoticed.
 pub const SCHEMA_VERSION: u32 = 1;
 
 /// A versioned, correlated response: either successful `data`, or an

@@ -1,0 +1,10 @@
+{
+  "status": "error",
+  "schemaVersion": 1,
+  "requestId": "req-fixture-error-v1",
+  "error": {
+    "code": "repository_not_found",
+    "message": "not a Git repository",
+    "remediation": "run gitsail inside a Git repository, or pass --repo"
+  }
+}

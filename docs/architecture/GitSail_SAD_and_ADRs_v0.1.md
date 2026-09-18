@@ -321,6 +321,7 @@ Rules:
 - Protocol DTOs map explicitly to/from application/domain models.
 - Breaking protocol changes require a new schema version.
 - Errors use the same envelope concept.
+- The exact increment policy, the per-component supported-version matrix, and the compatibility test fixtures are ADR-016 and `docs/architecture/protocol-compatibility.md`.
 
 ## 15. Initial CLI protocol
 
@@ -965,6 +966,22 @@ For v0.4, the VS Code extension does not bundle a `gitsail-cli` binary. It disco
 
 ### Consequences
 Users must install `gitsail` themselves before the extension is useful — a real onboarding cost, documented in `apps/vscode/README.md`. In exchange, the extension never silently trusts or executes a binary of unknown origin. This decision is revisited once EPIC-25 defines a signed-artifact pipeline the extension can safely embed per platform.
+
+## ADR-016 — Protocol compatibility policy and contract tests
+
+**Status:** Accepted
+
+### Context
+ADR-014 fixed the envelope's JSON shape and named `schemaVersion` as the mechanism for a future breaking change, but left "when exactly must `SCHEMA_VERSION` increment" and "how is that enforced" as prose rather than a checked policy (US-039). The VS Code extension (US-069/ADR-015-era work) already implemented a strict consumer-side guard — `apps/vscode/src/protocol.ts`'s `parseEnvelope` rejects an unrecognized `schemaVersion` before ever reading `data`/`error` — but nothing on the Rust producer side had an equivalent, testable guard, and no document recorded which component supports which `schemaVersion` for a given release.
+
+### Decision
+1. `gitsail_protocol::SCHEMA_VERSION`'s doc comment (`crates/gitsail-protocol/src/envelope.rs`) states the increment policy explicitly: bump it for any change an unmodified existing consumer could misinterpret (field/variant rename or removal, type change, re-tagging, or — because these DTO enums use no `#[serde(other)]` fallback — adding a new variant to an already-shipped enum); do not bump it for a genuinely additive change (new optional field, new DTO type) existing consumers already tolerate by ignoring unknown JSON keys.
+2. `crates/gitsail-protocol/tests/dto_wire_shape.rs` pins the exact serialized shape of one representative DTO per `#[serde(...)]` pattern in use, so a silent wire-shape change (e.g. dropping a `rename_all`, changing a `tag`) fails a test at the point of change rather than shipping unnoticed — forcing whoever touches a DTO to consciously apply policy 1.
+3. `gitsail_protocol::compat` (`parse_envelope`, `SUPPORTED_SCHEMA_VERSIONS`, `EnvelopeDecodeError`) gives Rust the same two-phase, reject-before-reading-`data` guard `protocol.ts` already has, for any future Rust consumer that crosses an independently-versioned process boundary (a daemon/IPC transport per ADR-012's "open" item). Today's in-process Rust consumers (TUI, Desktop) do not call it: neither crosses such a boundary — see `docs/architecture/protocol-compatibility.md`'s evaluation.
+4. `docs/architecture/protocol-compatibility.md` records, per release, which `schemaVersion`(s) each component (`gitsail-cli`, VS Code, TUI, Desktop) supports, and points at the fixtures in `docs/architecture/fixtures/protocol-compatibility/` shared by the Rust (`crates/gitsail-protocol/tests/compatibility.rs`, `crates/gitsail-cli/tests/protocol_compatibility.rs`) and TypeScript (`apps/vscode/test/protocolCompatibility.test.ts`) compatibility suites, including one real-producer/real-consumer end-to-end test and one hypothetical-incompatible-version rejection test.
+
+### Consequences
+Changing a DTO's wire shape now fails a fast, local test instead of only surfacing when a mismatched client/CLI pair meets in the field. The matrix and fixtures are release artifacts a maintainer updates deliberately (documented in the matrix's own "when this table must change" section) rather than being inferred after the fact. No actual schema change ships with this decision — `SCHEMA_VERSION` stays `1`; the hypothetical incompatible fixture (`unsupported-v2.json`) is explicitly synthetic, invented only to exercise the rejection path.
 
 # 39. Open architecture decisions
 

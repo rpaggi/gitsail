@@ -1,0 +1,26 @@
+{
+  "status": "ok",
+  "schemaVersion": 1,
+  "requestId": "req-fixture-ok-v1",
+  "data": {
+    "branch": "main",
+    "headState": { "state": "attached", "branch": "main" },
+    "files": [
+      {
+        "path": "README.md",
+        "previousPath": null,
+        "changeType": "modified",
+        "indexStatus": "unmodified",
+        "worktreeStatus": "modified"
+      },
+      {
+        "path": "staged.txt",
+        "previousPath": null,
+        "changeType": "added",
+        "indexStatus": "added",
+        "worktreeStatus": "unmodified"
+      }
+    ],
+    "isClean": false
+  }
+}

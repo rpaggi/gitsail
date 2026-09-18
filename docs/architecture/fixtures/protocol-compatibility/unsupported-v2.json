@@ -1,0 +1,8 @@
+{
+  "schemaVersion": 2,
+  "ok": true,
+  "requestId": "req-fixture-hypothetical-v2",
+  "result": {
+    "isClean": false
+  }
+}
