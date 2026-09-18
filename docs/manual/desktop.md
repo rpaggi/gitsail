@@ -99,6 +99,19 @@ switching tabs.
   selects the same commit in the graph. A selected commit result offers
   "Copy hash" and "Branch here…".
 - **Theme**: Dark/Light toggle buttons in the sidebar's Settings section.
+- **Update checking** (T-260/US-127): the sidebar's Settings → "Updates"
+  section. Checks automatically on launch (at most once every 24 hours —
+  disableable via the "Check automatically" toggle) and always immediately
+  on an explicit "Check for updates" click. When GitHub's latest release is
+  newer than this build, shows its version, a link to the Release page, and
+  a link to its `SHA256SUMS.txt`; download and installation are always
+  manual — GitSail never fetches or runs an installer itself. A network
+  failure or unparseable response shows "could not check for updates"
+  rather than crashing, and you can try again any time. See
+  `docs/architecture/update-mechanism.md` for the full design and
+  `troubleshooting.md`'s "Updates" section for what CLI/TUI/VS Code do not
+  have (no update check at all — check
+  https://github.com/rpaggi/gitsail/releases yourself for those).
 
 ## Advanced operations
 

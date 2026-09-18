@@ -66,9 +66,39 @@ pub enum ThemePreference {
 /// app-only state: never Git configuration, never written to
 /// `.git/config` (criterion 2), and — as of v0.3 — never scoped per
 /// repository (see this module's own doc for why).
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+///
+/// `check_for_updates`/`last_update_check_unix` (T-260/US-127) follow the
+/// same "app-only, never Git config" rule: whether/when GitSail last asked
+/// GitHub for its latest release is purely local UI state, never written
+/// anywhere Git itself reads. Not `#[derive(Default)]`: `check_for_updates`
+/// must default to `true` (checking is on by default, but always
+/// switchable off — see `gitsail_application::update_check`'s own doc
+/// comment on why this is never an unsolicited network call), which a
+/// derived `Default` (`bool::default() == false`) would get backwards.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Preferences {
     pub theme: ThemePreference,
+    /// Whether an *automatic* update check may ever run (T-260/US-127).
+    /// Always overridable — this is the "always possible to disable via a
+    /// preference" control the automatic-network-call convention requires.
+    /// Never gates a manual "check for updates now" action.
+    pub check_for_updates: bool,
+    /// Unix seconds of the last real update-check attempt (successful or
+    /// not), or `None` before the first one ever runs. Used only to
+    /// throttle *automatic* checks (`gitsail_application::update_check`'s
+    /// `ONE_DAY_SECONDS` window) — a manual check always bypasses this, but
+    /// still advances it.
+    pub last_update_check_unix: Option<u64>,
+}
+
+impl Default for Preferences {
+    fn default() -> Self {
+        Self {
+            theme: ThemePreference::default(),
+            check_for_updates: true,
+            last_update_check_unix: None,
+        }
+    }
 }
 
 /// The result of loading [`Preferences`] from storage: always a usable
@@ -173,6 +203,27 @@ impl SetThemePreference {
     }
 }
 
+/// Updates just [`Preferences::check_for_updates`] (T-260/US-127's
+/// mandatory "always possible to disable via a preference" control),
+/// preserving every other field — the same "load, mutate one field, save"
+/// shape [`SetThemePreference`] already establishes.
+pub struct SetCheckForUpdatesPreference {
+    port: Arc<dyn PreferencesPort>,
+}
+
+impl SetCheckForUpdatesPreference {
+    pub fn new(port: Arc<dyn PreferencesPort>) -> Self {
+        Self { port }
+    }
+
+    pub fn execute(&self, check_for_updates: bool) -> Result<Preferences, GitSailError> {
+        let mut preferences = self.port.load()?.preferences;
+        preferences.check_for_updates = check_for_updates;
+        self.port.save(&preferences)?;
+        Ok(preferences)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -211,6 +262,16 @@ mod tests {
     }
 
     #[test]
+    fn check_for_updates_defaults_to_on_with_no_check_ever_recorded_yet() {
+        let defaults = Preferences::default();
+        assert!(
+            defaults.check_for_updates,
+            "checking is on by default, but always switchable off (T-260/US-127)"
+        );
+        assert_eq!(defaults.last_update_check_unix, None);
+    }
+
+    #[test]
     fn loading_with_nothing_ever_saved_returns_clean_defaults() {
         let port: Arc<dyn PreferencesPort> = Arc::new(InMemoryPreferences::new());
 
@@ -225,6 +286,7 @@ mod tests {
         let port: Arc<dyn PreferencesPort> = Arc::new(InMemoryPreferences::new());
         let saved = Preferences {
             theme: ThemePreference::Dark,
+            ..Preferences::default()
         };
 
         SavePreferences::new(port.clone()).execute(&saved).unwrap();
@@ -250,6 +312,32 @@ mod tests {
                 .preferences
                 .theme,
             ThemePreference::Light
+        );
+    }
+
+    #[test]
+    fn set_check_for_updates_preference_persists_only_that_field() {
+        let port: Arc<dyn PreferencesPort> = Arc::new(InMemoryPreferences::new());
+        SetThemePreference::new(port.clone())
+            .execute(ThemePreference::Dark)
+            .unwrap();
+
+        let updated = SetCheckForUpdatesPreference::new(port.clone())
+            .execute(false)
+            .unwrap();
+
+        assert!(!updated.check_for_updates);
+        assert_eq!(
+            updated.theme,
+            ThemePreference::Dark,
+            "toggling the update-check preference must never disturb the theme"
+        );
+        assert!(
+            !LoadPreferences::new(port)
+                .execute()
+                .unwrap()
+                .preferences
+                .check_for_updates
         );
     }
 

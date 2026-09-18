@@ -16,8 +16,8 @@ use gitsail_application::{
     AmendPreview, ApplyPatchResult, CherryPickResult, CommitDiff, ForgeAccountId,
     ForgeConnectionStatus, ListPullRequestsOutcome, MergeResult, PatchExport, PatchPreview,
     Preferences, PullOutcome, PullRequestPage, PullRequestState, PullRequestSummary, RebaseAction,
-    RebasePlan, RebasePlanEntry, RebaseResult, RecentRepositoryEntry, RevertResult,
-    ThemePreference,
+    RebasePlan, RebasePlanEntry, RebaseResult, RecentRepositoryEntry, ReleaseInfo, RevertResult,
+    SkipReason, ThemePreference, UpdateCheckOutcome,
 };
 use gitsail_domain::{
     Blame, BlameLine, BlameOrigin, Branch, BranchKind, BranchName, ChangeType, Commit, CommitHash,
@@ -1843,6 +1843,10 @@ impl From<ThemePreferenceDto> for ThemePreference {
 #[serde(rename_all = "camelCase")]
 pub struct PreferencesDto {
     pub theme: ThemePreferenceDto,
+    /// Whether an automatic update check may run (T-260/US-127). Always
+    /// present (never optional): a frontend settings toggle needs this on
+    /// every load, not just after the first time someone changes it.
+    pub check_for_updates: bool,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub diagnostic: Option<crate::error::ErrorPayload>,
 }
@@ -1851,7 +1855,134 @@ impl From<&Preferences> for PreferencesDto {
     fn from(preferences: &Preferences) -> Self {
         Self {
             theme: preferences.theme.into(),
+            check_for_updates: preferences.check_for_updates,
             diagnostic: None,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------
+// T-260/US-127: desktop update checking. See
+// `gitsail_application::update_check`'s own module doc for the full
+// "check-only, never an auto-installer" rationale ADR-023 requires — these
+// DTOs carry exactly what that module's `ReleaseInfo`/`UpdateCheckOutcome`
+// already model, nothing more (in particular: no "download"/"install"
+// action exists anywhere in this protocol).
+// ---------------------------------------------------------------------
+
+/// [`ReleaseInfo`] over the wire — US-127 criterion 1's "version, origin,
+/// integrity material": `tag`/`html_url` are the version and its
+/// independently verifiable origin (the GitHub Release page itself);
+/// `checksums_url` is the `SHA256SUMS.txt` a person downloading manually
+/// can check a file against. `html_url`/`checksums_url`/`notes` are
+/// forge-authored content — see this module's own `PullRequestSummaryDto`
+/// precedent: a presentation layer must never render `notes` as active
+/// Markdown/HTML, only as inert text, and must never open `html_url`/
+/// `checksums_url` without going through `open_update_link` (which
+/// re-validates the host before ever spawning a browser — see
+/// `apps/desktop/src-tauri/src/commands.rs`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReleaseInfoDto {
+    pub tag: String,
+    pub html_url: String,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub checksums_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub notes: Option<String>,
+}
+
+impl From<&ReleaseInfo> for ReleaseInfoDto {
+    fn from(release: &ReleaseInfo) -> Self {
+        Self {
+            tag: release.tag.clone(),
+            html_url: release.html_url.clone(),
+            checksums_url: release.checksums_url.clone(),
+            notes: release.notes.clone(),
+        }
+    }
+}
+
+/// Why no network call happened this time ([`SkipReason`] over the wire).
+/// A nested `kind` tag (rather than reusing the outer `state`/`reason`
+/// field name) so a TypeScript consumer's discriminated union stays
+/// unambiguous even though this is itself nested inside
+/// [`UpdateCheckOutcomeDto::Skipped`]'s own `reason` field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum SkipReasonDto {
+    Disabled,
+    CheckedRecently {
+        #[serde(rename = "nextCheckAfterUnix")]
+        next_check_after_unix: u64,
+    },
+}
+
+impl From<SkipReason> for SkipReasonDto {
+    fn from(reason: SkipReason) -> Self {
+        match reason {
+            SkipReason::Disabled => Self::Disabled,
+            SkipReason::CheckedRecently {
+                next_check_after_unix,
+            } => Self::CheckedRecently {
+                next_check_after_unix,
+            },
+        }
+    }
+}
+
+/// Every state [`UpdateCheckOutcome`] defines, tagged the same
+/// "discriminated union" way [`ListPullRequestsOutcomeDto`] already
+/// establishes (US-127 DoD: a valid update, a malformed response, and an
+/// offline/timeout interruption must each render distinctly, never
+/// collapsed into one ambiguous shape).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "camelCase")]
+pub enum UpdateCheckOutcomeDto {
+    Skipped {
+        reason: SkipReasonDto,
+    },
+    NoReleasesPublished,
+    UpToDate {
+        #[serde(rename = "currentTag")]
+        current_tag: String,
+    },
+    UpdateAvailable {
+        #[serde(rename = "currentTag")]
+        current_tag: String,
+        release: ReleaseInfoDto,
+    },
+    CannotDetermineCurrentVersion {
+        release: ReleaseInfoDto,
+    },
+    CheckFailed {
+        error: crate::error::ErrorPayload,
+    },
+}
+
+impl From<UpdateCheckOutcome> for UpdateCheckOutcomeDto {
+    fn from(outcome: UpdateCheckOutcome) -> Self {
+        match outcome {
+            UpdateCheckOutcome::Skipped(reason) => Self::Skipped {
+                reason: reason.into(),
+            },
+            UpdateCheckOutcome::NoReleasesPublished => Self::NoReleasesPublished,
+            UpdateCheckOutcome::UpToDate { current_tag } => Self::UpToDate { current_tag },
+            UpdateCheckOutcome::UpdateAvailable {
+                current_tag,
+                release,
+            } => Self::UpdateAvailable {
+                current_tag,
+                release: ReleaseInfoDto::from(&release),
+            },
+            UpdateCheckOutcome::CannotDetermineCurrentVersion { release } => {
+                Self::CannotDetermineCurrentVersion {
+                    release: ReleaseInfoDto::from(&release),
+                }
+            }
+            UpdateCheckOutcome::CheckFailed { diagnostic } => Self::CheckFailed {
+                error: crate::error::ErrorPayload::from(&diagnostic),
+            },
         }
     }
 }
@@ -2878,13 +3009,16 @@ mod tests {
     fn preferences_dto_omits_a_none_diagnostic_and_carries_a_some_one() {
         let clean = PreferencesDto::from(&Preferences {
             theme: ThemePreference::Dark,
+            ..Preferences::default()
         });
         let json = serde_json::to_value(&clean).unwrap();
         assert_eq!(json["theme"], "dark");
+        assert_eq!(json["checkForUpdates"], true);
         assert!(json.get("diagnostic").is_none());
 
         let with_diagnostic = PreferencesDto {
             theme: ThemePreferenceDto::Dark,
+            check_for_updates: false,
             diagnostic: Some(crate::error::ErrorPayload::from(
                 &gitsail_domain::GitSailError::new(
                     gitsail_domain::ErrorCode::ParseFailure,
@@ -2893,6 +3027,101 @@ mod tests {
             )),
         };
         let json = serde_json::to_value(&with_diagnostic).unwrap();
+        assert_eq!(json["checkForUpdates"], false);
         assert!(json.get("diagnostic").is_some());
+    }
+
+    // -- T-260/US-127: update-check DTOs ------------------------------------
+
+    fn sample_release() -> ReleaseInfo {
+        ReleaseInfo {
+            tag: "v0.5.0".to_string(),
+            html_url: "https://github.com/rpaggi/gitsail/releases/tag/v0.5.0".to_string(),
+            checksums_url: Some(
+                "https://github.com/rpaggi/gitsail/releases/download/v0.5.0/SHA256SUMS.txt"
+                    .to_string(),
+            ),
+            notes: Some("notes".to_string()),
+        }
+    }
+
+    #[test]
+    fn update_available_dto_carries_the_current_tag_and_release_camel_cased() {
+        let dto = UpdateCheckOutcomeDto::from(UpdateCheckOutcome::UpdateAvailable {
+            current_tag: "v0.4.0".to_string(),
+            release: sample_release(),
+        });
+        let json = serde_json::to_value(&dto).unwrap();
+
+        assert_eq!(json["state"], "updateAvailable");
+        assert_eq!(json["currentTag"], "v0.4.0");
+        assert_eq!(json["release"]["tag"], "v0.5.0");
+        assert_eq!(
+            json["release"]["checksumsUrl"],
+            "https://github.com/rpaggi/gitsail/releases/download/v0.5.0/SHA256SUMS.txt"
+        );
+    }
+
+    #[test]
+    fn up_to_date_dto_has_no_release_field_at_all() {
+        let dto = UpdateCheckOutcomeDto::from(UpdateCheckOutcome::UpToDate {
+            current_tag: "v0.5.0".to_string(),
+        });
+        let json = serde_json::to_value(&dto).unwrap();
+
+        assert_eq!(json["state"], "upToDate");
+        assert_eq!(json["currentTag"], "v0.5.0");
+        assert!(json.get("release").is_none());
+    }
+
+    #[test]
+    fn cannot_determine_current_version_dto_still_surfaces_the_release() {
+        let dto = UpdateCheckOutcomeDto::from(UpdateCheckOutcome::CannotDetermineCurrentVersion {
+            release: sample_release(),
+        });
+        let json = serde_json::to_value(&dto).unwrap();
+
+        assert_eq!(json["state"], "cannotDetermineCurrentVersion");
+        assert_eq!(json["release"]["tag"], "v0.5.0");
+        assert!(json.get("currentTag").is_none());
+    }
+
+    #[test]
+    fn check_failed_dto_carries_the_error_payload_never_a_raw_diagnostic() {
+        let err = gitsail_domain::GitSailError::new(
+            gitsail_domain::ErrorCode::NetworkFailure,
+            "could not check for updates: offline",
+        );
+        let dto = UpdateCheckOutcomeDto::from(UpdateCheckOutcome::CheckFailed { diagnostic: err });
+        let json = serde_json::to_value(&dto).unwrap();
+
+        assert_eq!(json["state"], "checkFailed");
+        assert_eq!(json["error"]["code"], "network_failure");
+    }
+
+    #[test]
+    fn skipped_dto_nests_a_distinct_kind_tag_for_each_reason() {
+        let disabled =
+            UpdateCheckOutcomeDto::from(UpdateCheckOutcome::Skipped(SkipReason::Disabled));
+        let json = serde_json::to_value(&disabled).unwrap();
+        assert_eq!(json["state"], "skipped");
+        assert_eq!(json["reason"]["kind"], "disabled");
+
+        let checked_recently =
+            UpdateCheckOutcomeDto::from(UpdateCheckOutcome::Skipped(SkipReason::CheckedRecently {
+                next_check_after_unix: 1_700_000_000,
+            }));
+        let json = serde_json::to_value(&checked_recently).unwrap();
+        assert_eq!(json["reason"]["kind"], "checkedRecently");
+        assert_eq!(json["reason"]["nextCheckAfterUnix"], 1_700_000_000);
+    }
+
+    #[test]
+    fn no_releases_published_dto_is_a_bare_tag_with_no_other_fields() {
+        let dto = UpdateCheckOutcomeDto::from(UpdateCheckOutcome::NoReleasesPublished);
+        let json = serde_json::to_value(&dto).unwrap();
+
+        assert_eq!(json["state"], "noReleasesPublished");
+        assert_eq!(json.as_object().unwrap().len(), 1);
     }
 }

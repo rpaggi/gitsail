@@ -89,4 +89,48 @@ describe("preferences store", () => {
     expect(document.documentElement.getAttribute("data-theme")).toBe("light");
     expect(store.lastError?.message).toBe("disk full");
   });
+
+  it("defaults to check-for-updates on even before load() resolves (T-260/US-127)", () => {
+    const store = usePreferencesStore();
+
+    expect(store.checkForUpdates).toBe(true);
+  });
+
+  it("load applies the persisted check-for-updates preference", async () => {
+    mockIPC((cmd) => {
+      if (cmd === "get_preferences") return { theme: "dark", checkForUpdates: false };
+      throw new Error(`unexpected command ${cmd}`);
+    });
+    const store = usePreferencesStore();
+
+    await store.load();
+
+    expect(store.checkForUpdates).toBe(false);
+  });
+
+  it("setCheckForUpdates applies immediately and persists", async () => {
+    const received: unknown[] = [];
+    mockIPC((cmd, args) => {
+      received.push([cmd, args]);
+      return { theme: "dark", checkForUpdates: false };
+    });
+    const store = usePreferencesStore();
+
+    await store.setCheckForUpdates(false);
+
+    expect(store.checkForUpdates).toBe(false);
+    expect(received).toEqual([["set_check_for_updates", { enabled: false }]]);
+  });
+
+  it("setCheckForUpdates keeps the chosen value applied even when persistence fails", async () => {
+    mockIPC(() => {
+      throw { code: "internal", message: "disk full" };
+    });
+    const store = usePreferencesStore();
+
+    await store.setCheckForUpdates(false);
+
+    expect(store.checkForUpdates).toBe(false);
+    expect(store.lastError?.message).toBe("disk full");
+  });
 });

@@ -43,7 +43,7 @@ use std::sync::{Arc, Mutex};
 
 use gitsail_application::{
     ForgeCredentialPort, PreferencesPort, PullRequestQueryPort, RecentRepositoriesPort,
-    RepositoryReadPort, RepositorySession, RepositoryWritePort,
+    RepositoryReadPort, RepositorySession, RepositoryWritePort, UpdateCheckPort,
 };
 use gitsail_domain::{CommitGraph, ErrorCode, GitSailError, GraphCommit, GraphRow, Repository};
 
@@ -113,6 +113,11 @@ pub struct AppState {
     /// comment for why this is deliberately a Desktop-only concern with no
     /// `gitsail-application` abstraction in front of it.
     keybindings: Arc<JsonFileKeybindingsStore>,
+    /// Queries GitHub for the latest published release (T-260/US-127).
+    /// Desktop's concrete adapter (`gitsail-forge`'s
+    /// `GitHubReleaseUpdateAdapter`) lives outside this crate, matching
+    /// every other port `AppState` holds.
+    update_check: Arc<dyn UpdateCheckPort>,
     /// The startup intent parsed from `--repo`/`--commit` (see this
     /// module's own `StartupIntent` doc). `take` semantics (via
     /// `Mutex<Option<_>>`) rather than a plain field: consumed exactly
@@ -123,6 +128,15 @@ pub struct AppState {
 }
 
 impl AppState {
+    // Every argument here is a distinct port/adapter `AppState` composes
+    // (SAD §17: Tauri commands stay thin, `AppState` is where every
+    // capability the frontend needs gets wired together once, in
+    // `lib.rs::run`) — the same reason this constructor has grown one
+    // parameter per story since T-184/US-051 first introduced it (T-244,
+    // T-245, T-247, T-249, and now T-260's `update_check`). A builder would
+    // reduce this count but is not worth introducing for one more `Arc`
+    // clone; revisit if this keeps growing.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         port: Arc<dyn RepositoryReadPort>,
         write_port: Arc<dyn RepositoryWritePort>,
@@ -131,6 +145,7 @@ impl AppState {
         pull_request_query: Arc<dyn PullRequestQueryPort>,
         preferences: Arc<dyn PreferencesPort>,
         keybindings: Arc<JsonFileKeybindingsStore>,
+        update_check: Arc<dyn UpdateCheckPort>,
     ) -> Self {
         Self {
             port,
@@ -145,6 +160,7 @@ impl AppState {
             pull_request_query,
             preferences,
             keybindings,
+            update_check,
             startup_intent: Mutex::new(None),
         }
     }
@@ -175,6 +191,10 @@ impl AppState {
 
     pub fn keybindings(&self) -> Arc<JsonFileKeybindingsStore> {
         self.keybindings.clone()
+    }
+
+    pub fn update_check(&self) -> Arc<dyn UpdateCheckPort> {
+        self.update_check.clone()
     }
 
     /// Records the startup intent parsed from argv (`lib.rs::run`, once,
@@ -523,6 +543,7 @@ mod tests {
                     std::thread::current().id()
                 ),
             ))),
+            Arc::new(gitsail_forge::FakeUpdateCheckPort::default()),
         )
     }
 

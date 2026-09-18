@@ -21,7 +21,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use std::collections::HashMap;
 
 use gitsail_application::{
-    AbortOperation, AmendCommit, ApplyPatch, BlameRequest, CherryPick, CommitQuery,
+    AbortOperation, AmendCommit, ApplyPatch, BlameRequest, CheckForUpdate, CherryPick, CommitQuery,
     ConnectForgeAccount, ContinueOperation, CreateBranch, CreateCommit, DeleteBranch,
     DetectInProgressOperation, DiffRequest, DisconnectForgeAccount, ExecuteRebasePlan, Fetch,
     ForgeToken, ForgetRecentRepository, GetCommit, GetCommitHistory, GetConflictSides, GetDiff,
@@ -29,8 +29,9 @@ use gitsail_application::{
     ListRecentRepositories, LoadPreferences, MarkConflictResolved, Merge, MergeParentPolicy,
     OpenRepository, PlanRebase, PreviewAmend, PreviewPatchApplication, Pull, Push, Rebase,
     RebasePlan, RecordRecentRepository, RefreshReason, RenameBranch, Reset, ResetMode, Revert,
-    SetThemePreference, SkipOperation, StageFiles, StageHunks, SwitchBranch, TakeConflictSide,
-    ThemePreference, UnstageFiles, UnstageHunks,
+    SetCheckForUpdatesPreference, SetThemePreference, SkipOperation, StageFiles, StageHunks,
+    SwitchBranch, TakeConflictSide, ThemePreference, UnstageFiles, UnstageHunks,
+    UpdateCheckTrigger,
 };
 use gitsail_domain::{
     repository_location, Branch, BranchKind, BranchName, CancellationToken, CommitHash,
@@ -43,7 +44,7 @@ use gitsail_protocol::{
     InProgressOperationDto, ListPullRequestsOutcomeDto, MergeResultDto, PatchExportDto,
     PatchPreviewDto, PreferencesDto, PullOutcomeDto, PullResultDto, RebasePlanDto, RebaseResultDto,
     RecentRepositoryDto, RemoteDto, RepositoryDto, RepositoryStatusDto, RevertResultDto, StashDto,
-    SyncTargetDto, TagDto,
+    SyncTargetDto, TagDto, UpdateCheckOutcomeDto,
 };
 
 use crate::state::{AppState, StartupIntent};
@@ -1719,6 +1720,108 @@ pub fn reset_all_keybinding_overrides(state: tauri::State<AppState>) -> Result<(
         .map_err(|err| ErrorPayload::from(&err))
 }
 
+// -- T-260/US-127: GitHub Releases update checking ------------------------
+//
+// Check-only, never an auto-installer — see
+// `gitsail_application::update_check`'s own module doc for the full
+// rationale ADR-023 (GitHub-Releases-only distribution, no code signing)
+// requires. Three commands: `check_for_update` is the one real network
+// call, gated exactly as `CheckForUpdate::execute` documents (an
+// `"automatic"` trigger respects the preference/throttle; `"manual"`
+// bypasses both); `set_check_for_updates` is the mandatory on/off
+// preference toggle; `open_update_link` opens the release page or its
+// `SHA256SUMS.txt` — the only two URLs this feature ever hands the
+// frontend — after re-validating both scheme and host, mirroring
+// `open_pull_request_link_impl`'s own "never trust forge-authored content
+// blindly" discipline (US-127 criterion 1: GitHub's own JSON response is
+// untrusted content, exactly like a PR's `url` field).
+
+/// The only host any URL this feature surfaces may ever point at.
+const GITHUB_HOST: &str = "github.com";
+
+fn parse_update_check_trigger(trigger: &str) -> UpdateCheckTrigger {
+    match trigger {
+        "manual" => UpdateCheckTrigger::Manual,
+        // Any other value (in practice just `"automatic"`) defaults to the
+        // safer, throttled/disableable path — an unrecognized value must
+        // never accidentally grant the network-call-bypassing behavior
+        // `"manual"` gets, mirroring `parse_refresh_reason`'s own
+        // "unrecognized value defaults to the conservative case" pattern.
+        _ => UpdateCheckTrigger::Automatic,
+    }
+}
+
+/// Checks GitHub for a newer release than the one this build was published
+/// as (US-127 criterion 1). Never fails outright — no `Result`/
+/// `ErrorPayload` at all, matching `forge_connection_status`'s own
+/// precedent for a use case that itself never returns `Err`: a network or
+/// malformed-response failure is one more `UpdateCheckOutcomeDto` variant
+/// (`checkFailed`), not a command failure (US-127 criterion 2: never
+/// crashes, never blocks the app).
+#[tauri::command]
+pub fn check_for_update(trigger: String, state: tauri::State<AppState>) -> UpdateCheckOutcomeDto {
+    check_for_update_impl(&state, &trigger)
+}
+
+fn check_for_update_impl(state: &AppState, trigger: &str) -> UpdateCheckOutcomeDto {
+    let outcome = CheckForUpdate::new(state.update_check(), state.preferences()).execute(
+        parse_update_check_trigger(trigger),
+        crate::version::running_version_tag(),
+        now_unix_seconds().max(0) as u64,
+    );
+    UpdateCheckOutcomeDto::from(outcome)
+}
+
+/// Toggles the "automatic update check" preference (US-127's mandatory
+/// "always possible to disable via a preference" control) — mirrors
+/// [`set_theme`]'s own shape exactly, and never gates a manual check (see
+/// [`parse_update_check_trigger`]).
+#[tauri::command]
+pub fn set_check_for_updates(
+    enabled: bool,
+    state: tauri::State<AppState>,
+) -> Result<PreferencesDto, ErrorPayload> {
+    set_check_for_updates_impl(&state, enabled).map_err(|err| ErrorPayload::from(&err))
+}
+
+fn set_check_for_updates_impl(
+    state: &AppState,
+    enabled: bool,
+) -> Result<PreferencesDto, GitSailError> {
+    let preferences = SetCheckForUpdatesPreference::new(state.preferences()).execute(enabled)?;
+    Ok(PreferencesDto::from(&preferences))
+}
+
+/// Opens a URL from a checked [`gitsail_protocol::ReleaseInfoDto`] (the
+/// release page, or its `SHA256SUMS.txt`) in the browser — the only two
+/// URLs this feature ever hands the frontend. `url` comes verbatim from
+/// GitHub's own API response, not something this crate constructed, so it
+/// is re-validated exactly like [`resolve_pull_request_link_impl`] does:
+/// https only, and the host must be [`GITHUB_HOST`] — never any other
+/// host, regardless of what a compromised/misconfigured/MITM'd response
+/// claimed. A mismatch resolves to `Ok(false)`, never an error: an
+/// explicit click that turns out to point somewhere refused is a "was it
+/// opened" signal, not a failure this command needs to explain.
+#[tauri::command]
+pub fn open_update_link(url: String) -> Result<bool, ErrorPayload> {
+    open_update_link_impl(&url).map_err(|err| ErrorPayload::from(&err))
+}
+
+fn open_update_link_impl(url: &str) -> Result<bool, GitSailError> {
+    let Ok(parsed) = url::Url::parse(url) else {
+        return Ok(false);
+    };
+    let host_matches = parsed
+        .host_str()
+        .map(|host| host.eq_ignore_ascii_case(GITHUB_HOST))
+        .unwrap_or(false);
+    if parsed.scheme() != "https" || !host_matches {
+        return Ok(false);
+    }
+    crate::browser::open_url(url)?;
+    Ok(true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1804,6 +1907,17 @@ mod tests {
         Arc::new(crate::keybindings_store::JsonFileKeybindingsStore::new(
             path,
         ))
+    }
+
+    /// A fresh [`gitsail_forge::FakeUpdateCheckPort`] (T-260) double for
+    /// every test `AppState` built in this module — these tests care about
+    /// command wiring, never about GitHub's own response shape (that is
+    /// `release_update`'s job). Defaults to
+    /// [`gitsail_application::UpdateCheckError::NoReleasesPublished`] when
+    /// unconfigured, mirroring `FakePullRequestQueryPort`'s own
+    /// "unconfigured means an empty/benign result" convention.
+    fn test_update_check_port() -> Arc<dyn gitsail_application::UpdateCheckPort> {
+        Arc::new(gitsail_forge::FakeUpdateCheckPort::default())
     }
 
     /// A `RepositoryReadPort` double exercising `discover`, `status`, and
@@ -2064,6 +2178,7 @@ mod tests {
             Arc::new(gitsail_forge::FakePullRequestQueryPort::default()),
             test_preferences(),
             test_keybindings(),
+            test_update_check_port(),
         )
     }
 
@@ -2085,6 +2200,7 @@ mod tests {
             Arc::new(pull_requests),
             test_preferences(),
             test_keybindings(),
+            test_update_check_port(),
         )
     }
 
@@ -3937,6 +4053,7 @@ mod tests {
             Arc::new(gitsail_forge::FakePullRequestQueryPort::default()),
             test_preferences(),
             test_keybindings(),
+            test_update_check_port(),
         );
         state.open_session(sample_repository());
 
@@ -4058,6 +4175,7 @@ mod tests {
             Arc::new(gitsail_forge::FakePullRequestQueryPort::default()),
             test_preferences(),
             test_keybindings(),
+            test_update_check_port(),
         ));
         state.open_session(sample_repository());
 
@@ -4234,6 +4352,7 @@ mod tests {
                 Arc::new(gitsail_forge::FakePullRequestQueryPort::default()),
                 test_preferences(),
                 test_keybindings(),
+                test_update_check_port(),
             )
         }
 
@@ -4514,6 +4633,7 @@ mod tests {
                 Arc::new(gitsail_forge::FakePullRequestQueryPort::default()),
                 test_preferences(),
                 test_keybindings(),
+                test_update_check_port(),
             )
         }
 
@@ -5137,5 +5257,178 @@ mod tests {
                 .unwrap();
             assert!(String::from_utf8(status.stdout).unwrap().trim().is_empty());
         }
+    }
+
+    // -- T-260/US-127: GitHub Releases update checking ---------------------
+
+    fn state_with_update_check(update_check: gitsail_forge::FakeUpdateCheckPort) -> AppState {
+        let port: Arc<dyn gitsail_application::RepositoryReadPort> = Arc::new(FakePort::default());
+        let write_port: Arc<dyn gitsail_application::RepositoryWritePort> =
+            Arc::new(FakeWritePort::new());
+        AppState::new(
+            port,
+            write_port,
+            InMemoryRecents::shared(),
+            test_forge_credentials(),
+            Arc::new(gitsail_forge::FakePullRequestQueryPort::default()),
+            test_preferences(),
+            test_keybindings(),
+            Arc::new(update_check),
+        )
+    }
+
+    fn sample_release() -> gitsail_application::ReleaseInfo {
+        gitsail_application::ReleaseInfo {
+            tag: "v0.5.0".to_string(),
+            html_url: "https://github.com/rpaggi/gitsail/releases/tag/v0.5.0".to_string(),
+            checksums_url: Some(
+                "https://github.com/rpaggi/gitsail/releases/download/v0.5.0/SHA256SUMS.txt"
+                    .to_string(),
+            ),
+            notes: Some("notes".to_string()),
+        }
+    }
+
+    #[test]
+    fn check_for_update_maps_a_successful_response_honestly_when_the_running_version_is_unknown() {
+        // `crate::version::running_version_tag()` is always `None` for a
+        // `cargo test` build (never built by `release.yml`) — this is
+        // exactly the dev-build case `CannotDetermineCurrentVersion` exists
+        // for (see `version.rs`'s own test asserting the same thing), so
+        // this test exercises this command's *real* behavior in this
+        // environment, not a mocked substitute for it. US-127's "a valid
+        // update is reported with the right data" DoD case for the
+        // *comparison* itself is covered directly against `CheckForUpdate`
+        // in `gitsail_application::update_check`'s own tests, which do
+        // control `current_tag`.
+        let state = state_with_update_check(gitsail_forge::FakeUpdateCheckPort::new(Ok(
+            sample_release(),
+        )));
+
+        match check_for_update_impl(&state, "manual") {
+            UpdateCheckOutcomeDto::CannotDetermineCurrentVersion { release } => {
+                assert_eq!(release.tag, "v0.5.0");
+                assert_eq!(
+                    release.checksums_url.as_deref(),
+                    Some(
+                        "https://github.com/rpaggi/gitsail/releases/download/v0.5.0/SHA256SUMS.txt"
+                    )
+                );
+            }
+            other => panic!("expected CannotDetermineCurrentVersion, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn check_for_update_never_panics_on_a_malformed_response_invalid_package_case() {
+        let state = state_with_update_check(gitsail_forge::FakeUpdateCheckPort::new(Err(
+            gitsail_application::UpdateCheckError::Malformed(GitSailError::new(
+                ErrorCode::ParseFailure,
+                "boom",
+            )),
+        )));
+
+        match check_for_update_impl(&state, "manual") {
+            UpdateCheckOutcomeDto::CheckFailed { error } => {
+                assert_eq!(error.code, "parse_failure");
+            }
+            other => panic!("expected CheckFailed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn check_for_update_never_panics_on_a_network_interruption_and_allows_retrying_later() {
+        let state = state_with_update_check(gitsail_forge::FakeUpdateCheckPort::new(Err(
+            gitsail_application::UpdateCheckError::NetworkFailure("timed out".to_string()),
+        )));
+
+        match check_for_update_impl(&state, "manual") {
+            UpdateCheckOutcomeDto::CheckFailed { error } => {
+                assert_eq!(error.code, "network_failure");
+            }
+            other => panic!("expected CheckFailed, got {other:?}"),
+        }
+
+        // The app itself is never left unusable: a second attempt (e.g. the
+        // person clicking "check again") still runs the port, it is simply
+        // scripted to answer differently this time — nothing about the
+        // first failure blocks or corrupts a later retry.
+        let state = state_with_update_check(gitsail_forge::FakeUpdateCheckPort::new(Ok(
+            sample_release(),
+        )));
+        assert!(!matches!(
+            check_for_update_impl(&state, "manual"),
+            UpdateCheckOutcomeDto::CheckFailed { .. }
+        ));
+    }
+
+    #[test]
+    fn check_for_update_reports_no_releases_published_distinctly_from_a_failure() {
+        let state = state_with_update_check(gitsail_forge::FakeUpdateCheckPort::new(Err(
+            gitsail_application::UpdateCheckError::NoReleasesPublished,
+        )));
+
+        assert!(matches!(
+            check_for_update_impl(&state, "manual"),
+            UpdateCheckOutcomeDto::NoReleasesPublished
+        ));
+    }
+
+    #[test]
+    fn an_automatic_trigger_is_skipped_when_the_preference_is_disabled() {
+        let state = state_with_update_check(gitsail_forge::FakeUpdateCheckPort::new(Ok(
+            sample_release(),
+        )));
+        set_check_for_updates_impl(&state, false).unwrap();
+
+        let outcome = check_for_update_impl(&state, "automatic");
+        assert!(matches!(
+            outcome,
+            UpdateCheckOutcomeDto::Skipped {
+                reason: gitsail_protocol::SkipReasonDto::Disabled
+            }
+        ));
+    }
+
+    #[test]
+    fn an_unrecognized_trigger_string_defaults_to_the_conservative_automatic_path() {
+        let state = state_with_update_check(gitsail_forge::FakeUpdateCheckPort::new(Ok(
+            sample_release(),
+        )));
+        set_check_for_updates_impl(&state, false).unwrap();
+
+        // Not `"manual"` — must be treated as automatic, so it is still
+        // subject to the disabled-preference gate rather than silently
+        // bypassing it.
+        assert!(matches!(
+            check_for_update_impl(&state, "not-a-real-trigger"),
+            UpdateCheckOutcomeDto::Skipped { .. }
+        ));
+    }
+
+    #[test]
+    fn set_check_for_updates_persists_the_toggle_without_disturbing_the_theme() {
+        let state = state_with_update_check(gitsail_forge::FakeUpdateCheckPort::default());
+        set_theme_impl(&state, "dark").unwrap();
+
+        let updated = set_check_for_updates_impl(&state, false).unwrap();
+
+        assert!(!updated.check_for_updates);
+        assert_eq!(updated.theme, gitsail_protocol::ThemePreferenceDto::Dark);
+    }
+
+    #[test]
+    fn open_update_link_refuses_a_non_https_url_without_opening_anything() {
+        assert!(!open_update_link_impl("http://github.com/rpaggi/gitsail").unwrap());
+    }
+
+    #[test]
+    fn open_update_link_refuses_a_url_pointing_at_a_different_host() {
+        assert!(!open_update_link_impl("https://not-github.example.com/rpaggi/gitsail").unwrap());
+    }
+
+    #[test]
+    fn open_update_link_refuses_an_unparseable_url() {
+        assert!(!open_update_link_impl("not a url at all").unwrap());
     }
 }

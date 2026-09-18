@@ -76,6 +76,13 @@ impl From<StoredTheme> for ThemePreference {
 struct StoredPreferences {
     #[serde(default)]
     theme: Option<StoredTheme>,
+    /// `None` means "never saved" (a file predating T-260, or a fresh
+    /// default) — mapped to [`Preferences::default`]'s `true` on load, the
+    /// same "absent means default" convention `theme` already establishes.
+    #[serde(default)]
+    check_for_updates: Option<bool>,
+    #[serde(default)]
+    last_update_check_unix: Option<u64>,
 }
 
 /// A [`PreferencesPort`] backed by a single JSON file.
@@ -149,7 +156,12 @@ impl PreferencesPort for JsonFilePreferencesStore {
         match serde_json::from_str::<StoredPreferences>(&contents) {
             Ok(stored) => {
                 let theme = stored.theme.map(ThemePreference::from).unwrap_or_default();
-                Ok(PreferencesLoadOutcome::clean(Preferences { theme }))
+                let check_for_updates = stored.check_for_updates.unwrap_or(true);
+                Ok(PreferencesLoadOutcome::clean(Preferences {
+                    theme,
+                    check_for_updates,
+                    last_update_check_unix: stored.last_update_check_unix,
+                }))
             }
             Err(err) => Ok(PreferencesLoadOutcome::recovered(
                 Self::corrupted_diagnostic(err),
@@ -165,6 +177,8 @@ impl PreferencesPort for JsonFilePreferencesStore {
         }
         let stored = StoredPreferences {
             theme: Some(StoredTheme::from(preferences.theme)),
+            check_for_updates: Some(preferences.check_for_updates),
+            last_update_check_unix: preferences.last_update_check_unix,
         };
         let json = serde_json::to_string_pretty(&stored).map_err(|err| {
             GitSailError::new(ErrorCode::Internal, "failed to serialize preferences")
@@ -208,6 +222,8 @@ mod tests {
         let store = JsonFilePreferencesStore::new(path.clone());
         let preferences = Preferences {
             theme: ThemePreference::Dark,
+            check_for_updates: false,
+            last_update_check_unix: Some(1_700_000_000),
         };
 
         store.save(&preferences).unwrap();
@@ -226,6 +242,7 @@ mod tests {
         store
             .save(&Preferences {
                 theme: ThemePreference::Light,
+                ..Preferences::default()
             })
             .unwrap();
 
@@ -272,6 +289,39 @@ mod tests {
 
         assert_eq!(outcome.preferences, Preferences::default());
         assert!(outcome.diagnostic.is_none());
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_legacy_file_with_no_update_fields_defaults_check_for_updates_to_true() {
+        let path = temp_file_path();
+        // T-247/T-248-era file, predating T-260's two new fields entirely.
+        fs::write(&path, r#"{ "theme": "dark" }"#).unwrap();
+        let store = JsonFilePreferencesStore::new(path.clone());
+
+        let outcome = store.load().unwrap();
+
+        assert!(outcome.preferences.check_for_updates);
+        assert_eq!(outcome.preferences.last_update_check_unix, None);
+        assert!(outcome.diagnostic.is_none());
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn check_for_updates_and_last_check_timestamp_round_trip_through_a_save() {
+        let path = temp_file_path();
+        let store = JsonFilePreferencesStore::new(path.clone());
+        let preferences = Preferences {
+            check_for_updates: false,
+            last_update_check_unix: Some(42),
+            ..Preferences::default()
+        };
+
+        store.save(&preferences).unwrap();
+        let outcome = store.load().unwrap();
+
+        assert!(!outcome.preferences.check_for_updates);
+        assert_eq!(outcome.preferences.last_update_check_unix, Some(42));
         let _ = fs::remove_file(&path);
     }
 

@@ -9,7 +9,11 @@
 
 import { defineStore } from "pinia";
 
-import { getPreferences, setTheme as setThemeCommand } from "../services/preferences";
+import {
+  getPreferences,
+  setCheckForUpdates as setCheckForUpdatesCommand,
+  setTheme as setThemeCommand,
+} from "../services/preferences";
 import type { ThemePreferenceDto } from "../services/dto";
 import { isErrorPayload, type ErrorPayload } from "../services/errors";
 import { applyEffectiveTheme, resolveEffectiveTheme, type EffectiveTheme } from "../theme";
@@ -25,6 +29,11 @@ export const usePreferencesStore = defineStore("preferences", {
     // there is no light-then-dark flash while this store's very first
     // `getPreferences()` call is still in flight.
     theme: "dark" as ThemePreferenceDto,
+    /** Whether an automatic update check may run (T-260/US-127) — on by
+     * default even before `load()` resolves, matching `theme`'s own
+     * "safe default before the first load" convention; always overridable
+     * via `setCheckForUpdates`. */
+    checkForUpdates: true,
     isLoading: false,
     lastError: null as ErrorPayload | null,
     /** Set when the persisted preferences file was corrupted/unreadable
@@ -48,6 +57,7 @@ export const usePreferencesStore = defineStore("preferences", {
       try {
         const preferences = await getPreferences();
         this.theme = preferences.theme;
+        this.checkForUpdates = preferences.checkForUpdates ?? true;
         this.diagnostic = preferences.diagnostic ?? null;
         this.lastError = null;
       } catch (error) {
@@ -68,6 +78,19 @@ export const usePreferencesStore = defineStore("preferences", {
       applyEffectiveTheme(this.effectiveTheme);
       try {
         await setThemeCommand(theme);
+        this.lastError = null;
+      } catch (error) {
+        this.lastError = toErrorPayload(error);
+      }
+    },
+
+    /** Toggles the "automatic update check" preference (US-127's
+     * mandatory "always possible to disable" control). Applies
+     * optimistically, same reasoning as `setTheme`. */
+    async setCheckForUpdates(enabled: boolean): Promise<void> {
+      this.checkForUpdates = enabled;
+      try {
+        await setCheckForUpdatesCommand(enabled);
         this.lastError = null;
       } catch (error) {
         this.lastError = toErrorPayload(error);

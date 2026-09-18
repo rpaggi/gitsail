@@ -13,12 +13,13 @@ mod keybindings_store;
 mod preferences_store;
 mod recent_repositories_store;
 mod state;
+mod version;
 
 use std::sync::Arc;
 
 use gitsail_application::{
     ForgeCredentialPort, PreferencesPort, PullRequestQueryPort, RecentRepositoriesPort,
-    RepositoryReadPort, RepositoryWritePort,
+    RepositoryReadPort, RepositoryWritePort, UpdateCheckPort,
 };
 use gitsail_git::{GitCliProvider, GitProcessRunner, GitProcessRunnerConfig};
 
@@ -108,6 +109,15 @@ pub fn run() {
         keybindings_path,
     ));
 
+    // T-260/US-127: GitHub Releases update checking — see `version.rs` for
+    // how this build knows its own release tag, and
+    // `gitsail_application::update_check`'s module doc for why this is a
+    // check-only port (never an auto-installer).
+    let update_check: Arc<dyn UpdateCheckPort> =
+        Arc::new(gitsail_forge::GitHubReleaseUpdateAdapter::new(Arc::new(
+            gitsail_forge::UreqHttpClient::new(),
+        )));
+
     let app_state = AppState::new(
         port,
         write_port,
@@ -116,6 +126,7 @@ pub fn run() {
         pull_request_query,
         preferences,
         keybindings,
+        update_check,
     );
     app_state.set_startup_intent(parse_startup_args(std::env::args()));
 
@@ -184,6 +195,9 @@ pub fn run() {
             commands::set_keybinding_override,
             commands::reset_keybinding_override,
             commands::reset_all_keybinding_overrides,
+            commands::check_for_update,
+            commands::set_check_for_updates,
+            commands::open_update_link,
         ])
         .run(tauri::generate_context!())
         .expect("error while running the GitSail Desktop application");

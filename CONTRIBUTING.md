@@ -198,7 +198,7 @@ not a draft to rewrite. Rules, in order of how often they come up:
    change its `**Status:**` line (e.g. `Accepted` → `Superseded by
    ADR-0NN`) and add the revision note — never delete the ADR.
 3. **A new decision gets the next unused ADR number**, appended after the
-   current last one (today: `ADR-024` is next, since `ADR-001`–`ADR-023`
+   current last one (today: `ADR-025` is next, since `ADR-001`–`ADR-024`
    are all taken — see the ADR index at the top of the SAD file, which
    must be kept in sync whenever an ADR is added or its status changes).
 4. **US/EPIC/T-xxx IDs in the backlog and PRD follow the same rule**: never

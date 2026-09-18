@@ -35,6 +35,16 @@
 //!   outcome, without exercising either adapter's HTTP-shape mapping (that
 //!   is covered by each adapter's own tests against [`FakeHttpClient`]).
 //!
+//! Desktop update checking (T-260/US-127 — see [`release_update`]'s and
+//! `gitsail_application::update_check`'s own doc comments for the full
+//! "check-only, never an auto-installer" scope decision ADR-023/ADR-024
+//! require):
+//! - [`GitHubReleaseUpdateAdapter`] — the real adapter, querying GitHub's
+//!   `/releases/latest` and reusing this crate's own [`HttpClient`] seam
+//!   (no second HTTP client added for this).
+//! - [`FakeUpdateCheckPort`] — a scripted whole-port double, mirroring
+//!   [`FakePullRequestQueryPort`]'s own precedent.
+//!
 //! ## Manual verification needed
 //!
 //! `keyring`'s Linux backend talks to a running Secret Service daemon
@@ -58,6 +68,7 @@ pub mod keyring_store;
 pub mod memory_store;
 pub mod pull_request_query;
 pub mod rate_limit;
+pub mod release_update;
 
 pub use github_pr_adapter::GitHubPullRequestAdapter;
 pub use gitlab_mr_adapter::GitLabMergeRequestAdapter;
@@ -65,3 +76,4 @@ pub use http::{FakeHttpClient, HttpClient, HttpResponse, HttpTransportError, Ure
 pub use keyring_store::KeyringForgeCredentialStore;
 pub use memory_store::InMemoryForgeCredentialStore;
 pub use pull_request_query::{CompositePullRequestQueryPort, FakePullRequestQueryPort};
+pub use release_update::{FakeUpdateCheckPort, GitHubReleaseUpdateAdapter};

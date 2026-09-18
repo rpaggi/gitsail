@@ -44,6 +44,7 @@ import StagingPanel from "./StagingPanel.vue";
 import StatusPanel from "./StatusPanel.vue";
 import SyncPanel from "./SyncPanel.vue";
 import ThemeSwitcher from "./ThemeSwitcher.vue";
+import UpdateChecker from "./UpdateChecker.vue";
 import { rovingNextIndex } from "./keyboardNav";
 import { resolveShellState } from "./shellState";
 import { bindingFromKeyboardEvent } from "../keybindings";
@@ -251,6 +252,10 @@ function onTabKeydown(event: KeyboardEvent, index: number): void {
           <details class="app-shell__shortcuts">
             <summary>Keyboard shortcuts</summary>
             <KeybindingsPanel />
+          </details>
+          <details class="app-shell__shortcuts">
+            <summary>Updates</summary>
+            <UpdateChecker />
           </details>
         </section>
 

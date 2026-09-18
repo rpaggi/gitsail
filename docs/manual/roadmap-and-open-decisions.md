@@ -14,10 +14,10 @@ EPIC-16 through EPIC-24 (merge/rebase/conflict recovery, cherry-pick/revert/
 reset, stash/tags/worktrees at the Core layer, remote operations, security &
 credentials via the OS keyring, preferences consolidation, performance
 baseline, CI, and integrated cross-platform testing), most of EPIC-26
-(Documentation & Open Source, this task included), and three of EPIC-25's
-five stories (T-257/T-258/T-259 — see below) were implemented and are in
-review/pushed. This page is about what was **not** part of that — see each
-linked item below for specifics.
+(Documentation & Open Source, this task included), and four of EPIC-25's
+five stories (T-257/T-258/T-259/T-260 — see below) were implemented and are
+in review/pushed. This page is about what was **not** part of that — see
+each linked item below for specifics.
 
 ## Deliberately deferred, not started
 
@@ -69,13 +69,16 @@ linked item below for specifics.
 ## EPIC-25 (Distribution & Updates) — partially implemented (T-257/T-258/T-259)
 
 T-257 (distribute the CLI+TUI, US-124), T-258 (package the Desktop app,
-US-125), and T-259 (publish a compatible VS Code extension package, US-126)
-are implemented: `.github/workflows/release.yml` (ADR-023) builds CLI/TUI
-archives, Desktop installers, and a VS Code `.vsix` on every `vX.Y.Z` tag
-push and publishes them to a GitHub Release with a `SHA256SUMS.txt`. See
-`docs/architecture/release-process.md` for the full pipeline. T-260 (Desktop
-update mechanism with integrity/compatibility checks, US-127) and T-261
-(publish the v1.0 release matrix/checklist, US-128) remain on the backlog
+US-125), T-259 (publish a compatible VS Code extension package, US-126),
+and T-260 (Desktop update checking with integrity/compatibility notes,
+US-127, this session) are implemented: `.github/workflows/release.yml`
+(ADR-023) builds CLI/TUI archives, Desktop installers, and a VS Code
+`.vsix` on every `vX.Y.Z` tag push and publishes them to a GitHub Release
+with a `SHA256SUMS.txt`, and Desktop's Settings → "Updates" can check that
+same GitHub Release feed and show whether a newer tag exists — see
+`docs/architecture/release-process.md` for the release pipeline and
+`docs/architecture/update-mechanism.md` for the update-check design. T-261
+(publish the v1.0 release matrix/checklist, US-128) remains on the backlog
 (`todo`), untouched by this change. Concretely, as of this writing:
 
 - No `vX.Y.Z` tag has actually been pushed against this repository yet, so
@@ -94,11 +97,18 @@ update mechanism with integrity/compatibility checks, US-127) and T-261
   ADR-023 and `docs/architecture/release-process.md`, including exactly
   what would need to change once a certificate/notarization account
   exists — not a silent omission.
-- **There is still no update mechanism anywhere** (T-260, unimplemented) —
-  no version check that triggers a download, no update integrity
-  verification. Do not describe GitSail as having an updater; see
-  `troubleshooting.md`'s "Updates" section for exactly what *is*
-  implemented (a compatibility version check, which is not the same thing).
+- **Desktop can now check for a newer release (T-260/US-127), but this is
+  check-only — never an auto-installer.** Desktop's Settings → "Updates"
+  compares the running build's own release tag against GitHub's latest
+  published release and, when a newer one exists, shows its version, a
+  link to the Release page, and a link to its `SHA256SUMS.txt` — download
+  and installation stay entirely manual. **CLI, TUI, and the VS Code
+  extension still have no update check of any kind** — check
+  https://github.com/rpaggi/gitsail/releases yourself for those. Do not
+  describe any interface as auto-updating or as verifying a code signature
+  — neither exists anywhere in GitSail (ADR-023). See
+  `troubleshooting.md`'s "Updates" section and
+  `docs/architecture/update-mechanism.md` for exactly what *is* implemented.
 - This is expected to remain partial even in a future session for the
   signing/Marketplace pieces specifically, since those (real code-signing
   certificates, marketplace publisher accounts) depend on external
@@ -125,7 +135,7 @@ are noted as such:
 | **Submodules: in scope for v1.0, or explicitly post-v1.0?** | **Still open.** No code anywhere in this workspace implements submodule awareness (a single incidental code comment about diff type-changes is the only mention of the word in the whole codebase). The backlog states plainly that no story promises full submodule support and that expanding scope would need a PRD review and new story IDs — that review has not happened. Treat submodules as unsupported until this is explicitly decided. |
 | **Exact GitHub/GitLab host/scope boundaries beyond what's built** | **Partially open.** Read-only PR/MR listing is implemented and scoped (title/state/author/branches only); creating a PR/MR is deferred (see T-246 above). Which additional hosts/self-hosted instances are officially supported has not been separately delimited beyond what the existing adapters already handle. |
 | **IPC/daemon transport and a plugin policy** | **Open, but explicitly not urgent.** No daemon/IPC transport exists (the protocol's own version-compatibility scaffolding was deliberately built to be ready for one, see `protocol-compatibility.md`), and no plugin system or policy exists. The backlog itself states neither is a dependency for v1.0 — this is future evolution, not a v1.0 gap. |
-| **Code-signing/notarization and an update mechanism** | **Signing/notarization: decided (ADR-023) as "not yet, deliberately," blocked on real external resources** (an actual signing certificate/notarization account), not just engineering time — see `docs/architecture/release-process.md` for the exact checklist to reverse this once those resources exist. **Update mechanism (T-260/US-127): still fully open, no design decision made**, unimplemented. Both tracked under EPIC-25 above. |
+| **Code-signing/notarization and an update mechanism** | **Signing/notarization: decided (ADR-023) as "not yet, deliberately," blocked on real external resources** (an actual signing certificate/notarization account), not just engineering time — see `docs/architecture/release-process.md` for the exact checklist to reverse this once those resources exist. **Update mechanism (T-260/US-127): resolved for Desktop** — a check-only mechanism against GitHub Releases (no signature verification, consistent with the signing decision above); **CLI/TUI/VS Code still have none.** See `docs/architecture/update-mechanism.md`. Both tracked under EPIC-25 above. |
 
 ## Reading this page correctly
 

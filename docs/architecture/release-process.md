@@ -316,12 +316,19 @@ existed:
   limitation as `ci.yml`'s own Windows/macOS legs, per `ci-policy.md`).
 - **`.rpm` is not part of the release pipeline** — see "Why not `rpm`"
   above; a deliberate scope cut, not an oversight.
-- **No update mechanism** (T-260/US-127) and **no v1.0 release
-  matrix/checklist** (T-261/US-128) — both remain on the backlog, untouched
-  by this change; see `docs/manual/roadmap-and-open-decisions.md`.
+- **No v1.0 release matrix/checklist** (T-261/US-128) remains on the
+  backlog, untouched by this change; see
+  `docs/manual/roadmap-and-open-decisions.md`. (T-260/US-127's Desktop
+  update-check mechanism, previously listed here as unimplemented, now
+  exists — see `docs/architecture/update-mechanism.md` and ADR-024. CLI,
+  TUI, and the VS Code extension still have no update check of any kind.)
 
 ## See also
 
+- `docs/architecture/update-mechanism.md` (T-260/US-127, ADR-024) — the
+  Desktop update-*check* mechanism built on top of this pipeline's
+  artifacts/checksums; explicitly not an auto-updater, consistent with
+  this document's own no-signing decision.
 - ADR-023 (this decision's formal record) and ADR-015 (VS Code binary
   distribution, which this document extends) —
   `docs/architecture/GitSail_SAD_and_ADRs_v0.1.md`.

@@ -84,30 +84,48 @@ paths a keybinding remap or config file cannot reach), not merely
 documented convention. See `preferences-matrix.md`'s "confirmation-policy
 invariant" section for the file:line proof.
 
-## Updates: there is no automatic update mechanism today
+## Updates: Desktop checks (and only checks); CLI/TUI/VS Code stay manual
 
-**Be direct about this: GitSail does not check for, download, or install
-updates automatically, in any interface, as of this writing.** EPIC-25
-("Distribution & Updates") now ships packaged, checksummed release
-artifacts (T-257/T-258/T-259 — `.github/workflows/release.yml`, ADR-023),
-but has **not** implemented any update mechanism (T-260/US-127 is still on
-the backlog), and has **not** added code signing/notarization (a deliberate
-decision, not an oversight — see ADR-023 and
-`docs/architecture/release-process.md`). Concretely:
+**Be direct about this: nothing in GitSail downloads or installs an update
+automatically, in any interface, as of this writing.** EPIC-25
+("Distribution & Updates") ships packaged, checksummed release artifacts
+(T-257/T-258/T-259 — `.github/workflows/release.yml`, ADR-023) and has
+**not** added code signing/notarization (a deliberate decision, not an
+oversight — see ADR-023 and `docs/architecture/release-process.md`).
+T-260/US-127 (this session) adds exactly one thing on top of that: **Desktop
+can check whether a newer GitHub Release exists** and show it to you — it
+never downloads or installs anything on your behalf. Concretely:
 
+- **Desktop**: Settings → "Updates" has a "Check for updates" button and a
+  "Check automatically" toggle (on by default, always overridable — see
+  `apps/desktop/src/components/UpdateChecker.vue`). On launch, and again at
+  most once every 24 hours while the app stays open across restarts, it
+  asks `https://api.github.com/repos/rpaggi/gitsail/releases/latest`
+  whether a newer `vX.Y.Z` tag than the one this build was published under
+  exists (`gitsail_application::update_check`). When one does, it shows the
+  version, a link to the GitHub Release page (the verifiable origin), and a
+  link to that release's `SHA256SUMS.txt` — **you** download the installer
+  and verify it yourself; GitSail never fetches or runs it. A network
+  failure or an unparseable response never crashes or blocks the app: it
+  shows "could not check for updates" and lets you try again later (click
+  "Check for updates" any time — it always runs immediately, bypassing the
+  24-hour throttle, since it's an explicit action). If GitHub reports no
+  releases exist yet, or if this particular build cannot determine its own
+  version (a local/dev build, not one produced by `release.yml` — see
+  `docs/architecture/update-mechanism.md`), that is shown plainly rather
+  than guessed. "Authenticity" here is honest about ADR-023's own decision:
+  there is no code-signing verification, only the `SHA256SUMS.txt` a person
+  can check a manual download against.
 - **CLI/TUI**: a release pipeline exists and, once a `vX.Y.Z` tag is
   pushed, publishes checksummed archives for Linux/Windows/macOS to a
   GitHub Release — but no tag has actually been pushed yet, so no release
   exists in practice today; build from source (see the root `README.md`'s
-  "Installation (from source)"). Either way, there is no version-check or
-  update-download code anywhere in `gitsail-cli`/`gitsail-tui` — getting a
-  newer version, once a release exists, is always a manual download.
-- **Desktop**: the same pipeline packages `.deb`/`.AppImage` (Linux),
-  `.msi`/NSIS `.exe` (Windows), and `.dmg`/`.app.zip` (macOS) — see
-  `desktop.md`'s "Installing" section — but, again, no tag has been pushed
-  yet. No auto-update mechanism exists, and these installers/binaries are
-  unsigned (Windows SmartScreen and macOS Gatekeeper will both warn on
-  first run).
+  "Installation (from source)"). There is no version-check or update-check
+  code anywhere in `gitsail-cli`/`gitsail-tui` (T-260's own scope decision:
+  it is not trivial to reuse Desktop's check service across two more,
+  differently-shaped binaries in this story, so it was not attempted here)
+  — check https://github.com/rpaggi/gitsail/releases yourself; getting a
+  newer version is always a manual download.
 - **VS Code extension**: the pipeline builds a checksummed `.vsix`
   (`docs/architecture/release-process.md`), installed via "Install from
   VSIX..." — still not published to the Marketplace or Open VSX (a
@@ -118,14 +136,17 @@ decision, not an oversight — see ADR-023 and
   --version` and compares it against a minimum supported version, so a
   too-old or unrecognized binary is reported clearly instead of silently
   misbehaving — this checks compatibility, it does not fetch or install
-  anything.
+  anything, and there is no check against GitHub Releases either; check
+  https://github.com/rpaggi/gitsail/releases yourself.
 
 If you need a newer GitSail, rebuild/reinstall from source, or download the
-latest GitHub Release once one has actually been published. Anything
-describing an **automatic** updater, or a **signed** release artifact,
-belongs to EPIC-25 and is **not implemented** — see
-[`roadmap-and-open-decisions.md`](./roadmap-and-open-decisions.md) and
-[`docs/architecture/release-process.md`](../architecture/release-process.md).
+latest GitHub Release once one has actually been published (Desktop's own
+"Check for updates" tells you when one is; CLI/TUI/the extension do not).
+Anything describing an **automatic download/install**, or a **signed**
+release artifact, belongs to EPIC-25 and is **not implemented** — see
+[`roadmap-and-open-decisions.md`](./roadmap-and-open-decisions.md),
+[`docs/architecture/release-process.md`](../architecture/release-process.md),
+and [`docs/architecture/update-mechanism.md`](../architecture/update-mechanism.md).
 
 ## Privacy
 

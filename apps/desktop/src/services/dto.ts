@@ -525,11 +525,43 @@ export type ListPullRequestsOutcomeDto =
   | { state: "offline"; message: string }
   | { state: "error"; error: ErrorPayload };
 
-// -- Preferences (T-248/US-106) ----------------------------------------
+// -- Preferences (T-248/US-106, T-260/US-127) ---------------------------
 
 export type ThemePreferenceDto = "system" | "light" | "dark";
 
 export interface PreferencesDto {
   theme: ThemePreferenceDto;
+  checkForUpdates: boolean;
   diagnostic?: ErrorPayload;
 }
+
+// -- Desktop update checking (T-260/US-127) -----------------------------
+//
+// Mirrors `gitsail_protocol::dto`'s `ReleaseInfoDto`/`SkipReasonDto`/
+// `UpdateCheckOutcomeDto` (source of truth) — see that module's own doc
+// comment for the full "check-only, never an auto-installer" rationale
+// ADR-023 requires. `notes` is forge-authored content (GitHub's own
+// release body): never render it as active Markdown/HTML, only as inert
+// text, the same discipline `PullRequestSummaryDto`'s fields already
+// require.
+
+export interface ReleaseInfoDto {
+  tag: string;
+  htmlUrl: string;
+  checksumsUrl?: string;
+  notes?: string;
+}
+
+export type SkipReasonDto =
+  | { kind: "disabled" }
+  | { kind: "checkedRecently"; nextCheckAfterUnix: number };
+
+export type UpdateCheckOutcomeDto =
+  | { state: "skipped"; reason: SkipReasonDto }
+  | { state: "noReleasesPublished" }
+  | { state: "upToDate"; currentTag: string }
+  | { state: "updateAvailable"; currentTag: string; release: ReleaseInfoDto }
+  | { state: "cannotDetermineCurrentVersion"; release: ReleaseInfoDto }
+  | { state: "checkFailed"; error: ErrorPayload };
+
+export type UpdateCheckTriggerDto = "automatic" | "manual";

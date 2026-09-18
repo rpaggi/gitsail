@@ -18,6 +18,7 @@ pub mod privacy;
 pub mod pull_requests;
 pub mod recent_repositories;
 pub mod session;
+pub mod update_check;
 pub mod use_cases;
 pub mod write_ports;
 pub mod write_use_cases;
@@ -38,7 +39,7 @@ pub use ports::{
 };
 pub use preferences::{
     LoadPreferences, Preferences, PreferencesLoadOutcome, PreferencesPort, SavePreferences,
-    SetThemePreference, ThemePreference,
+    SetCheckForUpdatesPreference, SetThemePreference, ThemePreference,
 };
 pub use privacy::{CrashReportConsent, TelemetryPreference};
 pub use pull_requests::{
@@ -50,6 +51,10 @@ pub use recent_repositories::{
     RecentRepositoryEntry, RecordRecentRepository, MAX_RECENT_REPOSITORIES,
 };
 pub use session::{RefreshReason, RefreshTicket, RepositorySession, Selection};
+pub use update_check::{
+    CheckForUpdate, ReleaseInfo, SkipReason, UpdateCheckError, UpdateCheckOutcome, UpdateCheckPort,
+    UpdateCheckTrigger, ONE_DAY_SECONDS,
+};
 pub use use_cases::{
     AmendPreview, CommitDiff, CompareRevisions, DetectInProgressOperation, GetCommit,
     GetCommitDiff, GetCommitHistory, GetConflictSides, GetDiff, GetFileBlame, GetFileContent,
