@@ -88,30 +88,44 @@ invariant" section for the file:line proof.
 
 **Be direct about this: GitSail does not check for, download, or install
 updates automatically, in any interface, as of this writing.** EPIC-25
-("Distribution & Updates") — the epic that would define signing,
-packaging, and an update mechanism — has not been implemented in this
-session. Concretely:
+("Distribution & Updates") now ships packaged, checksummed release
+artifacts (T-257/T-258/T-259 — `.github/workflows/release.yml`, ADR-023),
+but has **not** implemented any update mechanism (T-260/US-127 is still on
+the backlog), and has **not** added code signing/notarization (a deliberate
+decision, not an oversight — see ADR-023 and
+`docs/architecture/release-process.md`). Concretely:
 
-- **CLI/TUI**: no prebuilt binary is distributed at all yet; build from
-  source (see the root `README.md`'s "Installation (from source)"). There
-  is no version-check or update-download code anywhere in `gitsail-cli`/
-  `gitsail-tui`.
-- **Desktop**: no packaged installer exists for any OS; it is run from
-  source via `npm run tauri dev`. No auto-update mechanism, no signature/
-  notarization strategy is implemented.
-- **VS Code extension**: not published to any marketplace; it does not
-  bundle or fetch a `gitsail` binary on your behalf (a deliberate decision,
-  ADR-015 — see `vscode.md`). What *is* implemented is a **verification**
-  check, not an update mechanism: before running any query, the extension
-  spawns `<binary> --version` and compares it against a minimum supported
-  version, so a too-old or unrecognized binary is reported clearly instead
-  of silently misbehaving — this checks compatibility, it does not fetch or
-  install anything.
+- **CLI/TUI**: a release pipeline exists and, once a `vX.Y.Z` tag is
+  pushed, publishes checksummed archives for Linux/Windows/macOS to a
+  GitHub Release — but no tag has actually been pushed yet, so no release
+  exists in practice today; build from source (see the root `README.md`'s
+  "Installation (from source)"). Either way, there is no version-check or
+  update-download code anywhere in `gitsail-cli`/`gitsail-tui` — getting a
+  newer version, once a release exists, is always a manual download.
+- **Desktop**: the same pipeline packages `.deb`/`.AppImage` (Linux),
+  `.msi`/NSIS `.exe` (Windows), and `.dmg`/`.app.zip` (macOS) — see
+  `desktop.md`'s "Installing" section — but, again, no tag has been pushed
+  yet. No auto-update mechanism exists, and these installers/binaries are
+  unsigned (Windows SmartScreen and macOS Gatekeeper will both warn on
+  first run).
+- **VS Code extension**: the pipeline builds a checksummed `.vsix`
+  (`docs/architecture/release-process.md`), installed via "Install from
+  VSIX..." — still not published to the Marketplace or Open VSX (a
+  deliberate decision, ADR-023 — see `vscode.md`), and it still does not
+  bundle or fetch a `gitsail` binary on your behalf (ADR-015, unchanged).
+  What *is* implemented is a **verification** check, not an update
+  mechanism: before running any query, the extension spawns `<binary>
+  --version` and compares it against a minimum supported version, so a
+  too-old or unrecognized binary is reported clearly instead of silently
+  misbehaving — this checks compatibility, it does not fetch or install
+  anything.
 
-If you need a newer GitSail, rebuild/reinstall from source yourself today.
-Anything describing an installer, an auto-updater, or a signed release
-artifact belongs to EPIC-25 and is **not implemented** — see
-[`roadmap-and-open-decisions.md`](./roadmap-and-open-decisions.md).
+If you need a newer GitSail, rebuild/reinstall from source, or download the
+latest GitHub Release once one has actually been published. Anything
+describing an **automatic** updater, or a **signed** release artifact,
+belongs to EPIC-25 and is **not implemented** — see
+[`roadmap-and-open-decisions.md`](./roadmap-and-open-decisions.md) and
+[`docs/architecture/release-process.md`](../architecture/release-process.md).
 
 ## Privacy
 

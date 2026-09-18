@@ -1,0 +1,337 @@
+name: Release
+
+# T-257/T-258/T-259 (EPIC-25 — Distribution & Updates, ADR-023): builds and
+# publishes GitHub Release artifacts for the CLI+TUI, the Desktop app, and
+# the VS Code extension whenever a `vX.Y.Z` tag is pushed. See
+# docs/architecture/release-process.md for the full policy this workflow
+# implements — which artifacts ship, how they are named/checksummed, and
+# the explicit, registered decision to distribute via GitHub Releases only
+# for now (no code signing/notarization, no Marketplace/Open VSX publish
+# yet — both are tracked as deliberate, documented debt, not gaps).
+#
+# This workflow intentionally mirrors ci.yml's conventions (job naming,
+# matrix style, Linux system-dependency list, RUST_TOOLCHAIN pin) rather
+# than inventing a second style for this repository.
+
+on:
+  push:
+    tags:
+      - "v*"
+  # Lets a maintainer manually re-run this workflow — only meaningful when
+  # dispatched against an existing `vX.Y.Z` tag ref (GitHub's "Use workflow
+  # from" branch/tag picker); the `guard` job below refuses to proceed
+  # otherwise, since publishing a "release" for a branch name would be
+  # actively wrong, not just unhelpful.
+  workflow_dispatch: {}
+
+# Unlike ci.yml, a release run is never superseded by a newer one on the
+# same tag (tags do not move), so there is nothing to cancel — this only
+# prevents two concurrent runs against the *same* tag from racing to
+# publish the same GitHub Release.
+concurrency:
+  group: release-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  # Kept in sync with `rust-version` in the root Cargo.toml (ADR-021), same
+  # duplication rationale already documented in ci.yml.
+  RUST_TOOLCHAIN: "1.97.0"
+  # The tag this run publishes artifacts for. Always `github.ref_name` —
+  # for a tag push that is the tag itself; for a manual dispatch it is
+  # whatever ref was picked, validated by the `guard` job below.
+  RELEASE_TAG: ${{ github.ref_name }}
+
+permissions:
+  contents: write
+
+jobs:
+  # ---------------------------------------------------------------------
+  # Fails fast, before spending any matrix build minutes, if this run was
+  # not triggered against a `vX.Y.Z` tag — the only case release artifacts
+  # and a GitHub Release should ever be produced.
+  # ---------------------------------------------------------------------
+  guard:
+    name: Verify this run targets a release tag
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check ref is a vX.Y.Z tag
+        run: |
+          set -euo pipefail
+          if [[ "${{ github.ref }}" != refs/tags/v* ]]; then
+            echo "::error::This workflow only publishes a release when triggered by a 'v*' tag (current ref: ${{ github.ref }}). Push a tag, or re-run this workflow dispatched from an existing tag." >&2
+            exit 1
+          fi
+          echo "Releasing tag: $RELEASE_TAG"
+
+  # ---------------------------------------------------------------------
+  # T-257/US-124: CLI + TUI binaries, one archive per OS containing both
+  # `gitsail`/`gitsail.exe` and `gitsail-tui`/`gitsail-tui.exe` plus LICENSE
+  # and a short per-OS Git-prerequisite note (US-124 criterion 1). Building
+  # both from the same job, in the same archive, is what criterion 3 asks
+  # for ("the pipeline already admits the TUI, since it already exists") —
+  # there is no separate CLI-only vs. CLI+TUI release track.
+  # ---------------------------------------------------------------------
+  build-cli-tui:
+    name: CLI + TUI (${{ matrix.platform }})
+    needs: guard
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux-x86_64
+            archive_format: tar.gz
+            binary_ext: ""
+          - os: windows-latest
+            platform: windows-x86_64
+            archive_format: zip
+            binary_ext: ".exe"
+          - os: macos-latest
+            # GitHub's macos-latest runner is Apple Silicon (arm64) as of
+            # this writing — this leg ships an aarch64-only macOS archive.
+            # An Intel (x86_64-apple-darwin) build is not produced yet; see
+            # docs/architecture/release-process.md's "Known gaps" section
+            # for why, and what adding it later would take.
+            platform: macos-aarch64
+            archive_format: tar.gz
+            binary_ext: ""
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: cargo build --release -p gitsail-cli -p gitsail-tui
+        run: cargo build --release -p gitsail-cli -p gitsail-tui
+
+      - name: Stage archive contents
+        shell: bash
+        run: |
+          set -euo pipefail
+          stage="staging/gitsail-${RELEASE_TAG}-${{ matrix.platform }}"
+          mkdir -p "$stage"
+          cp "target/release/gitsail${{ matrix.binary_ext }}" "$stage/"
+          cp "target/release/gitsail-tui${{ matrix.binary_ext }}" "$stage/"
+          cp LICENSE "$stage/"
+          cp docs/architecture/release-artifact-readme.txt "$stage/README.txt"
+          echo "$RELEASE_TAG" > "$stage/VERSION.txt"
+
+      - name: Archive (tar.gz)
+        if: matrix.archive_format == 'tar.gz'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd staging
+          tar -czf "gitsail-${RELEASE_TAG}-${{ matrix.platform }}.tar.gz" "gitsail-${RELEASE_TAG}-${{ matrix.platform }}"
+
+      - name: Archive (zip)
+        if: matrix.archive_format == 'zip'
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "staging/gitsail-${env:RELEASE_TAG}-${{ matrix.platform }}" -DestinationPath "staging/gitsail-${env:RELEASE_TAG}-${{ matrix.platform }}.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cli-tui-${{ matrix.platform }}
+          path: staging/gitsail-${{ env.RELEASE_TAG }}-${{ matrix.platform }}.${{ matrix.archive_format }}
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------
+  # T-258/US-125: Desktop installers via Tauri's own bundler
+  # (`apps/desktop/src-tauri/tauri.conf.json`'s `bundle` config, already
+  # `"targets": "all"`). Explicitly limited to the three formats US-125's
+  # own acceptance criterion names (.deb/.AppImage, .msi/NSIS .exe,
+  # .dmg/.app) rather than the config's full "all" set, so this job never
+  # depends on `rpmbuild` (not preinstalled on GitHub's Linux runner and
+  # not part of this story's asked-for format list) — a person building
+  # locally with `npm run tauri build` still gets whatever "all" resolves
+  # to on their machine; only this release pipeline narrows it.
+  # ---------------------------------------------------------------------
+  build-desktop:
+    name: Desktop (${{ matrix.os }})
+    needs: guard
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux system dependencies (WebKitGTK, GTK, etc.)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libdbus-1-dev \
+            libssl-dev \
+            libsoup-3.0-dev \
+            pkg-config \
+            patchelf
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/desktop/src-tauri -> ../../target
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+
+      - name: npm ci
+        working-directory: apps/desktop
+        run: npm ci
+
+      - name: Set the Tauri app version to the release tag
+        # tauri.conf.json's own `version` stays `0.0.0` (ADR-021: Cargo/app
+        # crate versions stay 0.0.0 pre-1.0, the tag is the real version) —
+        # but installers with a `0.0.0` display version are confusing to a
+        # person who just downloaded `vX.Y.Z`, so this overrides it only
+        # for the bundle metadata of *this* build, via the CLI's own
+        # `--config` merge flag, without touching the committed file.
+        shell: bash
+        run: echo "TAURI_VERSION_OVERRIDE={\"version\":\"${RELEASE_TAG#v}\"}" >> "$GITHUB_ENV"
+
+      - name: Build Desktop bundles (deb + AppImage)
+        if: matrix.os == 'ubuntu-latest'
+        working-directory: apps/desktop
+        run: npx tauri build --bundles deb,appimage --config "$TAURI_VERSION_OVERRIDE"
+
+      - name: Build Desktop bundles (MSI + NSIS)
+        if: matrix.os == 'windows-latest'
+        shell: bash
+        working-directory: apps/desktop
+        run: npx tauri build --bundles msi,nsis --config "$TAURI_VERSION_OVERRIDE"
+
+      - name: Build Desktop bundles (dmg + app)
+        if: matrix.os == 'macos-latest'
+        working-directory: apps/desktop
+        run: npx tauri build --bundles dmg,app --config "$TAURI_VERSION_OVERRIDE"
+
+      - name: Zip the raw .app bundle (macOS only — a directory, not a file)
+        if: matrix.os == 'macos-latest'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd target/release/bundle/macos
+          for app in *.app; do
+            ditto -c -k --sequesterRsrc --keepParent "$app" "${app%.app}-${RELEASE_TAG}-macos.app.zip"
+          done
+
+      - name: Stage installer artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p staging
+          find target/release/bundle -maxdepth 2 -type f \
+            \( -iname "*.deb" -o -iname "*.AppImage" -o -iname "*.msi" -o -iname "*.exe" -o -iname "*.dmg" -o -iname "*.app.zip" \) \
+            -exec cp {} staging/ \;
+          ls -la staging
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: desktop-${{ matrix.os }}
+          path: staging/*
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------
+  # T-259/US-126: a single verifiable .vsix, built once on ubuntu-latest —
+  # the extension is pure TypeScript, no OS-specific build step (mirrors
+  # ci.yml's `vscode` job, which is also ubuntu-latest only).
+  # ---------------------------------------------------------------------
+  build-vscode:
+    name: VS Code extension (.vsix)
+    needs: guard
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: apps/vscode/package-lock.json
+
+      - name: npm ci
+        working-directory: apps/vscode
+        run: npm ci
+
+      - name: Copy LICENSE into the extension so the .vsix embeds it
+        # `apps/vscode/package.json`'s `license` field points at the real
+        # LICENSE two directories up ("SEE LICENSE IN ../../LICENSE") —
+        # correct for anyone reading the source tree, but `vsce` only ever
+        # bundles a LICENSE file it finds *inside* the extension directory
+        # itself. Verified locally (T-259): without this copy, `vsce
+        # package` still succeeds but the shipped .vsix contains no license
+        # text at all, only a warning in the build log nobody reviewing a
+        # release asset would ever see.
+        run: cp LICENSE apps/vscode/LICENSE
+
+      - name: Set the extension version to the release tag
+        working-directory: apps/vscode
+        run: npm version "${RELEASE_TAG#v}" --no-git-tag-version --allow-same-version
+
+      - name: npx vsce package
+        working-directory: apps/vscode
+        run: npx vsce package --out "../../gitsail-vscode-${RELEASE_TAG}.vsix"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vscode-extension
+          path: gitsail-vscode-${{ env.RELEASE_TAG }}.vsix
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------
+  # Collects every job's artifacts, computes SHA256SUMS.txt over all of
+  # them, and creates the GitHub Release (US-124 criterion 2: "version,
+  # checksum, verifiable origin" — the origin *is* this GitHub Release,
+  # built by this workflow, from this tag; no code-signing step exists —
+  # see release-process.md's registered decision, not a silent omission).
+  # ---------------------------------------------------------------------
+  publish-release:
+    name: Publish GitHub Release
+    needs: [build-cli-tui, build-desktop, build-vscode]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: downloaded
+
+      - name: Flatten downloaded artifacts into one release directory
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          find downloaded -type f -exec cp {} release/ \;
+          ls -la release
+
+      - name: Generate SHA256SUMS.txt
+        working-directory: release
+        run: sha256sum * > SHA256SUMS.txt
+
+      - name: Create GitHub Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh release create "$RELEASE_TAG" \
+            --title "GitSail $RELEASE_TAG" \
+            --notes-file docs/architecture/release-notes-template.md \
+            release/*

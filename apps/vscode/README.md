@@ -6,6 +6,30 @@ blame, and commit/file/line history by asking the `gitsail-cli` process, and
 nothing else — it never re-implements Git detection, log parsing, diffing,
 or blame parsing on the extension side (SAD §16, ADR-007).
 
+## Installation (T-259/US-126)
+
+**Official path today: "Install from VSIX...".** Download
+`gitsail-vscode-<tag>.vsix` from the project's
+[GitHub Releases](https://github.com/rpaggi/gitsail/releases) page (built
+and checksummed by `.github/workflows/release.yml`, ADR-023), then in VS
+Code: Extensions view → "..." menu → "Install from VSIX..." → select the
+downloaded file. Equivalently, from a terminal: `code --install-extension
+gitsail-vscode-<tag>.vsix`.
+
+This extension is **not** published on the VS Code Marketplace or Open VSX
+yet — a deliberate, registered decision (ADR-023), not an oversight; both
+require a registered publisher account/token this project does not yet
+have. `package.json`'s `publisher: "gitsail"` is an **unregistered
+placeholder** — confirm or change it before ever running a real `vsce
+publish`/`ovsx publish`. See
+`docs/architecture/release-process.md`'s "Registered decision: VS Code
+Marketplace / Open VSX stay unpublished" section for the exact checklist to
+follow once those accounts exist.
+
+This extension also does not bundle the `gitsail` CLI itself — see "Binary
+distribution" below for why, and install `gitsail` separately from the same
+GitHub Release (or build it from source).
+
 ## Architecture
 
 ```
@@ -163,19 +187,26 @@ bundle a per-platform `gitsail-cli` binary in v0.4. It requires the user to
 install `gitsail` themselves (the same binary EPIC-08 ships for the CLI/TUI)
 and either put it on `PATH` or point `gitsail.binaryPath` at it.
 
-**Why:** EPIC-25 (Distribution & Updates) — the epic that would define a
-real, signed, per-OS/arch release pipeline — has not shipped yet at this
-point in the roadmap. Bundling a hand-built, unsigned binary now would
+**Why:** at the time ADR-015 was accepted, EPIC-25 (Distribution & Updates)
+had not shipped any release pipeline at all. As of T-257 (US-124), a real
+pipeline now exists (`.github/workflows/release.yml`, ADR-023) and produces
+checksummed CLI/TUI archives per OS — but those archives are still
+**unsigned** (ADR-023 is an explicit "GitHub Releases only, no code signing
+yet" decision), and this extension's own `.vsix` is built and versioned by
+a separate job in that same pipeline, not bundled together with the CLI.
+Embedding an unsigned CLI binary inside the extension package would still
 undermine US-070 criterion 3 ("origin/version are verifiable; no silent
-download/execution of an untrusted file") in spirit: the extension would be
-trusting a binary of unclear provenance just because it shipped inside the
-`.vsix`, rather than because its version was actually checked. Requiring an
-explicit, user-controlled install keeps that verification meaningful.
+download/execution of an untrusted file") in spirit — the extension would
+be trusting a binary bundled at `.vsix`-build time rather than one the user
+consciously installed and can verify (checksum, or a future signature)
+independently. Requiring an explicit, user-controlled install — from this
+same GitHub Release's CLI/TUI archive, or built from source — keeps that
+verification meaningful.
 
 The full writeup lives in `docs/architecture/GitSail_SAD_and_ADRs_v0.1.md`,
-**ADR-015 — VS Code binary distribution for v0.4**. Revisit this decision
-once EPIC-25 defines a pipeline that can produce a signed, verifiable
-per-platform artifact this extension could embed.
+**ADR-015 — VS Code binary distribution for v0.4** and **ADR-023 — GitHub
+Releases-only distribution**. Revisit this decision once a code-signing
+pipeline exists for the CLI binary specifically.
 
 **Verification, not blind trust (criterion 3):** before ever calling
 `gitsail open`/etc., the extension spawns `<binary> --version`, parses the

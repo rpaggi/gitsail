@@ -11,7 +11,16 @@ GitSail is an open-source Git client ecosystem with a shared Rust core, CLI, TUI
 - **Node.js 18+** and `npm` only if you also want to build/run `apps/desktop` or `apps/vscode`.
 - Linux, Windows, or macOS. `apps/desktop` additionally needs the system WebKitGTK/GTK/D-Bus development libraries on Linux (Tauri v2 prerequisite); Windows/macOS need only the Rust toolchain plus, respectively, WebView2 and Xcode Command Line Tools, both already present on current OS installs.
 
-No prebuilt binary is distributed yet (v0.1 is source-only) — build from source below.
+No prebuilt binary has been published yet — no `vX.Y.Z` tag has been pushed
+against this repository so far — so build from source below is the only way
+to get a working binary today. A release pipeline
+(`.github/workflows/release.yml`, ADR-023) exists and is ready: pushing a
+`vX.Y.Z` tag builds CLI/TUI archives for Linux/Windows/macOS, Desktop
+installers, and a VS Code `.vsix`, checksums them, and publishes them to a
+GitHub Release. See [the release process](docs/architecture/release-process.md)
+for exactly what that pipeline produces, including the explicit, registered
+decision to skip code signing/notarization and Marketplace/Open VSX
+publishing for now.
 
 ## Installation (from source)
 
@@ -285,20 +294,20 @@ On Linux, building the Rust backend also needs the system WebKitGTK/GTK/D-Bus de
 
 ## Architecture and decisions
 
-- The [Software Architecture Document](docs/architecture/GitSail_SAD_and_ADRs_v0.1.md) states the system's goals, style (Ports & Adapters), layer boundaries, and per-area design (protocol, CLI, TUI, Desktop, VS Code, caching, logging, privacy, CI). Its own index at the top lists all 22 Architecture Decision Records with status and a one-line summary — every one is `Accepted` as of this writing.
+- The [Software Architecture Document](docs/architecture/GitSail_SAD_and_ADRs_v0.1.md) states the system's goals, style (Ports & Adapters), layer boundaries, and per-area design (protocol, CLI, TUI, Desktop, VS Code, caching, logging, privacy, CI). Its own index at the top lists all 23 Architecture Decision Records with status and a one-line summary — every one is `Accepted` as of this writing.
 - Any future split of that document into smaller files must preserve the original text and every ADR's number and content verbatim; see `CONTRIBUTING.md` for the exact rule.
 
 ## Documents and assets
 
 - [Product backlog](docs/product/GitSail_Product_Backlog_v1.0.md)
 - [Original PRD](docs/product/GitSail_PRD_v0.1-v1.0.md)
-- [SAD and 22 ADRs](docs/architecture/GitSail_SAD_and_ADRs_v0.1.md) (ADR-013 onward records decisions made since the original SAD; see the ADR index at the top of that same file)
+- [SAD and 23 ADRs](docs/architecture/GitSail_SAD_and_ADRs_v0.1.md) (ADR-013 onward records decisions made since the original SAD; see the ADR index at the top of that same file)
 - [Brand identity — name, tagline, mascot, sail + Git-graph concept](docs/product/brand-identity.md)
 - [Original logo](assets/branding/logo_gitsail.png)
 - [Original Desktop mockup](assets/mockups/gitsail_gui_mockup.png)
 - [Original TUI mockup](assets/mockups/gitsail_tui_mockup.png)
 - [Assets inventory — provenance and usage of the files above](assets/README.md)
-- [CI policy](docs/architecture/ci-policy.md), [performance baseline](docs/architecture/performance-baseline.md), [preferences matrix](docs/architecture/preferences-matrix.md), [protocol compatibility](docs/architecture/protocol-compatibility.md) — operational companions to the ADRs above.
+- [CI policy](docs/architecture/ci-policy.md), [release process](docs/architecture/release-process.md), [performance baseline](docs/architecture/performance-baseline.md), [preferences matrix](docs/architecture/preferences-matrix.md), [protocol compatibility](docs/architecture/protocol-compatibility.md) — operational companions to the ADRs above.
 - [CONTRIBUTING.md](CONTRIBUTING.md) — setup, tests, architecture boundaries, and the review/ADR-update process.
 - User manuals: [TUI](docs/manual/tui.md), [Desktop](docs/manual/desktop.md), [VS Code extension](docs/manual/vscode.md), [troubleshooting (credentials, configuration, updates, privacy, compatibility)](docs/manual/troubleshooting.md), and [roadmap and open decisions](docs/manual/roadmap-and-open-decisions.md) — what each interface actually does today, and what is deliberately deferred or still undecided.
 
@@ -314,7 +323,7 @@ Original source files and PNG assets were copied byte-for-byte from the files su
 
 Validated on 2026-09-17: story and epic counts; unique IDs; required fields; at least three acceptance criteria per story; existing dependency targets; no dependency cycles; no dependency targeting a later milestone; valid local links; byte-for-byte integrity of the original documents and images.
 
-Re-validated on 2026-09-18 (T-264/US-131): every CLI example above was executed against a real, disposable fixture repository with the `gitsail` binary built from this exact source tree, both in human and `--json` form; every link in this README and its ADR cross-references were followed and resolve to an existing file/section (22 ADRs present, ADR-001 through ADR-022, all `Accepted`).
+Re-validated on 2026-09-18 (T-264/US-131): every CLI example above was executed against a real, disposable fixture repository with the `gitsail` binary built from this exact source tree, both in human and `--json` form; every link in this README and its ADR cross-references were followed and resolve to an existing file/section (22 ADRs present, ADR-001 through ADR-022, all `Accepted`). ADR-023 (GitHub Releases-only distribution, EPIC-25/T-257–T-259) was added afterward, the same day — see that ADR for what it covers.
 
 ## Contributing
 

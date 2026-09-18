@@ -6,6 +6,15 @@
   "private": true,
   "publisher": "gitsail",
   "license": "SEE LICENSE IN ../../LICENSE",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/rpaggi/gitsail.git",
+    "directory": "apps/vscode"
+  },
+  "bugs": {
+    "url": "https://github.com/rpaggi/gitsail/issues"
+  },
+  "homepage": "https://github.com/rpaggi/gitsail#readme",
   "engines": {
     "vscode": "^1.85.0"
   },
@@ -145,12 +154,15 @@
     "build": "tsc -p ./",
     "lint": "tsc --noEmit -p ./",
     "test": "vitest run",
-    "test:e2e": "node ./test-e2e/runTest.js"
+    "test:e2e": "node ./test-e2e/runTest.js",
+    "vscode:prepublish": "npm run compile",
+    "package": "vsce package"
   },
   "devDependencies": {
     "@types/node": "^22",
     "@types/vscode": "^1.85.0",
     "@vscode/test-electron": "^2.4.0",
+    "@vscode/vsce": "^3.2.1",
     "typescript": "^5.6.0",
     "vitest": "^5.0.1"
   }

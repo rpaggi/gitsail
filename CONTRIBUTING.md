@@ -198,7 +198,7 @@ not a draft to rewrite. Rules, in order of how often they come up:
    change its `**Status:**` line (e.g. `Accepted` → `Superseded by
    ADR-0NN`) and add the revision note — never delete the ADR.
 3. **A new decision gets the next unused ADR number**, appended after the
-   current last one (today: `ADR-023` is next, since `ADR-001`–`ADR-022`
+   current last one (today: `ADR-024` is next, since `ADR-001`–`ADR-023`
    are all taken — see the ADR index at the top of the SAD file, which
    must be kept in sync whenever an ADR is added or its status changes).
 4. **US/EPIC/T-xxx IDs in the backlog and PRD follow the same rule**: never
@@ -219,3 +219,15 @@ supported-version list, also update
 `docs/architecture/protocol-compatibility.md` in the same change — ADR-016
 requires that document to stay current with the code, not just with the
 ADR that established the policy.
+
+## 7. Releases
+
+`.github/workflows/release.yml` (ADR-023) is a separate pipeline from
+`ci.yml` — it never runs on a pull request and is not part of the required
+merge checks in `ci-policy.md`. It only runs on a pushed `vX.Y.Z` tag (or a
+manual dispatch against an existing one) and publishes CLI/TUI archives,
+Desktop installers, and a VS Code `.vsix` to a GitHub Release. See
+`docs/architecture/release-process.md` for what it builds, the registered
+decision to distribute via GitHub Releases only for now (no code
+signing/notarization, no Marketplace/Open VSX publishing yet), and exactly
+what changes once those become available.

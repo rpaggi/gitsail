@@ -26,6 +26,13 @@
     "targets": "all",
     "icon": [
       "icons/icon.png"
-    ]
+    ],
+    "publisher": "GitSail",
+    "homepage": "https://github.com/rpaggi/gitsail",
+    "copyright": "Copyright the GitSail contributors",
+    "license": "Apache-2.0",
+    "category": "DeveloperTool",
+    "shortDescription": "Navigate your Git history.",
+    "longDescription": "GitSail Desktop is a local-first Git client built on a shared Rust core (GitSail's TUI and VS Code extension use the same core). It never requires a GitSail account and never sends telemetry. T-258/US-125 (EPIC-25): these metadata fields feed each platform's packaged installer (.deb/.rpm/.AppImage on Linux, .msi/NSIS .exe on Windows, .dmg/.app on macOS) — see docs/architecture/release-process.md for the packaging pipeline and the explicit, documented decision not to code-sign/notarize these installers yet."
   }
 }

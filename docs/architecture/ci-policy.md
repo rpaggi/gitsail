@@ -6,6 +6,11 @@ checks are **required for merge** vs. **informative only**, and the
 assumptions/limitations behind that first pipeline (there was no CI in this
 repository before T-254 — `.github/workflows/` did not exist).
 
+This document does not cover `.github/workflows/release.yml` (ADR-023,
+tag-triggered, publishes GitHub Release artifacts — never runs on a pull
+request and is not one of the required-for-merge checks below) — see
+`docs/architecture/release-process.md` for that pipeline's own policy.
+
 ## Jobs and what they check
 
 | Job | Runs on | Purpose |

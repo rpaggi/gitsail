@@ -8,7 +8,37 @@ menu item, or shortcut here is aspirational. See
 configuration file locations, updates, privacy, and protocol compatibility
 (none of that is Desktop-specific).
 
-## Opening and navigating
+## Installing (T-258/US-125)
+
+`.github/workflows/release.yml` (ADR-023) packages Desktop into a real
+installer per OS whenever a `vX.Y.Z` tag is pushed: `.deb`/`.AppImage`
+(Linux), `.msi`/NSIS `.exe` (Windows), `.dmg`/`.app.zip` (macOS) — attached
+to the project's [GitHub Releases](https://github.com/rpaggi/gitsail/releases)
+page with a `SHA256SUMS.txt`. See
+[`docs/architecture/release-process.md`](../architecture/release-process.md)
+for exactly what each format needs and produces. As of this writing no tag
+has actually been pushed yet, so no release exists in practice — running
+from source (below) remains the only way to use Desktop today.
+
+**These installers are not code-signed or notarized** — a deliberate,
+registered decision (ADR-023), not an oversight. Windows will show a
+SmartScreen "unrecognized publisher" warning; macOS Gatekeeper will refuse
+to open the app until you explicitly allow it (System Settings → Privacy &
+Security → "Open Anyway", after first attempting to launch it). See
+`release-process.md` for exactly what changes once a certificate/
+notarization account exists.
+
+**Installing, opening, and removing Desktop never touches your Git
+repositories or your saved preferences/recent-repositories list.**
+Preferences live at `<OS config dir>/gitsail/desktop/` (e.g.
+`~/.config/gitsail/desktop/` on Linux) — entirely separate from wherever an
+installer places the application binary itself, and no installer/uninstaller
+this pipeline produces touches that directory. See
+`docs/architecture/preferences-matrix.md` and `release-process.md`'s
+"Install/remove preserves repositories and preferences" section for the
+full verification.
+
+## Running from source
 
 From `apps/desktop`:
 
@@ -17,9 +47,7 @@ npm install
 npm run tauri dev   # windowed dev build; needs a Linux display + WebKitGTK, or Windows/macOS
 ```
 
-No packaged installer exists yet for any OS (see
-[Limitations](#limitations) and `troubleshooting.md`'s "Updates" section) —
-Desktop is currently run from source.
+## Opening and navigating
 
 **Layout** (`AppShell.vue`): a header with the GitSail identity and the
 current repository/branch; a **sidebar** with repository selection (open a

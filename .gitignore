@@ -9,3 +9,10 @@ apps/desktop/src-tauri/gen/
 apps/vscode/node_modules/
 apps/vscode/out/
 apps/vscode/.vscode-test/
+apps/vscode/*.vsix
+apps/vscode/LICENSE
+
+# T-257/T-258/T-259 (EPIC-25 — Distribution & Updates): local staging output
+# from testing .github/workflows/release.yml's packaging steps by hand —
+# never a committed artifact. See docs/architecture/release-process.md.
+/release-staging/
