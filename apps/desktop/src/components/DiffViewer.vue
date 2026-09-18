@@ -9,6 +9,7 @@
 
 import { computed, ref } from "vue";
 
+import { useBlameStore } from "../stores/blame";
 import { useDiffStore } from "../stores/diff";
 import { sideBySideRows, unifiedLines, type SideBySideRow, type UnifiedLine } from "./diffPresentation";
 import { computeVisibleRange } from "./virtualList";
@@ -22,6 +23,16 @@ type FlatRow =
   | { kind: "sideBySide"; row: SideBySideRow };
 
 const diff = useDiffStore();
+const blame = useBlameStore();
+
+/** Opens the blame panel (T-195/US-062 criterion 1) for whichever file is
+ * currently selected in this viewer — always the working-tree revision
+ * (US-033's default), matching `stores/blame.ts::open`'s own contract. */
+function openBlame(): void {
+  if (diff.file) {
+    void blame.open(diff.file);
+  }
+}
 
 const viewport = ref<HTMLElement | null>(null);
 const scrollTop = ref(0);
@@ -93,6 +104,14 @@ function originSymbol(origin: string): string {
         Side-by-side
       </button>
       <span v-if="diff.file" class="diff-viewer__file">{{ diff.file }}</span>
+      <button
+        v-if="diff.file"
+        class="diff-viewer__blame-button"
+        :aria-label="`Show blame for ${diff.file}`"
+        @click="openBlame"
+      >
+        Blame
+      </button>
     </div>
 
     <p v-if="diff.lastError" class="error">{{ diff.lastError.message }}</p>
@@ -157,6 +176,9 @@ function originSymbol(origin: string): string {
 }
 .diff-viewer__file {
   opacity: 0.8;
+}
+.diff-viewer__blame-button {
+  margin-left: auto;
 }
 .diff-viewer__viewport {
   height: 20rem;

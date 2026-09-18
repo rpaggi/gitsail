@@ -5,23 +5,20 @@
 // *where* each one lives). Three regions, per US-053 criterion 1:
 //
 //   - a header carrying the GitSail identity (US-053 criterion 2);
-//   - a sidebar for repository selection, branches, remotes/sync and
-//     pull/merge requests (criterion 1 — see the "Sidebar scope" note
-//     below for the one gap: no tags/stashes panel exists yet anywhere in
-//     this codebase to place here);
+//   - a sidebar for repository selection, branches, remotes/sync, tags/
+//     stash, and pull/merge requests (criterion 1);
 //   - a main area with the commit graph central and a tabbed area below it
 //     for changes/merge-rebase/amend (criterion 1, "possivelmente com
 //     abas").
 //
 // Sidebar scope: US-053 criterion 1 lists "branches/remotes/tags/stashes"
-// for the sidebar. Only branches (`BranchPanel`), remotes (`SyncPanel`) and
-// pull/merge requests (`PullRequestsPanel`) exist as components anywhere in
-// this app as of this story — there is no tags or stashes panel/store/
-// service yet (confirmed by reading every component under
-// `src/components/`). This layout groups what exists; adding tags/stashes
-// support is out of scope for a layout-consolidation story and is a gap to
-// close in whichever story actually implements that feature, not invented
-// here as a placeholder.
+// for the sidebar. As of this story (T-186/US-053) only branches
+// (`BranchPanel`), remotes (`SyncPanel`) and pull/merge requests
+// (`PullRequestsPanel`) existed as components — there was no tags or
+// stashes panel/store/service yet. `ReferencesPanel` (T-195/US-062) closes
+// that gap, mirroring `gitsail-tui`'s own `Panel::References` semantics
+// (tags/remotes/stash together, with sub-views) rather than three separate
+// sidebar sections.
 //
 // Shell-level empty/opening/error states (US-053 DoD) are resolved by the
 // pure `resolveShellState` (see `shellState.ts`) rather than inlined here,
@@ -39,6 +36,7 @@ import DiffViewer from "./DiffViewer.vue";
 import KeybindingsPanel from "./KeybindingsPanel.vue";
 import MergePanel from "./MergePanel.vue";
 import PullRequestsPanel from "./PullRequestsPanel.vue";
+import ReferencesPanel from "./ReferencesPanel.vue";
 import RecentRepositories from "./RecentRepositories.vue";
 import RepositoryOpener from "./RepositoryOpener.vue";
 import SearchPalette from "./SearchPalette.vue";
@@ -234,7 +232,7 @@ function onTabKeydown(event: KeyboardEvent, index: number): void {
     </header>
 
     <div class="app-shell__body">
-      <aside class="app-shell__sidebar" aria-label="Branches, remotes and pull requests">
+      <aside class="app-shell__sidebar" aria-label="Branches, remotes, references and pull requests">
         <section class="app-shell__section">
           <h2 class="app-shell__section-title">Repository</h2>
           <RepositoryOpener />
@@ -266,6 +264,9 @@ function onTabKeydown(event: KeyboardEvent, index: number): void {
           </section>
           <section class="app-shell__section">
             <SyncPanel />
+          </section>
+          <section class="app-shell__section">
+            <ReferencesPanel />
           </section>
           <section class="app-shell__section">
             <PullRequestsPanel />

@@ -190,6 +190,31 @@ export interface RemoteDto {
   pushUrl: string;
 }
 
+// -- Tags and stash (EPIC-18/US-091, EPIC-12/T-195/US-062) --------------
+//
+// Mirrors `crates/gitsail-protocol/src/dto.rs`'s tags/stash section, itself
+// built from `gitsail_domain::{Tag, TagKind, Stash}`. Matches
+// `gitsail-tui`'s own `ReferenceView::Tags`/`ReferenceView::Stash`
+// semantics (`crates/gitsail-tui/src/ui.rs`): a lightweight tag carries no
+// message/tagger/date, only an annotated tag does.
+
+export type TagKindDto =
+  | { kind: "lightweight" }
+  | { kind: "annotated"; message: string; tagger: SignatureDto; date: GitTimestampDto };
+
+export interface TagDto {
+  name: string;
+  target: string;
+  kind: TagKindDto;
+}
+
+export interface StashDto {
+  index: number;
+  commit: string;
+  message: string;
+  date: GitTimestampDto;
+}
+
 /** What a sync action would target (or, for `fetch`/`push`, what it just
  * acted on) — `branch` is `null` only when no repository/branch context is
  * available at all; once resolved it is always the current branch, even
@@ -391,6 +416,32 @@ export interface FileDiffDto {
 
 export interface DiffDto {
   files: FileDiffDto[];
+}
+
+// -- Blame (EPIC-07/US-031..034, EPIC-12/T-195/US-062) -------------------
+//
+// Mirrors `crates/gitsail-protocol/src/dto.rs`'s blame section, itself
+// built from `gitsail_domain::{Blame, BlameLine, BlameOrigin}`. `origin:
+// "local"` is Git's own "not committed yet" attribution (US-033) — never a
+// real historical commit, so the frontend must never render it through the
+// same "open commit details" affordance a `"committed"` line offers.
+
+export type BlameOriginDto = "committed" | "local";
+
+export interface BlameLineDto {
+  finalLine: number;
+  originalLine: number;
+  commit: string;
+  author: SignatureDto;
+  timestamp: GitTimestampDto;
+  content: string;
+  origin: BlameOriginDto;
+}
+
+export interface BlameDto {
+  file: string;
+  revision: string | null;
+  lines: BlameLineDto[];
 }
 
 // -- Commit/amend results (US-058/US-059) --------------------------------

@@ -25,7 +25,7 @@ use gitsail_domain::{
     DiffLine, DiffLineOrigin, FileChange, FileContentAtRevision, FileContentKind, FileDiff,
     FileStatusCode, ForgeKind, ForgePath, GitSailError, GitTimestamp, GraphEdge, GraphRow,
     HeadState, InProgressOperation, LineHistory, LineHistoryEntry, LineRange, OperationCapability,
-    Remote, Repository, RepositoryStatus, ShortHash, Signature,
+    Remote, Repository, RepositoryStatus, ShortHash, Signature, Stash, Tag, TagKind,
 };
 
 /// Converts a filesystem path to its wire representation.
@@ -467,6 +467,84 @@ impl From<&Remote> for RemoteDto {
             name: remote.name.clone(),
             fetch_url: remote.fetch_url.redacted(),
             push_url: remote.push_url.redacted(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------
+// Tags and stash (EPIC-18/US-091, exposed to Desktop for T-195/US-062).
+// Mirrors `gitsail-tui`'s own `ReferenceView::Tags`/`ReferenceView::Stash`
+// rendering (`crates/gitsail-tui/src/ui.rs`) one-to-one: a lightweight tag
+// carries only its target, an annotated tag also carries its message/
+// tagger/date, and a stash entry carries its index/commit/message/date —
+// no field here is fabricated for a variant that does not have it.
+// ---------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum TagKindDto {
+    Lightweight,
+    Annotated {
+        message: String,
+        tagger: SignatureDto,
+        date: GitTimestampDto,
+    },
+}
+
+impl From<&TagKind> for TagKindDto {
+    fn from(kind: &TagKind) -> Self {
+        match kind {
+            TagKind::Lightweight => Self::Lightweight,
+            TagKind::Annotated {
+                message,
+                tagger,
+                date,
+            } => Self::Annotated {
+                message: message.clone(),
+                tagger: SignatureDto::from(tagger),
+                date: (*date).into(),
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TagDto {
+    pub name: String,
+    /// The commit this tag ultimately resolves to (US-091 criterion 1) —
+    /// for an annotated tag, already peeled past the intermediate tag
+    /// object, matching [`Tag::target`]'s own contract.
+    pub target: String,
+    pub kind: TagKindDto,
+}
+
+impl From<&Tag> for TagDto {
+    fn from(tag: &Tag) -> Self {
+        Self {
+            name: tag.name.clone(),
+            target: tag.target.as_str().to_string(),
+            kind: TagKindDto::from(&tag.kind),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StashDto {
+    pub index: u32,
+    pub commit: String,
+    pub message: String,
+    pub date: GitTimestampDto,
+}
+
+impl From<&Stash> for StashDto {
+    fn from(stash: &Stash) -> Self {
+        Self {
+            index: stash.index,
+            commit: stash.commit.as_str().to_string(),
+            message: stash.message.clone(),
+            date: stash.date.into(),
         }
     }
 }
@@ -1973,6 +2051,79 @@ mod tests {
         let dto = BlameDto::from(&blame);
         assert_eq!(dto.file, "src/lib.rs");
         assert_eq!(dto.revision, None);
+    }
+
+    #[test]
+    fn tag_dto_reports_a_lightweight_tag_with_no_message_tagger_or_date() {
+        let tag = Tag {
+            name: "v1.0".to_string(),
+            target: CommitHash::new("a".repeat(40)).unwrap(),
+            kind: TagKind::Lightweight,
+        };
+
+        let dto = TagDto::from(&tag);
+        let json = serde_json::to_value(&dto).unwrap();
+
+        assert_eq!(dto.name, "v1.0");
+        assert_eq!(dto.target, "a".repeat(40));
+        assert_eq!(json["kind"], serde_json::json!({ "kind": "lightweight" }));
+    }
+
+    #[test]
+    fn tag_dto_reports_an_annotated_tags_message_tagger_and_date() {
+        let tagger = Signature {
+            name: "Ada".to_string(),
+            email: "ada@example.com".to_string(),
+        };
+        let date = GitTimestamp {
+            seconds_since_epoch: 1_700_000_000,
+            utc_offset_minutes: 0,
+        };
+        let tag = Tag {
+            name: "v1.0".to_string(),
+            target: CommitHash::new("a".repeat(40)).unwrap(),
+            kind: TagKind::Annotated {
+                message: "Release 1.0".to_string(),
+                tagger: tagger.clone(),
+                date,
+            },
+        };
+
+        let dto = TagDto::from(&tag);
+
+        match dto.kind {
+            TagKindDto::Annotated {
+                message,
+                tagger: tagger_dto,
+                date: date_dto,
+            } => {
+                assert_eq!(message, "Release 1.0");
+                assert_eq!(tagger_dto.name, "Ada");
+                assert_eq!(date_dto.seconds_since_epoch, 1_700_000_000);
+            }
+            TagKindDto::Lightweight => panic!("expected an annotated tag"),
+        }
+    }
+
+    #[test]
+    fn stash_dto_maps_index_commit_message_and_date() {
+        let stash = Stash {
+            index: 2,
+            commit: CommitHash::new("b".repeat(40)).unwrap(),
+            message: "WIP on main".to_string(),
+            date: GitTimestamp {
+                seconds_since_epoch: 1_700_000_500,
+                utc_offset_minutes: -180,
+            },
+        };
+
+        let dto = StashDto::from(&stash);
+        let json = serde_json::to_value(&dto).unwrap();
+
+        assert_eq!(json["index"], 2);
+        assert_eq!(json["commit"], "b".repeat(40));
+        assert_eq!(json["message"], "WIP on main");
+        assert_eq!(json["date"]["secondsSinceEpoch"], 1_700_000_500);
     }
 
     #[test]

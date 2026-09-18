@@ -26,7 +26,8 @@ pub use dto::{
     PatchExportDto, PatchPreviewDto, PreferencesDto, PullOutcomeDto, PullRequestPageDto,
     PullRequestStateDto, PullRequestSummaryDto, PullResultDto, RebaseActionDto, RebasePlanDto,
     RebasePlanEntryDto, RebaseResultDto, RecentRepositoryDto, RemoteDto, RepositoryDto,
-    RepositoryStatusDto, RevertResultDto, SignatureDto, SyncTargetDto, ThemePreferenceDto,
+    RepositoryStatusDto, RevertResultDto, SignatureDto, StashDto, SyncTargetDto, TagDto,
+    TagKindDto, ThemePreferenceDto,
 };
 pub use envelope::{Envelope, Page, SCHEMA_VERSION};
 pub use error::ErrorPayload;

@@ -2,6 +2,7 @@
 import { onBeforeUnmount, onMounted } from "vue";
 
 import AppShell from "./components/AppShell.vue";
+import BlamePanel from "./components/BlamePanel.vue";
 import ConfirmationDialog from "./components/ConfirmationDialog.vue";
 import HistoryEditingPanel from "./components/HistoryEditingPanel.vue";
 import { useAppDataStore } from "./stores/appData";
@@ -76,14 +77,15 @@ onBeforeUnmount(() => {
       `AppShell.vue` (T-186/US-053) owns the actual page layout — header
       with the GitSail identity, sidebar, and the tabbed main workspace —
       and is this app's single `<main>` landmark. `ConfirmationDialog`/
-      `HistoryEditingPanel` stay mounted here, once, as app-global modal
-      overlays (T-194/US-061, T-240/US-088): they render above *everything*
-      AppShell contains regardless of which sidebar section or tab is
-      active, so they belong beside it, not nested inside one of its
-      regions.
+      `HistoryEditingPanel`/`BlamePanel` stay mounted here, once, as
+      app-global modal overlays (T-194/US-061, T-240/US-088, T-195/US-062):
+      they render above *everything* AppShell contains regardless of which
+      sidebar section or tab is active, so they belong beside it, not
+      nested inside one of its regions.
     -->
     <AppShell />
     <ConfirmationDialog />
     <HistoryEditingPanel />
+    <BlamePanel />
   </div>
 </template>

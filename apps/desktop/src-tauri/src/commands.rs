@@ -21,29 +21,29 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use std::collections::HashMap;
 
 use gitsail_application::{
-    AbortOperation, AmendCommit, ApplyPatch, CherryPick, CommitQuery, ConnectForgeAccount,
-    ContinueOperation, CreateBranch, CreateCommit, DeleteBranch, DetectInProgressOperation,
-    DiffRequest, DisconnectForgeAccount, ExecuteRebasePlan, Fetch, ForgeToken,
-    ForgetRecentRepository, GetCommit, GetCommitHistory, GetConflictSides, GetDiff,
-    GetForgeConnectionStatus, GetForgeLink, ListBranches, ListPullRequests, ListRecentRepositories,
-    LoadPreferences, MarkConflictResolved, Merge, MergeParentPolicy, OpenRepository, PlanRebase,
-    PreviewAmend, PreviewPatchApplication, Pull, Push, Rebase, RebasePlan, RecordRecentRepository,
-    RefreshReason, RenameBranch, Reset, ResetMode, Revert, SetThemePreference, SkipOperation,
-    StageFiles, StageHunks, SwitchBranch, TakeConflictSide, ThemePreference, UnstageFiles,
-    UnstageHunks,
+    AbortOperation, AmendCommit, ApplyPatch, BlameRequest, CherryPick, CommitQuery,
+    ConnectForgeAccount, ContinueOperation, CreateBranch, CreateCommit, DeleteBranch,
+    DetectInProgressOperation, DiffRequest, DisconnectForgeAccount, ExecuteRebasePlan, Fetch,
+    ForgeToken, ForgetRecentRepository, GetCommit, GetCommitHistory, GetConflictSides, GetDiff,
+    GetFileBlame, GetForgeConnectionStatus, GetForgeLink, ListBranches, ListPullRequests,
+    ListRecentRepositories, LoadPreferences, MarkConflictResolved, Merge, MergeParentPolicy,
+    OpenRepository, PlanRebase, PreviewAmend, PreviewPatchApplication, Pull, Push, Rebase,
+    RebasePlan, RecordRecentRepository, RefreshReason, RenameBranch, Reset, ResetMode, Revert,
+    SetThemePreference, SkipOperation, StageFiles, StageHunks, SwitchBranch, TakeConflictSide,
+    ThemePreference, UnstageFiles, UnstageHunks,
 };
 use gitsail_domain::{
     repository_location, Branch, BranchKind, BranchName, CancellationToken, CommitHash,
     ConflictSide, ErrorCode, FileDiff, ForgePath, GitSailError, GraphCommit, Remote, Repository,
 };
 use gitsail_protocol::{
-    AmendPreviewDto, ApplyPatchResultDto, BranchDto, CherryPickResultDto, CommitDto,
+    AmendPreviewDto, ApplyPatchResultDto, BlameDto, BranchDto, CherryPickResultDto, CommitDto,
     CommitGraphPageDto, CommitGraphRowDto, CommitResultDto, ConflictSidesDto, DiffDto,
     ErrorPayload, FileDiffDto, ForgeAccountDto, ForgeConnectionStatusDto, ForgeLinkTargetDto,
     InProgressOperationDto, ListPullRequestsOutcomeDto, MergeResultDto, PatchExportDto,
     PatchPreviewDto, PreferencesDto, PullOutcomeDto, PullResultDto, RebasePlanDto, RebaseResultDto,
-    RecentRepositoryDto, RemoteDto, RepositoryDto, RepositoryStatusDto, RevertResultDto,
-    SyncTargetDto,
+    RecentRepositoryDto, RemoteDto, RepositoryDto, RepositoryStatusDto, RevertResultDto, StashDto,
+    SyncTargetDto, TagDto,
 };
 
 use crate::state::{AppState, StartupIntent};
@@ -799,6 +799,98 @@ fn list_remotes_impl(state: &AppState) -> Result<Vec<RemoteDto>, GitSailError> {
     let (repository, _epoch) = state.repository_with_epoch()?;
     let remotes = state.port().list_remotes(&repository)?;
     Ok(remotes.iter().map(RemoteDto::from).collect())
+}
+
+// ---------------------------------------------------------------------
+// T-195/US-062: tags, stash, and file blame — the Desktop-side surface for
+// the reads EPIC-18/US-091 and EPIC-07/US-031 already delivered on the Core
+// (`RepositoryReadPort::list_tags`/`list_stash_entries`/`blame`) and that
+// `gitsail-tui`'s own References panel (T-183, `Panel::References`) and
+// `gitsail-cli`'s `blame` subcommand already expose. Every command below is
+// read-only: none goes through `run_mutation`, and none calls
+// `state.write_port()` — only `state.port()`, matching every other read
+// command in this file (US-051 criterion 3, "no business/UX rule beyond
+// mapping a use case to a DTO lives in this file").
+// ---------------------------------------------------------------------
+
+/// Lists local tags, both lightweight and annotated (US-091 criterion 1;
+/// T-195 criterion 2). An empty repository legitimately reports an empty
+/// list — never an error — matching [`RepositoryReadPort::list_tags`]'s own
+/// "empty is a valid state" contract.
+#[tauri::command]
+pub fn list_tags(state: tauri::State<AppState>) -> Result<Vec<TagDto>, ErrorPayload> {
+    list_tags_impl(&state).map_err(|err| ErrorPayload::from(&err))
+}
+
+fn list_tags_impl(state: &AppState) -> Result<Vec<TagDto>, GitSailError> {
+    let (repository, _epoch) = state.repository_with_epoch()?;
+    let tags = state.port().list_tags(&repository)?;
+    Ok(tags.iter().map(TagDto::from).collect())
+}
+
+/// Lists stash entries, newest (`stash@{0}`) first (US-091 criterion 2;
+/// T-195 criterion 2). An empty stash legitimately reports an empty list —
+/// never an error — matching [`RepositoryReadPort::list_stash_entries`]'s
+/// own "empty is a valid state" contract.
+#[tauri::command]
+pub fn list_stash_entries(state: tauri::State<AppState>) -> Result<Vec<StashDto>, ErrorPayload> {
+    list_stash_entries_impl(&state).map_err(|err| ErrorPayload::from(&err))
+}
+
+fn list_stash_entries_impl(state: &AppState) -> Result<Vec<StashDto>, GitSailError> {
+    let (repository, _epoch) = state.repository_with_epoch()?;
+    let entries = state.port().list_stash_entries(&repository)?;
+    Ok(entries.iter().map(StashDto::from).collect())
+}
+
+/// Reads line-by-line blame for `path` (US-031/US-033; T-195 criterion 1) —
+/// each returned line carries its commit, author, timestamp, and content, so
+/// the frontend can relate a line to the commit that introduced it and open
+/// that commit's own details (via [`get_commit`]) without a second,
+/// bespoke lookup. `revision: None` blames the working tree, including any
+/// uncommitted changes, exactly like [`get_diff`]'s own "missing means
+/// working tree" convention.
+///
+/// Unlike `gitsail-cli`'s one-shot process, this command runs inside the
+/// long-lived Desktop process, so a fresh [`GetFileBlame`] (and its own,
+/// per-call cache) is built for every call rather than shared across calls
+/// on `AppState` — this story's scope is "read blame correctly", not the
+/// separate optimization of reusing `GetFileBlame`'s cache across repeated
+/// requests for unchanged content (see this function's own `content_version`
+/// argument below, always `0`: nothing in `AppState` yet tracks a content
+/// version to key a shared cache on). A future story can add that caching
+/// without changing this command's contract.
+#[tauri::command]
+pub fn get_blame(
+    path: String,
+    revision: Option<String>,
+    state: tauri::State<AppState>,
+) -> Result<BlameDto, ErrorPayload> {
+    get_blame_impl(&state, &path, revision.as_deref()).map_err(|err| ErrorPayload::from(&err))
+}
+
+fn get_blame_impl(
+    state: &AppState,
+    path: &str,
+    revision: Option<&str>,
+) -> Result<BlameDto, GitSailError> {
+    let (repository, _epoch) = state.repository_with_epoch()?;
+    let revision = revision
+        .map(|rev| state.port().resolve_revision(&repository, rev))
+        .transpose()?;
+    let request = BlameRequest {
+        file: PathBuf::from(path),
+        revision,
+        line_range: None,
+        buffer_contents: None,
+    };
+    let blame = GetFileBlame::new(state.port()).execute(
+        &repository,
+        &request,
+        0,
+        &CancellationToken::new(),
+    )?;
+    Ok(BlameDto::from(&blame))
 }
 
 // ---------------------------------------------------------------------
@@ -1641,9 +1733,9 @@ mod tests {
         RecentRepositoriesPort,
     };
     use gitsail_domain::{
-        Blame, Branch, BranchName, CancellationToken, ChangeType, Commit, CommitHash, ErrorCode,
-        FileChange, FileStatusCode, GitSailError, GitTimestamp, HeadState, LineHistory, Repository,
-        RepositoryId, RepositoryStatus, Signature,
+        Blame, BlameLine, BlameOrigin, Branch, BranchName, CancellationToken, ChangeType, Commit,
+        CommitHash, ErrorCode, FileChange, FileStatusCode, GitSailError, GitTimestamp, HeadState,
+        LineHistory, Repository, RepositoryId, RepositoryStatus, Signature, Stash, Tag, TagKind,
     };
 
     /// An in-memory [`RecentRepositoriesPort`] double — `commands.rs` tests
@@ -1737,6 +1829,15 @@ mod tests {
         /// reported by `list_remotes` and consulted by
         /// `resolve_sync_target_for`.
         remotes: Vec<Remote>,
+        /// Local tags (EPIC-18/US-091; T-195), reported by `list_tags`.
+        tags: Vec<gitsail_domain::Tag>,
+        /// Stash entries (EPIC-18/US-091; T-195), reported by
+        /// `list_stash_entries`.
+        stashes: Vec<gitsail_domain::Stash>,
+        /// The blame result `blame()` returns (T-195/US-062) — a fixed
+        /// canned value rather than a real computation, matching every
+        /// other read this double serves.
+        blame_result: Blame,
     }
 
     impl Default for FakePort {
@@ -1750,6 +1851,13 @@ mod tests {
                 commits_by_hash: std::collections::HashMap::new(),
                 revisions: std::collections::HashMap::new(),
                 remotes: vec![],
+                tags: vec![],
+                stashes: vec![],
+                blame_result: Blame {
+                    file: PathBuf::new(),
+                    revision: None,
+                    lines: vec![],
+                },
             }
         }
     }
@@ -1836,7 +1944,7 @@ mod tests {
             _request: &BlameRequest,
             _cancel: &CancellationToken,
         ) -> Result<Blame, GitSailError> {
-            unimplemented!("not exercised by these tests")
+            Ok(self.blame_result.clone())
         }
 
         fn line_history(
@@ -1859,6 +1967,17 @@ mod tests {
 
         fn list_remotes(&self, _repo: &Repository) -> Result<Vec<Remote>, GitSailError> {
             Ok(self.remotes.clone())
+        }
+
+        fn list_tags(&self, _repo: &Repository) -> Result<Vec<gitsail_domain::Tag>, GitSailError> {
+            Ok(self.tags.clone())
+        }
+
+        fn list_stash_entries(
+            &self,
+            _repo: &Repository,
+        ) -> Result<Vec<gitsail_domain::Stash>, GitSailError> {
+            Ok(self.stashes.clone())
         }
     }
 
@@ -3065,6 +3184,172 @@ mod tests {
 
         assert_eq!(remotes.len(), 1);
         assert_eq!(remotes[0].name, "origin");
+    }
+
+    // -- T-195/US-062: tags, stash, and blame command wiring ----------------
+
+    #[test]
+    fn list_tags_reports_every_local_tag_lightweight_and_annotated_alike() {
+        let state = state_from_port(FakePort {
+            tags: vec![
+                Tag {
+                    name: "v1.0".to_string(),
+                    target: CommitHash::new("a".repeat(40)).unwrap(),
+                    kind: TagKind::Lightweight,
+                },
+                Tag {
+                    name: "v2.0".to_string(),
+                    target: CommitHash::new("b".repeat(40)).unwrap(),
+                    kind: TagKind::Annotated {
+                        message: "Release 2.0".to_string(),
+                        tagger: Signature {
+                            name: "Ada".to_string(),
+                            email: "ada@example.com".to_string(),
+                        },
+                        date: GitTimestamp {
+                            seconds_since_epoch: 1_700_000_000,
+                            utc_offset_minutes: 0,
+                        },
+                    },
+                },
+            ],
+            ..FakePort::default()
+        });
+        open_repository_impl(&state, "/repo").unwrap();
+
+        let tags = list_tags_impl(&state).unwrap();
+
+        assert_eq!(tags.len(), 2);
+        assert_eq!(tags[0].name, "v1.0");
+        assert_eq!(tags[1].name, "v2.0");
+    }
+
+    #[test]
+    fn list_tags_reports_an_empty_list_rather_than_an_error_when_there_are_none() {
+        let state = state_from_port(FakePort::default());
+        open_repository_impl(&state, "/repo").unwrap();
+
+        let tags = list_tags_impl(&state).unwrap();
+
+        assert!(tags.is_empty());
+    }
+
+    #[test]
+    fn list_tags_reports_no_repository_open_before_any_repository_was_opened() {
+        let state = state_from_port(FakePort::default());
+
+        let err = list_tags_impl(&state).unwrap_err();
+
+        assert_eq!(err.code(), ErrorCode::InvalidRepositoryState);
+    }
+
+    #[test]
+    fn list_stash_entries_reports_every_entry_newest_first() {
+        let state = state_from_port(FakePort {
+            stashes: vec![
+                Stash {
+                    index: 0,
+                    commit: CommitHash::new("a".repeat(40)).unwrap(),
+                    message: "WIP on main: latest".to_string(),
+                    date: GitTimestamp {
+                        seconds_since_epoch: 1_700_000_500,
+                        utc_offset_minutes: 0,
+                    },
+                },
+                Stash {
+                    index: 1,
+                    commit: CommitHash::new("b".repeat(40)).unwrap(),
+                    message: "WIP on main: older".to_string(),
+                    date: GitTimestamp {
+                        seconds_since_epoch: 1_700_000_000,
+                        utc_offset_minutes: 0,
+                    },
+                },
+            ],
+            ..FakePort::default()
+        });
+        open_repository_impl(&state, "/repo").unwrap();
+
+        let entries = list_stash_entries_impl(&state).unwrap();
+
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].index, 0);
+        assert_eq!(entries[1].index, 1);
+    }
+
+    #[test]
+    fn list_stash_entries_reports_an_empty_list_rather_than_an_error_when_there_are_none() {
+        let state = state_from_port(FakePort::default());
+        open_repository_impl(&state, "/repo").unwrap();
+
+        let entries = list_stash_entries_impl(&state).unwrap();
+
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn get_blame_reports_every_lines_commit_author_and_content() {
+        let hash = CommitHash::new("a".repeat(40)).unwrap();
+        let state = state_from_port(FakePort {
+            blame_result: Blame {
+                file: PathBuf::from("README.md"),
+                revision: None,
+                lines: vec![BlameLine {
+                    final_line: 1,
+                    original_line: 1,
+                    commit: hash.clone(),
+                    author: Signature {
+                        name: "Ada".to_string(),
+                        email: "ada@example.com".to_string(),
+                    },
+                    timestamp: GitTimestamp {
+                        seconds_since_epoch: 1_700_000_000,
+                        utc_offset_minutes: 0,
+                    },
+                    content: "# README".to_string(),
+                    origin: BlameOrigin::Committed,
+                }],
+            },
+            ..FakePort::default()
+        });
+        open_repository_impl(&state, "/repo").unwrap();
+
+        let blame = get_blame_impl(&state, "README.md", None).unwrap();
+
+        assert_eq!(blame.file, "README.md");
+        assert_eq!(blame.lines.len(), 1);
+        assert_eq!(blame.lines[0].commit, hash.as_str().to_string());
+        assert_eq!(blame.lines[0].author.name, "Ada");
+        assert_eq!(blame.lines[0].content, "# README");
+    }
+
+    #[test]
+    fn get_blame_resolves_an_explicit_revision_before_querying_blame() {
+        let mut revisions = std::collections::HashMap::new();
+        revisions.insert("v1.0".to_string(), CommitHash::new("c".repeat(40)).unwrap());
+        let state = state_from_port(FakePort {
+            revisions,
+            ..FakePort::default()
+        });
+        open_repository_impl(&state, "/repo").unwrap();
+
+        // A revision that cannot be resolved must fail before ever reaching
+        // `blame()` — never silently fall back to the working tree.
+        let err = get_blame_impl(&state, "README.md", Some("unknown-rev")).unwrap_err();
+        assert_eq!(err.code(), ErrorCode::RepositoryNotFound);
+
+        // A revision that *does* resolve succeeds.
+        let blame = get_blame_impl(&state, "README.md", Some("v1.0")).unwrap();
+        assert_eq!(blame.file, "");
+    }
+
+    #[test]
+    fn get_blame_reports_no_repository_open_before_any_repository_was_opened() {
+        let state = state_from_port(FakePort::default());
+
+        let err = get_blame_impl(&state, "README.md", None).unwrap_err();
+
+        assert_eq!(err.code(), ErrorCode::InvalidRepositoryState);
     }
 
     // -- T-243/US-101: get_forge_link / open_forge_link --------------------
