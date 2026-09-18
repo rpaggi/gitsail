@@ -23,8 +23,8 @@ pub use recent_repositories::{
 pub use session::{RefreshReason, RefreshTicket, RepositorySession, Selection};
 pub use use_cases::{
     CommitDiff, CompareRevisions, GetCommit, GetCommitDiff, GetCommitHistory, GetDiff,
-    GetFileBlame, GetLineHistory, GetRepositoryStatus, ListBranches, OpenRepository,
-    RevisionComparison,
+    GetFileBlame, GetFileContent, GetLineHistory, GetRepositoryStatus, ListBranches,
+    OpenRepository, RevisionComparison,
 };
 pub use write_ports::RepositoryWritePort;
 pub use write_use_cases::{

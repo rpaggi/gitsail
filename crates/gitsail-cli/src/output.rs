@@ -4,8 +4,9 @@
 use std::fmt::Write as _;
 
 use gitsail_protocol::{
-    BlameDto, BlameOriginDto, BranchDto, BranchKindDto, CommitDto, DiffDto, DiffLineOriginDto,
-    HeadStateDto, Page, RepositoryDto, RepositoryStatusDto,
+    BlameDto, BlameOriginDto, BranchDto, BranchKindDto, CommitDiffDto, CommitDto, DiffDto,
+    DiffHunkDto, DiffLineOriginDto, FileContentDto, HeadStateDto, LineHistoryDto, Page,
+    RepositoryDto, RepositoryStatusDto,
 };
 use serde::Serialize;
 
@@ -25,6 +26,10 @@ pub enum Output {
     Branches(Vec<BranchDto>),
     Diff(DiffDto),
     Blame(BlameDto),
+    Commit(CommitDto),
+    CommitDiff(CommitDiffDto),
+    LineHistory(LineHistoryDto),
+    FileContent(FileContentDto),
 }
 
 impl Output {
@@ -38,6 +43,10 @@ impl Output {
             Self::Branches(branches) => render_branches(branches),
             Self::Diff(diff) => render_diff(diff),
             Self::Blame(blame) => render_blame(blame),
+            Self::Commit(commit) => render_commit(commit),
+            Self::CommitDiff(commit_diff) => render_commit_diff(commit_diff),
+            Self::LineHistory(history) => render_line_history(history),
+            Self::FileContent(content) => render_file_content(content),
         }
     }
 }
@@ -103,17 +112,36 @@ fn status_letter(code: gitsail_protocol::FileStatusCodeDto) -> char {
     }
 }
 
+/// Renders one commit's hash/author/date/subject/body, the shared block
+/// [`render_commits`] (a page of commits) and [`render_commit`] (a single
+/// commit) both build on.
+fn render_commit_block(out: &mut String, commit: &CommitDto) {
+    let _ = writeln!(out, "commit {}", commit.hash);
+    let _ = writeln!(out, "Author: {} <{}>", commit.author.name, commit.author.email);
+    let _ = writeln!(out, "Date:   {}", commit.author_date.seconds_since_epoch);
+    let _ = writeln!(out);
+    for line in commit.subject.lines() {
+        let _ = writeln!(out, "    {line}");
+    }
+    if !commit.body.is_empty() {
+        let _ = writeln!(out);
+        for line in commit.body.lines() {
+            let _ = writeln!(out, "    {line}");
+        }
+    }
+    let _ = writeln!(out);
+}
+
+fn render_commit(commit: &CommitDto) -> String {
+    let mut out = String::new();
+    render_commit_block(&mut out, commit);
+    out
+}
+
 fn render_commits(page: &Page<CommitDto>) -> String {
     let mut out = String::new();
     for commit in &page.items {
-        let _ = writeln!(out, "commit {}", commit.hash);
-        let _ = writeln!(out, "Author: {} <{}>", commit.author.name, commit.author.email);
-        let _ = writeln!(out, "Date:   {}", commit.author_date.seconds_since_epoch);
-        let _ = writeln!(out);
-        for line in commit.subject.lines() {
-            let _ = writeln!(out, "    {line}");
-        }
-        let _ = writeln!(out);
+        render_commit_block(&mut out, commit);
     }
     if page.has_more {
         let _ = writeln!(
@@ -164,23 +192,78 @@ fn render_diff(diff: &DiffDto) -> String {
             let _ = writeln!(out, "  (diff truncated: too large to display)");
             continue;
         }
-        for hunk in &file.hunks {
-            let _ = writeln!(
-                out,
-                "@@ -{},{} +{},{} @@",
-                hunk.old_start, hunk.old_lines, hunk.new_start, hunk.new_lines
-            );
-            for line in &hunk.lines {
-                let sigil = match line.origin {
-                    DiffLineOriginDto::Context => ' ',
-                    DiffLineOriginDto::Addition => '+',
-                    DiffLineOriginDto::Deletion => '-',
-                };
-                let _ = writeln!(out, "{sigil}{}", line.content);
-            }
-        }
+        render_hunks(&mut out, &file.hunks);
     }
     out
+}
+
+/// Prints each hunk's `@@ ... @@` header followed by its lines, shared by
+/// [`render_diff`] (per file) and [`render_line_history`] (per commit
+/// entry) so the two never drift into two different hunk renderings.
+fn render_hunks(out: &mut String, hunks: &[DiffHunkDto]) {
+    for hunk in hunks {
+        let _ = writeln!(
+            out,
+            "@@ -{},{} +{},{} @@",
+            hunk.old_start, hunk.old_lines, hunk.new_start, hunk.new_lines
+        );
+        for line in &hunk.lines {
+            let sigil = match line.origin {
+                DiffLineOriginDto::Context => ' ',
+                DiffLineOriginDto::Addition => '+',
+                DiffLineOriginDto::Deletion => '-',
+            };
+            let _ = writeln!(out, "{sigil}{}", line.content);
+        }
+    }
+}
+
+fn render_commit_diff(commit_diff: &CommitDiffDto) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "target: {}", commit_diff.target);
+    match &commit_diff.base {
+        Some(base) => {
+            let _ = writeln!(out, "base:   {base}");
+        }
+        None => {
+            let _ = writeln!(out, "base:   root commit (diffed against empty tree)");
+        }
+    }
+    let _ = writeln!(out);
+    out.push_str(&render_diff(&commit_diff.diff));
+    out
+}
+
+fn render_line_history(history: &LineHistoryDto) -> String {
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "{} lines {}-{} as of {}",
+        history.file, history.range.start, history.range.end, history.revision
+    );
+    if history.entries.is_empty() {
+        let _ = writeln!(out, "no history for this range");
+        return out;
+    }
+    for entry in &history.entries {
+        let _ = writeln!(out);
+        let _ = writeln!(out, "commit {}", entry.commit.hash);
+        for line in entry.commit.subject.lines() {
+            let _ = writeln!(out, "    {line}");
+        }
+        render_hunks(&mut out, &entry.hunks);
+    }
+    out
+}
+
+fn render_file_content(content: &FileContentDto) -> String {
+    match content {
+        FileContentDto::Text { content, .. } => content.clone(),
+        FileContentDto::Binary { revision, .. } => format!("(binary file, revision {revision})\n"),
+        FileContentDto::Missing { revision, .. } => {
+            format!("(no such path at revision {revision})\n")
+        }
+    }
 }
 
 fn render_blame(blame: &BlameDto) -> String {

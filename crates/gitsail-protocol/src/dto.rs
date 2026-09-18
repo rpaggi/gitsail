@@ -12,11 +12,12 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use gitsail_application::{PatchExport, RecentRepositoryEntry};
+use gitsail_application::{CommitDiff, PatchExport, RecentRepositoryEntry};
 use gitsail_domain::{
     Blame, BlameLine, BlameOrigin, Branch, BranchKind, ChangeType, Commit, Decoration, Diff,
-    DiffHunk, DiffLine, DiffLineOrigin, FileChange, FileDiff, FileStatusCode, GitTimestamp,
-    GraphEdge, GraphRow, HeadState, Repository, RepositoryStatus, Signature,
+    DiffHunk, DiffLine, DiffLineOrigin, FileChange, FileContentAtRevision, FileContentKind,
+    FileDiff, FileStatusCode, GitTimestamp, GraphEdge, GraphRow, HeadState, LineHistory,
+    LineHistoryEntry, LineRange, Repository, RepositoryStatus, Signature,
 };
 
 /// Converts a filesystem path to its wire representation.
@@ -621,6 +622,127 @@ impl From<&Blame> for BlameDto {
     }
 }
 
+// ---------------------------------------------------------------------
+// Single-commit diff (EPIC-15/US-076). Mirrors `gitsail_application::
+// CommitDiff` — `base` is `None` for a root commit (diffed against the
+// empty tree), naming exactly which commit was used otherwise.
+// ---------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommitDiffDto {
+    pub target: String,
+    pub base: Option<String>,
+    pub diff: DiffDto,
+}
+
+impl From<&CommitDiff> for CommitDiffDto {
+    fn from(value: &CommitDiff) -> Self {
+        Self {
+            target: value.target.as_str().to_string(),
+            base: value.base.as_ref().map(|b| b.as_str().to_string()),
+            diff: DiffDto::from(&value.diff),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------
+// Line/range history (US-019/EPIC-15).
+// ---------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LineRangeDto {
+    pub start: u32,
+    pub end: u32,
+}
+
+impl From<LineRange> for LineRangeDto {
+    fn from(range: LineRange) -> Self {
+        Self {
+            start: range.start,
+            end: range.end,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LineHistoryEntryDto {
+    pub commit: CommitDto,
+    pub hunks: Vec<DiffHunkDto>,
+}
+
+impl From<&LineHistoryEntry> for LineHistoryEntryDto {
+    fn from(entry: &LineHistoryEntry) -> Self {
+        Self {
+            commit: CommitDto::from(&entry.commit),
+            hunks: entry.hunks.iter().map(DiffHunkDto::from).collect(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LineHistoryDto {
+    pub file: String,
+    pub revision: String,
+    pub range: LineRangeDto,
+    pub entries: Vec<LineHistoryEntryDto>,
+}
+
+impl From<&LineHistory> for LineHistoryDto {
+    fn from(history: &LineHistory) -> Self {
+        Self {
+            file: path_to_string(&history.file),
+            revision: history.revision.as_str().to_string(),
+            range: LineRangeDto::from(history.range),
+            entries: history.entries.iter().map(LineHistoryEntryDto::from).collect(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------
+// File content at a revision (EPIC-15/US-076): a tagged enum so a caller
+// can distinguish real text content from the two other legitimate,
+// non-error outcomes (a binary file, or a path that did not exist at that
+// revision) without inspecting a separate error channel.
+// ---------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum FileContentDto {
+    Text {
+        path: String,
+        revision: String,
+        content: String,
+    },
+    Binary {
+        path: String,
+        revision: String,
+    },
+    Missing {
+        path: String,
+        revision: String,
+    },
+}
+
+impl From<&FileContentAtRevision> for FileContentDto {
+    fn from(value: &FileContentAtRevision) -> Self {
+        let path = path_to_string(&value.path);
+        let revision = value.revision.as_str().to_string();
+        match &value.kind {
+            FileContentKind::Text(content) => Self::Text {
+                path,
+                revision,
+                content: content.clone(),
+            },
+            FileContentKind::Binary => Self::Binary { path, revision },
+            FileContentKind::Missing => Self::Missing { path, revision },
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -778,5 +900,87 @@ mod tests {
         let dto = BlameDto::from(&blame);
         assert_eq!(dto.file, "src/lib.rs");
         assert_eq!(dto.revision, None);
+    }
+
+    #[test]
+    fn commit_diff_dto_reports_no_base_for_a_root_commit() {
+        let commit_diff = CommitDiff {
+            target: CommitHash::new("a".repeat(40)).unwrap(),
+            base: None,
+            diff: Diff { files: vec![] },
+        };
+
+        let dto = CommitDiffDto::from(&commit_diff);
+        let json = serde_json::to_value(&dto).unwrap();
+
+        assert_eq!(json["target"], "a".repeat(40));
+        assert!(json["base"].is_null());
+        assert_eq!(json["diff"]["files"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn line_history_dto_maps_range_and_entries() {
+        let commit = Commit {
+            hash: CommitHash::new("a".repeat(40)).unwrap(),
+            short_hash: ShortHash::new("aaaaaaaa").unwrap(),
+            parents: vec![],
+            author: Signature::new("Ada", "ada@example.com"),
+            committer: Signature::new("Ada", "ada@example.com"),
+            author_date: GitTimestamp::new(0, 0),
+            commit_date: GitTimestamp::new(0, 0),
+            subject: "touch the range".into(),
+            body: String::new(),
+            decorations: vec![],
+        };
+        let history = LineHistory {
+            file: PathBuf::from("src/lib.rs"),
+            revision: CommitHash::new("b".repeat(40)).unwrap(),
+            range: gitsail_domain::LineRange::new(10, 20),
+            entries: vec![LineHistoryEntry {
+                commit,
+                hunks: vec![],
+            }],
+        };
+
+        let dto = LineHistoryDto::from(&history);
+        let json = serde_json::to_value(&dto).unwrap();
+
+        assert_eq!(json["range"]["start"], 10);
+        assert_eq!(json["range"]["end"], 20);
+        assert_eq!(dto.entries.len(), 1);
+        assert_eq!(json["entries"][0]["commit"]["subject"], "touch the range");
+    }
+
+    #[test]
+    fn file_content_dto_tags_each_variant_distinctly() {
+        let path = PathBuf::from("src/lib.rs");
+        let revision = CommitHash::new("a".repeat(40)).unwrap();
+
+        let text = FileContentDto::from(&FileContentAtRevision {
+            path: path.clone(),
+            revision: revision.clone(),
+            kind: FileContentKind::Text("hello\n".into()),
+        });
+        let binary = FileContentDto::from(&FileContentAtRevision {
+            path: path.clone(),
+            revision: revision.clone(),
+            kind: FileContentKind::Binary,
+        });
+        let missing = FileContentDto::from(&FileContentAtRevision {
+            path,
+            revision,
+            kind: FileContentKind::Missing,
+        });
+
+        let text_json = serde_json::to_value(&text).unwrap();
+        let binary_json = serde_json::to_value(&binary).unwrap();
+        let missing_json = serde_json::to_value(&missing).unwrap();
+
+        assert_eq!(text_json["kind"], "text");
+        assert_eq!(text_json["content"], "hello\n");
+        assert_eq!(binary_json["kind"], "binary");
+        assert!(binary_json.get("content").is_none());
+        assert_eq!(missing_json["kind"], "missing");
+        assert!(missing_json.get("content").is_none());
     }
 }

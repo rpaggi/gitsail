@@ -255,6 +255,14 @@ mod tests {
         ) -> Result<gitsail_domain::LineHistory, GitSailError> {
             unimplemented!()
         }
+        fn file_content(
+            &self,
+            _repo: &Repository,
+            _revision: &CommitHash,
+            _path: &Path,
+        ) -> Result<gitsail_domain::FileContentAtRevision, GitSailError> {
+            unimplemented!()
+        }
     }
 
     /// An in-memory [`RecentRepositoriesPort`] double: `AppState`'s own

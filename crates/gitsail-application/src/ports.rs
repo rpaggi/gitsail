@@ -7,8 +7,8 @@
 use std::path::{Path, PathBuf};
 
 use gitsail_domain::{
-    Blame, Branch, BranchName, CancellationToken, Commit, CommitHash, Diff, GitSailError,
-    LineHistory, LineRange, Repository, RepositoryStatus,
+    Blame, Branch, BranchName, CancellationToken, Commit, CommitHash, Diff, FileContentAtRevision,
+    GitSailError, LineHistory, LineRange, Repository, RepositoryStatus,
 };
 
 /// A single page of results plus continuation metadata (SAD §25).
@@ -162,4 +162,17 @@ pub trait RepositoryReadPort: Send + Sync {
         request: &LineHistoryRequest,
         cancel: &CancellationToken,
     ) -> Result<LineHistory, GitSailError>;
+    /// Reads one file's full content as of a specific committed revision
+    /// (EPIC-15/US-076) — e.g. to open a historical version read-only. Unlike
+    /// `blame`, there is no working-tree mode: `revision` is always a resolved
+    /// commit. `Missing` (the path did not exist in that revision's tree — e.g.
+    /// added later, or renamed away before this point) and `Binary` (content is
+    /// not representable as UTF-8 text) are both legitimate, expected outcomes,
+    /// never a `GitSailError`.
+    fn file_content(
+        &self,
+        repo: &Repository,
+        revision: &CommitHash,
+        path: &Path,
+    ) -> Result<FileContentAtRevision, GitSailError>;
 }

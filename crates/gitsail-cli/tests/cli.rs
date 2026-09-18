@@ -94,6 +94,25 @@ fn stderr_of(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
 }
 
+fn rev_parse(dir: &Path, revision: &str) -> String {
+    let output = Command::new("git")
+        .args(["rev-parse", revision])
+        .current_dir(dir)
+        .env("LC_ALL", "C")
+        .output()
+        .expect("git rev-parse should run");
+    assert!(output.status.success(), "git rev-parse {revision} failed in {dir:?}");
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
+
+fn json_data(output: &Output) -> serde_json::Value {
+    let stdout = stdout_of(output);
+    let json: serde_json::Value =
+        serde_json::from_str(stdout.trim()).unwrap_or_else(|e| panic!("stdout was not valid JSON: {e}\n{stdout}"));
+    assert_eq!(json["status"], "ok", "command did not succeed: {json}");
+    json["data"].clone()
+}
+
 /// A repository with one commit, one branch, a staged addition and an
 /// unstaged modification, so every one of the six commands has something
 /// non-trivial to report.
@@ -317,4 +336,139 @@ fn ctrl_c_cancels_an_in_flight_diff_and_kills_the_child_process() {
     let json: serde_json::Value =
         serde_json::from_str(stdout.trim()).expect("a cancelled command must still print a valid envelope");
     assert_eq!(json["error"]["code"], "cancelled");
+}
+
+// ---------------------------------------------------------------------
+// EPIC-15/US-076: `commit`, `commit-diff`, `line-history`, `show-file`.
+// ---------------------------------------------------------------------
+
+#[test]
+fn commit_reports_the_right_subject_and_author() {
+    let repo = sample_repo();
+    let repo_str = repo.path().to_str().unwrap();
+    let head = rev_parse(repo.path(), "HEAD");
+
+    let output = run(&["commit", &head, "--repo", repo_str, "--json"]);
+
+    assert!(output.status.success(), "stderr={}", stderr_of(&output));
+    let data = json_data(&output);
+    assert_eq!(data["hash"], head);
+    assert_eq!(data["subject"], "initial commit");
+    assert_eq!(data["author"]["name"], "Test User");
+    assert_eq!(data["author"]["email"], "test@example.com");
+}
+
+#[test]
+fn commit_diff_on_a_merge_commit_reports_base_as_the_first_parent() {
+    let repo = init_repo("commit-diff-merge");
+    let repo_str = repo.path().to_str().unwrap();
+    write_file(repo.path(), "base.txt", "base\n");
+    commit_all(repo.path(), "base commit");
+
+    git(repo.path(), &["checkout", "-b", "feature"]);
+    write_file(repo.path(), "feature.txt", "feature\n");
+    commit_all(repo.path(), "feature commit");
+
+    git(repo.path(), &["checkout", "main"]);
+    write_file(repo.path(), "main-side.txt", "main side\n");
+    commit_all(repo.path(), "main-side commit");
+    // `main`'s tip right before the merge is what `git merge`'s first
+    // parent must be: merging into `main` always makes the checked-out
+    // branch's current commit the first parent, regardless of when
+    // `feature` branched off.
+    let first_parent = rev_parse(repo.path(), "main");
+
+    git(repo.path(), &["merge", "--no-ff", "-m", "merge feature", "feature"]);
+    let merge_hash = rev_parse(repo.path(), "HEAD");
+
+    let output = run(&["commit-diff", &merge_hash, "--repo", repo_str, "--json"]);
+
+    assert!(output.status.success(), "stderr={}", stderr_of(&output));
+    let data = json_data(&output);
+    assert_eq!(data["target"], merge_hash);
+    assert_eq!(
+        data["base"], first_parent,
+        "a merge commit's diff base must be its first parent"
+    );
+}
+
+#[test]
+fn line_history_returns_at_least_one_entry_for_a_range_with_history() {
+    let repo = init_repo("line-history-cli");
+    let repo_str = repo.path().to_str().unwrap();
+    write_file(repo.path(), "f.txt", "line1\nline2\nline3\n");
+    commit_all(repo.path(), "introduce");
+    write_file(repo.path(), "f.txt", "line1\nline2-changed\nline3\n");
+    commit_all(repo.path(), "modify line2");
+
+    let output = run(&[
+        "line-history",
+        "f.txt",
+        "--range",
+        "2-2",
+        "--repo",
+        repo_str,
+        "--json",
+    ]);
+
+    assert!(output.status.success(), "stderr={}", stderr_of(&output));
+    let data = json_data(&output);
+    assert_eq!(data["file"], "f.txt");
+    assert!(
+        !data["entries"].as_array().unwrap().is_empty(),
+        "expected at least one history entry, got: {data}"
+    );
+}
+
+#[test]
+fn show_file_returns_text_content_for_an_existing_revision() {
+    let repo = sample_repo();
+    let repo_str = repo.path().to_str().unwrap();
+    let head = rev_parse(repo.path(), "HEAD");
+
+    let output = run(&[
+        "show-file",
+        "README.md",
+        "--revision",
+        &head,
+        "--repo",
+        repo_str,
+        "--json",
+    ]);
+
+    assert!(output.status.success(), "stderr={}", stderr_of(&output));
+    let data = json_data(&output);
+    assert_eq!(data["kind"], "text");
+    assert_eq!(data["path"], "README.md");
+    assert_eq!(data["revision"], head);
+    assert_eq!(data["content"], "hello\n");
+}
+
+#[test]
+fn show_file_returns_missing_for_a_path_added_only_after_the_queried_revision() {
+    let repo = init_repo("show-file-missing");
+    let repo_str = repo.path().to_str().unwrap();
+    write_file(repo.path(), "a.txt", "line1\n");
+    commit_all(repo.path(), "first commit");
+    let first = rev_parse(repo.path(), "HEAD");
+
+    write_file(repo.path(), "b.txt", "added later\n");
+    commit_all(repo.path(), "add b.txt");
+
+    let output = run(&[
+        "show-file",
+        "b.txt",
+        "--revision",
+        &first,
+        "--repo",
+        repo_str,
+        "--json",
+    ]);
+
+    assert!(output.status.success(), "stderr={}", stderr_of(&output));
+    let data = json_data(&output);
+    assert_eq!(data["kind"], "missing");
+    assert_eq!(data["path"], "b.txt");
+    assert_eq!(data["revision"], first);
+    assert!(data.get("content").is_none());
 }

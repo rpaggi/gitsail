@@ -1,0 +1,613 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+import { COMMANDS, HistoryController } from "../src/historyController";
+import {
+  BlameDecorationRenderEntry,
+  ConfigurationLike,
+  Disposable,
+  HistoryDocumentLike,
+  HistoryHost,
+  HistoryTextEditorLike,
+  QuickPickItemLike,
+  UriLike,
+} from "../src/historyHostTypes";
+import { Envelope } from "../src/protocol";
+
+function envelope<T>(data: T): Envelope<T> {
+  return { status: "ok", schemaVersion: 1, requestId: "req-1", data };
+}
+
+class FakeHistoryHost implements HistoryHost {
+  activeTextEditor: HistoryTextEditorLike | undefined;
+  configValues: Record<string, unknown> = {};
+
+  readonly decorationCalls: { editor: HistoryTextEditorLike; entries: readonly BlameDecorationRenderEntry[] }[] = [];
+  readonly infoMessages: string[] = [];
+  readonly warningMessages: string[] = [];
+  readonly errorMessages: string[] = [];
+  readonly clipboardWrites: string[] = [];
+  readonly diffCalls: { left: string; right: string; title: string }[] = [];
+  readonly documentOpens: string[] = [];
+  quickPickAnswer: QuickPickItemLike | undefined;
+  messageAction: string | undefined;
+  private contentResolver: ((uri: UriLike) => Promise<string>) | undefined;
+
+  private editorListeners = new Set<(editor: HistoryTextEditorLike | undefined) => void>();
+  private selectionListeners = new Set<(editor: HistoryTextEditorLike) => void>();
+  private visibleRangesListeners = new Set<(editor: HistoryTextEditorLike) => void>();
+  private documentChangeListeners = new Set<(document: HistoryDocumentLike) => void>();
+  private configChangeListeners = new Set<() => void>();
+  private commands = new Map<string, (...args: never[]) => void | Promise<void>>();
+
+  onDidChangeActiveTextEditor(listener: (editor: HistoryTextEditorLike | undefined) => void): Disposable {
+    this.editorListeners.add(listener);
+    return { dispose: () => this.editorListeners.delete(listener) };
+  }
+  onDidChangeTextEditorSelection(listener: (editor: HistoryTextEditorLike) => void): Disposable {
+    this.selectionListeners.add(listener);
+    return { dispose: () => this.selectionListeners.delete(listener) };
+  }
+  onDidChangeVisibleRanges(listener: (editor: HistoryTextEditorLike) => void): Disposable {
+    this.visibleRangesListeners.add(listener);
+    return { dispose: () => this.visibleRangesListeners.delete(listener) };
+  }
+  onDidChangeTextDocument(listener: (document: HistoryDocumentLike) => void): Disposable {
+    this.documentChangeListeners.add(listener);
+    return { dispose: () => this.documentChangeListeners.delete(listener) };
+  }
+  onDidChangeConfiguration(listener: () => void): Disposable {
+    this.configChangeListeners.add(listener);
+    return { dispose: () => this.configChangeListeners.delete(listener) };
+  }
+
+  getConfiguration(_section: string): ConfigurationLike {
+    return {
+      get: <T,>(key: string, defaultValue: T): T =>
+        key in this.configValues ? (this.configValues[key] as T) : defaultValue,
+      update: async <T,>(key: string, value: T): Promise<void> => {
+        this.configValues[key] = value;
+        for (const l of this.configChangeListeners) l();
+      },
+    };
+  }
+
+  setBlameDecorations(editor: HistoryTextEditorLike, entries: readonly BlameDecorationRenderEntry[]): void {
+    this.decorationCalls.push({ editor, entries });
+  }
+
+  registerCommand(id: string, handler: (...args: never[]) => void | Promise<void>): Disposable {
+    this.commands.set(id, handler);
+    return { dispose: () => this.commands.delete(id) };
+  }
+
+  async showQuickPick(_items: readonly QuickPickItemLike[]): Promise<QuickPickItemLike | undefined> {
+    return this.quickPickAnswer;
+  }
+  async showInformationMessage(message: string): Promise<string | undefined> {
+    this.infoMessages.push(message);
+    return this.messageAction;
+  }
+  async showWarningMessage(message: string): Promise<string | undefined> {
+    this.warningMessages.push(message);
+    return this.messageAction;
+  }
+  showErrorMessage(message: string): void {
+    this.errorMessages.push(message);
+  }
+
+  async writeClipboardText(text: string): Promise<void> {
+    this.clipboardWrites.push(text);
+  }
+
+  async openDiff(leftUri: string, rightUri: string, title: string): Promise<void> {
+    this.diffCalls.push({ left: leftUri, right: rightUri, title });
+  }
+  async openDocument(uri: string): Promise<void> {
+    this.documentOpens.push(uri);
+  }
+
+  registerHistoryContentProvider(resolveContent: (uri: UriLike) => Promise<string>): Disposable {
+    this.contentResolver = resolveContent;
+    return { dispose: () => (this.contentResolver = undefined) };
+  }
+
+  // -- test helpers ---------------------------------------------------------
+  triggerCommand(id: string, ...args: unknown[]): Promise<void> | void {
+    const handler = this.commands.get(id);
+    if (!handler) {
+      throw new Error(`no command registered for ${id}`);
+    }
+    return handler(...(args as never[]));
+  }
+
+  changeSelection(editor: HistoryTextEditorLike): void {
+    this.activeTextEditor = editor;
+    for (const l of this.selectionListeners) l(editor);
+  }
+
+  resolveContent(uri: UriLike): Promise<string> {
+    if (!this.contentResolver) {
+      throw new Error("no content provider registered");
+    }
+    return this.contentResolver(uri);
+  }
+}
+
+function editorFor(
+  fsPath: string,
+  opts: Partial<{ isDirty: boolean; version: number; activeLine: number; selection: { startLine: number; endLine: number }; visibleRanges: { startLine: number; endLine: number }[] }> = {},
+): HistoryTextEditorLike {
+  return {
+    document: { uri: { scheme: "file", fsPath }, isDirty: opts.isDirty ?? false, version: opts.version ?? 1 },
+    activeLine: opts.activeLine ?? 1,
+    selection: opts.selection ?? { startLine: 1, endLine: 1 },
+    visibleRanges: opts.visibleRanges ?? [{ startLine: 1, endLine: 5 }],
+  };
+}
+
+const REPO_ROOT = "/repo";
+
+function makeClient(run: (args: readonly string[]) => Promise<Envelope<unknown>>) {
+  return { run: vi.fn(run) } as unknown as import("../src/cliClient").GitSailCliClient;
+}
+
+describe("HistoryController: blame decorations (T-205/US-072)", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("debounces recompute and decorates only the current line by default", async () => {
+    const host = new FakeHistoryHost();
+    host.configValues = { "blame.delayMs": 100 };
+    const client = makeClient(async (args) =>
+      args[0] === "blame"
+        ? envelope({
+            file: "a.ts",
+            revision: null,
+            lines: [
+              { finalLine: 1, originalLine: 1, commit: "a".repeat(40), author: { name: "Ada", email: "a@x.com" }, timestamp: { secondsSinceEpoch: 0, utcOffsetMinutes: 0 }, content: "x", origin: "committed" },
+              { finalLine: 2, originalLine: 2, commit: "b".repeat(40), author: { name: "Bob", email: "b@x.com" }, timestamp: { secondsSinceEpoch: 0, utcOffsetMinutes: 0 }, content: "y", origin: "committed" },
+            ],
+          })
+        : envelope({ hash: args[args.length - 1], subject: "A subject" }),
+    );
+
+    const controller = new HistoryController(host);
+    controller.activate();
+    controller.onRepositoryContextChanged(client, REPO_ROOT);
+
+    host.changeSelection(editorFor(`${REPO_ROOT}/a.ts`, { activeLine: 1 }));
+
+    await vi.advanceTimersByTimeAsync(100);
+    await vi.advanceTimersByTimeAsync(0);
+
+    const lastCall = host.decorationCalls.at(-1);
+    expect(lastCall).toBeDefined();
+    expect(lastCall!.entries.map((e) => e.line)).toEqual([1]);
+  });
+
+  it("all-visible-lines mode decorates every visible line", async () => {
+    const host = new FakeHistoryHost();
+    host.configValues = { "blame.delayMs": 0, "blame.mode": "allVisibleLines" };
+    const client = makeClient(async (args) =>
+      args[0] === "blame"
+        ? envelope({
+            file: "a.ts",
+            revision: null,
+            lines: [1, 2, 3].map((n) => ({
+              finalLine: n,
+              originalLine: n,
+              commit: "a".repeat(40),
+              author: { name: "Ada", email: "a@x.com" },
+              timestamp: { secondsSinceEpoch: 0, utcOffsetMinutes: 0 },
+              content: `line ${n}`,
+              origin: "committed" as const,
+            })),
+          })
+        : envelope({ hash: args[args.length - 1], subject: "subject" }),
+    );
+
+    const controller = new HistoryController(host);
+    controller.activate();
+    controller.onRepositoryContextChanged(client, REPO_ROOT);
+    host.changeSelection(editorFor(`${REPO_ROOT}/a.ts`, { visibleRanges: [{ startLine: 1, endLine: 3 }] }));
+
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(0);
+
+    const lastCall = host.decorationCalls.at(-1);
+    expect(lastCall!.entries.map((e) => e.line).sort()).toEqual([1, 2, 3]);
+  });
+
+  it("disabling blame clears decorations instead of querying the CLI", async () => {
+    const host = new FakeHistoryHost();
+    host.configValues = { "blame.enabled": false };
+    const run = vi.fn(async () => envelope({ file: "a.ts", revision: null, lines: [] }));
+    const client = makeClient(run);
+
+    const controller = new HistoryController(host);
+    controller.activate();
+    controller.onRepositoryContextChanged(client, REPO_ROOT);
+    host.changeSelection(editorFor(`${REPO_ROOT}/a.ts`));
+
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(run).not.toHaveBeenCalled();
+    expect(host.decorationCalls.at(-1)?.entries).toEqual([]);
+  });
+
+  it("never invents an author for an uncommitted line, and appends a disk-vs-buffer note for a dirty document", async () => {
+    const host = new FakeHistoryHost();
+    host.configValues = { "blame.delayMs": 0 };
+    const client = makeClient(async (args) =>
+      args[0] === "blame"
+        ? envelope({
+            file: "a.ts",
+            revision: null,
+            lines: [
+              {
+                finalLine: 1,
+                originalLine: 1,
+                commit: "0".repeat(40),
+                author: { name: "Not Committed Yet", email: "not.committed.yet" },
+                timestamp: { secondsSinceEpoch: 0, utcOffsetMinutes: 0 },
+                content: "x",
+                origin: "local",
+              },
+            ],
+          })
+        : envelope({}),
+    );
+
+    const controller = new HistoryController(host);
+    controller.activate();
+    controller.onRepositoryContextChanged(client, REPO_ROOT);
+    host.changeSelection(editorFor(`${REPO_ROOT}/a.ts`, { isDirty: true, activeLine: 1 }));
+
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(0);
+
+    const entry = host.decorationCalls.at(-1)!.entries[0];
+    expect(entry.contentText).toBe("Uncommitted change");
+    expect(entry.contentText).not.toContain("Not Committed Yet");
+    expect(entry.hoverMarkdown).toMatch(/unsaved/i);
+  });
+
+  it("a malicious commit author/message never becomes an executable hover link, end to end (T-206 criterion 3)", async () => {
+    const host = new FakeHistoryHost();
+    host.configValues = { "blame.delayMs": 0 };
+    const maliciousHash = "c".repeat(40);
+    const client = makeClient(async (args) =>
+      args[0] === "blame"
+        ? envelope({
+            file: "a.ts",
+            revision: null,
+            lines: [
+              {
+                finalLine: 1,
+                originalLine: 1,
+                commit: maliciousHash,
+                author: { name: "[pwned](command:workbench.action.terminal.new)", email: "a@x.com" },
+                timestamp: { secondsSinceEpoch: 0, utcOffsetMinutes: 0 },
+                content: "x",
+                origin: "committed",
+              },
+            ],
+          })
+        : envelope({
+            hash: maliciousHash,
+            subject: "[Click here](command:workbench.action.terminal.new)",
+          }),
+    );
+
+    const controller = new HistoryController(host);
+    controller.activate();
+    controller.onRepositoryContextChanged(client, REPO_ROOT);
+    host.changeSelection(editorFor(`${REPO_ROOT}/a.ts`, { activeLine: 1 }));
+
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(0);
+
+    const entry = host.decorationCalls.at(-1)!.entries[0];
+    // The malicious author name/subject can only ever appear escaped —
+    // the exact `](command:` adjacency that makes it an active Markdown
+    // link must never survive for *their* text (this extension's own two
+    // legitimate action links below deliberately keep that exact syntax,
+    // so the check must target the attacker's payload specifically, not
+    // just search the whole hover for the substring).
+    expect(entry.hoverMarkdown).not.toMatch(/pwned]\(command:/);
+    expect(entry.hoverMarkdown).not.toMatch(/Click here]\(command:/);
+    expect(entry.hoverMarkdown).toContain("\\[pwned\\]\\(command:workbench");
+    expect(entry.hoverMarkdown).toContain("\\[Click here\\]\\(command:workbench");
+    // Only this extension's own two command ids (attached by
+    // `recomputeBlameDecorations` itself) are ever allow-listed — never a
+    // command id sourced from repository text.
+    expect(new Set(entry.hoverEnabledCommands)).toEqual(
+      new Set([COMMANDS.openCommitDetails, COMMANDS.copyCommitHash]),
+    );
+
+    // A normal, non-malicious message still renders its real content and
+    // still gets the same two legitimate actions.
+    const normalHash = "d".repeat(40);
+    const normalClient = makeClient(async (args) =>
+      args[0] === "blame"
+        ? envelope({
+            file: "a.ts",
+            revision: null,
+            lines: [
+              {
+                finalLine: 1,
+                originalLine: 1,
+                commit: normalHash,
+                author: { name: "Ada Lovelace", email: "ada@example.com" },
+                timestamp: { secondsSinceEpoch: 0, utcOffsetMinutes: 0 },
+                content: "x",
+                origin: "committed",
+              },
+            ],
+          })
+        : envelope({ hash: normalHash, subject: "Fix the pagination cursor" }),
+    );
+    const normalHost = new FakeHistoryHost();
+    normalHost.configValues = { "blame.delayMs": 0 };
+    const normalController = new HistoryController(normalHost);
+    normalController.activate();
+    normalController.onRepositoryContextChanged(normalClient, REPO_ROOT);
+    normalHost.changeSelection(editorFor(`${REPO_ROOT}/a.ts`, { activeLine: 1 }));
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(0);
+
+    const normalEntry = normalHost.decorationCalls.at(-1)!.entries[0];
+    expect(normalEntry.hoverMarkdown).toContain("Ada Lovelace");
+    expect(normalEntry.hoverMarkdown).toContain("Fix the pagination cursor");
+    expect(new Set(normalEntry.hoverEnabledCommands)).toEqual(
+      new Set([COMMANDS.openCommitDetails, COMMANDS.copyCommitHash]),
+    );
+  });
+});
+
+describe("HistoryController: toggling blame (US-072 criterion 2)", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("persists the flipped gitsail.blame.enabled setting and clears decorations when turned off", async () => {
+    const host = new FakeHistoryHost();
+    host.configValues = { "blame.enabled": true, "blame.delayMs": 0 };
+    const client = makeClient(async () => envelope({ file: "a.ts", revision: null, lines: [] }));
+    const controller = new HistoryController(host);
+    controller.activate();
+    controller.onRepositoryContextChanged(client, REPO_ROOT);
+    host.activeTextEditor = editorFor(`${REPO_ROOT}/a.ts`);
+
+    await host.triggerCommand(COMMANDS.toggleBlame);
+
+    expect(host.configValues["blame.enabled"]).toBe(false);
+    expect(host.infoMessages.some((m) => /disabled/i.test(m))).toBe(true);
+    // Flipping the setting fires onDidChangeConfiguration, which this
+    // controller reacts to by clearing decorations (recompute sees
+    // enabled: false) without needing a separate manual clear call.
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(host.decorationCalls.at(-1)?.entries).toEqual([]);
+  });
+
+  it("toggling back on re-enables the setting", async () => {
+    const host = new FakeHistoryHost();
+    host.configValues = { "blame.enabled": false };
+    const controller = new HistoryController(host);
+    controller.activate();
+
+    await host.triggerCommand(COMMANDS.toggleBlame);
+
+    expect(host.configValues["blame.enabled"]).toBe(true);
+    expect(host.infoMessages.some((m) => /enabled/i.test(m))).toBe(true);
+  });
+});
+
+describe("HistoryController: commit details and hash copy (T-206/US-076 criterion 2)", () => {
+  it("opens a gitsail-commit: document, re-querying the CLI rather than reusing a decoration string", async () => {
+    const host = new FakeHistoryHost();
+    const client = makeClient(async () => envelope({}));
+    const controller = new HistoryController(host);
+    controller.activate();
+    controller.onRepositoryContextChanged(client, REPO_ROOT);
+
+    await host.triggerCommand(COMMANDS.openCommitDetails, { hash: "a".repeat(40) });
+
+    expect(host.documentOpens).toHaveLength(1);
+    expect(host.documentOpens[0]).toContain("gitsail-commit:");
+  });
+
+  it("copies the full (never abbreviated) hash to the clipboard", async () => {
+    const host = new FakeHistoryHost();
+    const controller = new HistoryController(host);
+    controller.activate();
+
+    const fullHash = "a".repeat(40);
+    await host.triggerCommand(COMMANDS.copyCommitHash, { hash: fullHash });
+
+    expect(host.clipboardWrites).toEqual([fullHash]);
+    expect(host.infoMessages.some((m) => m.includes(fullHash))).toBe(true);
+  });
+});
+
+describe("HistoryController: file history (T-207/US-074)", () => {
+  it("shows an explicit 'no history' state instead of an unexplained empty list", async () => {
+    const host = new FakeHistoryHost();
+    const client = makeClient(async () => envelope({ items: [], hasMore: false }));
+    const controller = new HistoryController(host);
+    controller.activate();
+    controller.onRepositoryContextChanged(client, REPO_ROOT);
+    host.activeTextEditor = editorFor(`${REPO_ROOT}/a.ts`);
+    host.quickPickAnswer = undefined; // no selection needed; we inspect via override below
+
+    // Capture the items shown by overriding showQuickPick for this test.
+    let shownItems: QuickPickItemLike[] = [];
+    host.showQuickPick = async (items) => {
+      shownItems = [...items];
+      return undefined;
+    };
+
+    await host.triggerCommand(COMMANDS.showFileHistory);
+
+    expect(shownItems).toHaveLength(1);
+    expect(shownItems[0].label).toMatch(/no history/i);
+  });
+
+  it("selecting a commit opens its diff for that same file", async () => {
+    const host = new FakeHistoryHost();
+    const commitHash = "a".repeat(40);
+    const client = makeClient(async (args) => {
+      if (args[0] === "log") {
+        return envelope({ items: [{ hash: commitHash, shortHash: "aaaaaaaa", parents: [], author: { name: "Ada", email: "a@x.com" }, committer: { name: "Ada", email: "a@x.com" }, authorDate: { secondsSinceEpoch: 0, utcOffsetMinutes: 0 }, commitDate: { secondsSinceEpoch: 0, utcOffsetMinutes: 0 }, subject: "subject", body: "", decorations: [], isMerge: false, isRoot: false }], hasMore: false });
+      }
+      if (args[0] === "commit-diff") {
+        return envelope({
+          target: commitHash,
+          base: "b".repeat(40),
+          diff: { files: [{ path: "a.ts", previousPath: null, changeType: "modified", isBinary: false, truncated: false, hunks: [] }] },
+        });
+      }
+      return envelope({});
+    });
+    const controller = new HistoryController(host);
+    controller.activate();
+    controller.onRepositoryContextChanged(client, REPO_ROOT);
+    host.activeTextEditor = editorFor(`${REPO_ROOT}/a.ts`);
+    host.showQuickPick = async (items) => items.find((i) => i.id === commitHash);
+
+    await host.triggerCommand(COMMANDS.showFileHistory);
+
+    expect(host.diffCalls).toHaveLength(1);
+    expect(host.diffCalls[0].left).toContain("b".repeat(40));
+    expect(host.diffCalls[0].right).toContain(commitHash);
+  });
+});
+
+describe("HistoryController: line history (T-208/US-075)", () => {
+  it("uses the editor's current selection as the queried range", async () => {
+    const host = new FakeHistoryHost();
+    const run = vi.fn(async (args: readonly string[]) => envelope({ file: "a.ts", revision: "HEAD", range: { start: 5, end: 9 }, entries: [] }));
+    const client = makeClient(run);
+    const controller = new HistoryController(host);
+    controller.activate();
+    controller.onRepositoryContextChanged(client, REPO_ROOT);
+    host.activeTextEditor = editorFor(`${REPO_ROOT}/a.ts`, { selection: { startLine: 5, endLine: 9 } });
+
+    await host.triggerCommand(COMMANDS.showLineHistory);
+
+    expect(run).toHaveBeenCalledWith(
+      ["line-history", "--repo", REPO_ROOT, "a.ts", "--range", "5-9"],
+      undefined,
+    );
+  });
+
+  it("warns about disk-vs-buffer drift for a dirty document, without inventing an attribution", async () => {
+    const host = new FakeHistoryHost();
+    const client = makeClient(async () => envelope({ file: "a.ts", revision: "HEAD", range: { start: 1, end: 1 }, entries: [] }));
+    const controller = new HistoryController(host);
+    controller.activate();
+    controller.onRepositoryContextChanged(client, REPO_ROOT);
+    host.activeTextEditor = editorFor(`${REPO_ROOT}/a.ts`, { isDirty: true });
+
+    await host.triggerCommand(COMMANDS.showLineHistory);
+
+    expect(host.warningMessages.some((m) => /unsaved/i.test(m) && /disk/i.test(m))).toBe(true);
+  });
+});
+
+describe("HistoryController: commit diff / open diff (T-209/US-076)", () => {
+  it("root commit diff opens the target against an empty (root sentinel) left side", async () => {
+    const host = new FakeHistoryHost();
+    const commitHash = "a".repeat(40);
+    const client = makeClient(async () =>
+      envelope({
+        target: commitHash,
+        base: null,
+        diff: { files: [{ path: "a.ts", previousPath: null, changeType: "added", isBinary: false, truncated: false, hunks: [] }] },
+      }),
+    );
+    const controller = new HistoryController(host);
+    controller.activate();
+    controller.onRepositoryContextChanged(client, REPO_ROOT);
+
+    await host.triggerCommand(COMMANDS.openCommitDiffForFile, { hash: commitHash, filePath: "a.ts" });
+
+    expect(host.diffCalls).toHaveLength(1);
+    expect(host.diffCalls[0].title).toMatch(/root commit/i);
+    // The resolver for the left (root/empty) URI must resolve to "" without
+    // ever calling the CLI for it.
+    const leftUri = new URL(host.diffCalls[0].left);
+    const content = await host.resolveContent({ scheme: "gitsail-history", path: leftUri.pathname, query: leftUri.search.slice(1) });
+    expect(content).toBe("");
+  });
+
+  it("copies the full hash and offers it when GitSail Desktop is not configured", async () => {
+    const host = new FakeHistoryHost();
+    const client = makeClient(async () => envelope({}));
+    const controller = new HistoryController(host);
+    controller.activate();
+    controller.onRepositoryContextChanged(client, REPO_ROOT);
+    host.messageAction = "Copy commit hash";
+
+    const fullHash = "a".repeat(40);
+    await host.triggerCommand(COMMANDS.openInDesktop, { hash: fullHash });
+
+    expect(host.warningMessages.some((m) => /gitsail\.desktop\.path/.test(m))).toBe(true);
+    expect(host.clipboardWrites).toEqual([fullHash]);
+  });
+});
+
+describe("HistoryController: content provider dispatch", () => {
+  it("resolves gitsail-history: text content via show-file", async () => {
+    const host = new FakeHistoryHost();
+    const client = makeClient(async () => envelope({ kind: "text", path: "a.ts", revision: "abc", content: "hello" }));
+    const controller = new HistoryController(host);
+    controller.activate();
+    controller.onRepositoryContextChanged(client, REPO_ROOT);
+
+    const uriString = `gitsail-history:/a.ts?${new URLSearchParams({ repo: REPO_ROOT, path: "a.ts", revision: "abc" })}`;
+    const url = new URL(uriString);
+    const content = await host.resolveContent({ scheme: "gitsail-history", path: url.pathname, query: url.search.slice(1) });
+    expect(content).toBe("hello");
+  });
+
+  it("resolves gitsail-commit: content via the commit use case", async () => {
+    const host = new FakeHistoryHost();
+    const client = makeClient(async () =>
+      envelope({
+        hash: "a".repeat(40),
+        shortHash: "aaaaaaaa",
+        parents: [],
+        author: { name: "Ada", email: "a@x.com" },
+        committer: { name: "Ada", email: "a@x.com" },
+        authorDate: { secondsSinceEpoch: 0, utcOffsetMinutes: 0 },
+        commitDate: { secondsSinceEpoch: 0, utcOffsetMinutes: 0 },
+        subject: "A subject",
+        body: "",
+        decorations: [],
+        isMerge: false,
+        isRoot: false,
+      }),
+    );
+    const controller = new HistoryController(host);
+    controller.activate();
+    controller.onRepositoryContextChanged(client, REPO_ROOT);
+
+    const uriString = `gitsail-commit:/${"a".repeat(40)}.gitsail-commit?${new URLSearchParams({
+      repo: REPO_ROOT,
+      hash: "a".repeat(40),
+    })}`;
+    const url = new URL(uriString);
+    const content = await host.resolveContent({ scheme: "gitsail-commit", path: url.pathname, query: url.search.slice(1) });
+    expect(content).toContain("A subject");
+  });
+});

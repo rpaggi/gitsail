@@ -82,6 +82,28 @@ pub enum Command {
     ///   gitsail blame src/lib.rs
     ///   gitsail blame src/lib.rs --revision HEAD~5 --range 10-25
     Blame(BlameArgs),
+
+    /// Show a single commit's full details.
+    ///
+    /// Example: `gitsail commit HEAD~2`
+    Commit(CommitArgs),
+
+    /// Show a single commit's diff against its resolved base (root commit ->
+    /// empty tree, merge commit -> first parent — same convention as `git show`).
+    ///
+    /// Example: `gitsail commit-diff abc123`
+    CommitDiff(CommitDiffArgs),
+
+    /// Show the commit-level history of a line range within a file.
+    ///
+    /// Example: `gitsail line-history src/lib.rs --range 10-25 --revision HEAD`
+    LineHistory(LineHistoryArgs),
+
+    /// Show a file's content as of a specific revision (e.g. to open a
+    /// historical version read-only).
+    ///
+    /// Example: `gitsail show-file src/lib.rs --revision HEAD~3`
+    ShowFile(ShowFileArgs),
 }
 
 #[derive(Debug, Args)]
@@ -152,4 +174,35 @@ pub struct BlameArgs {
     /// Inclusive 1-based line range, e.g. `10-25`.
     #[arg(long)]
     pub range: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct CommitArgs {
+    /// Commit-ish to show (hash, branch, tag, or other revision expression).
+    pub revision: String,
+}
+
+#[derive(Debug, Args)]
+pub struct CommitDiffArgs {
+    pub revision: String,
+}
+
+#[derive(Debug, Args)]
+pub struct LineHistoryArgs {
+    /// File to trace, relative to the repository.
+    pub file: PathBuf,
+    /// Revision to start from (default: HEAD).
+    #[arg(long)]
+    pub revision: Option<String>,
+    /// Inclusive 1-based line range, e.g. `10-25`.
+    #[arg(long)]
+    pub range: String,
+}
+
+#[derive(Debug, Args)]
+pub struct ShowFileArgs {
+    /// File to read, relative to the repository.
+    pub file: PathBuf,
+    #[arg(long)]
+    pub revision: String,
 }

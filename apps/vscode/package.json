@@ -26,8 +26,98 @@
           "default": "",
           "markdownDescription": "Absolute path to the `gitsail` CLI executable. Only honored in a **trusted** workspace. Leave empty to discover `gitsail` on `PATH` — see this extension's README (\"Binary distribution\") for why v0.4 does not bundle a binary.",
           "scope": "resource"
+        },
+        "gitsail.blame.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show inline blame decorations in the editor (US-072). Turn off to disable them entirely.",
+          "scope": "resource"
+        },
+        "gitsail.blame.mode": {
+          "type": "string",
+          "enum": [
+            "currentLine",
+            "allVisibleLines"
+          ],
+          "enumDescriptions": [
+            "Only decorate the line the cursor is currently on.",
+            "Decorate every currently visible line."
+          ],
+          "default": "currentLine",
+          "description": "Which lines get an inline blame decoration (US-072 criterion 2).",
+          "scope": "resource"
+        },
+        "gitsail.blame.delayMs": {
+          "type": "number",
+          "default": 400,
+          "minimum": 0,
+          "description": "Milliseconds of cursor inactivity before an inline blame decoration (re)appears (US-072 criterion 2).",
+          "scope": "resource"
+        },
+        "gitsail.blame.format": {
+          "type": "string",
+          "default": "${author}, ${date} • ${shortHash} • ${message}",
+          "markdownDescription": "Template for inline blame text. Placeholders: `${author}`, `${authorEmail}`, `${date}`, `${hash}`, `${shortHash}`, `${message}` (US-072 criterion 1).",
+          "scope": "resource"
+        },
+        "gitsail.desktop.path": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Absolute path to the GitSail Desktop executable, used by \"Open in GitSail Desktop\" (US-077). Leave empty to disable the handoff — GitSail then offers to copy the commit hash instead.",
+          "scope": "resource"
         }
       }
+    },
+    "commands": [
+      {
+        "command": "gitsail.blame.toggle",
+        "title": "Toggle Inline Blame",
+        "category": "GitSail"
+      },
+      {
+        "command": "gitsail.openCommitDetails",
+        "title": "Open Commit Details",
+        "category": "GitSail"
+      },
+      {
+        "command": "gitsail.copyCommitHash",
+        "title": "Copy Commit Hash",
+        "category": "GitSail"
+      },
+      {
+        "command": "gitsail.showFileHistory",
+        "title": "Show File History",
+        "category": "GitSail"
+      },
+      {
+        "command": "gitsail.showLineHistory",
+        "title": "Show Line History",
+        "category": "GitSail"
+      },
+      {
+        "command": "gitsail.openInDesktop",
+        "title": "Open Commit in GitSail Desktop",
+        "category": "GitSail"
+      }
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "gitsail.showFileHistory",
+          "group": "gitsail@1",
+          "when": "resourceScheme == file"
+        },
+        {
+          "command": "gitsail.showLineHistory",
+          "group": "gitsail@2",
+          "when": "resourceScheme == file && editorHasSelection"
+        },
+        {
+          "command": "gitsail.blame.toggle",
+          "group": "gitsail@3",
+          "when": "resourceScheme == file"
+        }
+      ]
     }
   },
   "capabilities": {

@@ -15,7 +15,8 @@ use gitsail_application::{
 };
 use gitsail_domain::{
     BlameOrigin, BranchKind, BranchName, CancellationToken, ChangeType, CommitHash, Decoration,
-    DiffHunk, DiffLine, DiffLineOrigin, ErrorCode, FileDiff, FileStatusCode, HeadState, LineRange,
+    DiffHunk, DiffLine, DiffLineOrigin, ErrorCode, FileContentKind, FileDiff, FileStatusCode,
+    HeadState, LineRange,
 };
 use gitsail_git::{GitCliProvider, GitProcessRunner, GitProcessRunnerConfig};
 
@@ -2257,6 +2258,67 @@ fn line_history_fails_with_cancelled_when_the_token_is_already_cancelled() {
         .expect_err("a pre-cancelled token must stop the line-history query before it succeeds");
 
     assert_eq!(err.code(), ErrorCode::Cancelled);
+}
+
+// ---------------------------------------------------------------------
+// File content at a revision (EPIC-15/US-076).
+// ---------------------------------------------------------------------
+
+#[test]
+fn file_content_reads_text_at_a_real_revision() {
+    let repo_dir = init_repo("file-content-text");
+    write_file(repo_dir.path(), "a.txt", "line1\nline2\n");
+    commit_all(repo_dir.path(), "first commit");
+    let first = head_commit_hash(repo_dir.path());
+
+    let provider = provider();
+    let repo = provider.discover(repo_dir.path()).unwrap();
+
+    let content = provider
+        .file_content(&repo, &first, Path::new("a.txt"))
+        .expect("reading an existing file at a real revision should succeed");
+
+    assert_eq!(content.path, PathBuf::from("a.txt"));
+    assert_eq!(content.revision, first);
+    assert_eq!(content.kind, FileContentKind::Text("line1\nline2\n".to_string()));
+}
+
+#[test]
+fn file_content_reports_missing_for_a_path_that_did_not_exist_yet() {
+    let repo_dir = init_repo("file-content-missing");
+    write_file(repo_dir.path(), "a.txt", "line1\n");
+    commit_all(repo_dir.path(), "first commit");
+    let first = head_commit_hash(repo_dir.path());
+
+    // Added only in a later commit: at `first`, this path does not exist.
+    write_file(repo_dir.path(), "b.txt", "added later\n");
+    commit_all(repo_dir.path(), "add b.txt");
+
+    let provider = provider();
+    let repo = provider.discover(repo_dir.path()).unwrap();
+
+    let content = provider
+        .file_content(&repo, &first, Path::new("b.txt"))
+        .expect("querying a not-yet-existing path must succeed with Missing, not an error");
+
+    assert_eq!(content.kind, FileContentKind::Missing);
+}
+
+#[test]
+fn file_content_detects_binary_content_via_an_embedded_nul_byte() {
+    let repo_dir = init_repo("file-content-binary");
+    write_bytes(repo_dir.path(), "b.bin", &[0x00, 0x01, 0x02, 0xff]);
+    commit_all(repo_dir.path(), "add binary file");
+    let head = head_commit_hash(repo_dir.path());
+
+    let provider = provider();
+    let repo = provider.discover(repo_dir.path()).unwrap();
+
+    let content = provider
+        .file_content(&repo, &head, Path::new("b.bin"))
+        .expect("reading a binary file must succeed with Binary, not an error");
+
+    assert_eq!(content.kind, FileContentKind::Binary);
 }
 
 // ---------------------------------------------------------------------

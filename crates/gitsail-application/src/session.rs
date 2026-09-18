@@ -200,7 +200,8 @@ impl RepositorySession {
 mod tests {
     use super::*;
     use gitsail_domain::{
-        Blame, Branch, ChangeType, Commit, Diff, ErrorCode, FileChange, FileStatusCode, HeadState,
+        Blame, Branch, ChangeType, Commit, Diff, ErrorCode, FileChange, FileContentAtRevision,
+        FileStatusCode, HeadState,
     };
     use std::path::{Path, PathBuf};
     use std::sync::Mutex;
@@ -282,6 +283,15 @@ mod tests {
             _request: &crate::ports::LineHistoryRequest,
             _cancel: &gitsail_domain::CancellationToken,
         ) -> Result<gitsail_domain::LineHistory, GitSailError> {
+            unimplemented!("not exercised by session tests")
+        }
+
+        fn file_content(
+            &self,
+            _repo: &Repository,
+            _revision: &CommitHash,
+            _path: &Path,
+        ) -> Result<FileContentAtRevision, GitSailError> {
             unimplemented!("not exercised by session tests")
         }
     }
@@ -509,6 +519,14 @@ mod tests {
                 _request: &crate::ports::LineHistoryRequest,
                 _cancel: &gitsail_domain::CancellationToken,
             ) -> Result<gitsail_domain::LineHistory, GitSailError> {
+                unimplemented!()
+            }
+            fn file_content(
+                &self,
+                _repo: &Repository,
+                _revision: &CommitHash,
+                _path: &Path,
+            ) -> Result<FileContentAtRevision, GitSailError> {
                 unimplemented!()
             }
         }

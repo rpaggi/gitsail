@@ -390,6 +390,15 @@ mod tests {
         ) -> Result<LineHistory, GitSailError> {
             unimplemented!("not exercised by these tests")
         }
+
+        fn file_content(
+            &self,
+            _repo: &Repository,
+            _revision: &CommitHash,
+            _path: &Path,
+        ) -> Result<gitsail_domain::FileContentAtRevision, GitSailError> {
+            unimplemented!("not exercised by these tests")
+        }
     }
 
     fn sample_repository() -> Repository {
@@ -803,6 +812,14 @@ mod tests {
             _request: &LineHistoryRequest,
             _cancel: &CancellationToken,
         ) -> Result<LineHistory, GitSailError> {
+            unimplemented!("not exercised by this test")
+        }
+        fn file_content(
+            &self,
+            _repo: &Repository,
+            _revision: &CommitHash,
+            _path: &Path,
+        ) -> Result<gitsail_domain::FileContentAtRevision, GitSailError> {
             unimplemented!("not exercised by this test")
         }
     }

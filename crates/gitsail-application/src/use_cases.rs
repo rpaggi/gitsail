@@ -6,8 +6,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 use gitsail_domain::{
-    Blame, Branch, CancellationToken, Commit, CommitHash, Diff, GitSailError, LineHistory,
-    Repository, RepositoryStatus,
+    Blame, Branch, CancellationToken, Commit, CommitHash, Diff, FileContentAtRevision,
+    GitSailError, LineHistory, Repository, RepositoryStatus,
 };
 
 use crate::blame_cache::{BlameCache, BlameCacheKey};
@@ -285,11 +285,33 @@ impl GetLineHistory {
     }
 }
 
+/// Reads one file's full content as of a specific committed revision
+/// (EPIC-15/US-076), e.g. to open a historical version read-only.
+pub struct GetFileContent {
+    port: Arc<dyn RepositoryReadPort>,
+}
+
+impl GetFileContent {
+    pub fn new(port: Arc<dyn RepositoryReadPort>) -> Self {
+        Self { port }
+    }
+
+    pub fn execute(
+        &self,
+        repo: &Repository,
+        revision: &CommitHash,
+        path: &Path,
+    ) -> Result<FileContentAtRevision, GitSailError> {
+        self.port.file_content(repo, revision, path)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use gitsail_domain::{
-        BranchName, ChangeType, FileChange, FileStatusCode, HeadState, RepositoryId, Signature,
+        BranchName, ChangeType, FileChange, FileContentAtRevision, FileContentKind,
+        FileStatusCode, HeadState, RepositoryId, Signature,
     };
     use std::path::PathBuf;
     use std::sync::Mutex;
@@ -307,6 +329,7 @@ mod tests {
         diff: Diff,
         blame: Blame,
         line_history: LineHistory,
+        file_content: FileContentAtRevision,
         revisions: std::collections::HashMap<String, CommitHash>,
         received_commit_query: Mutex<Option<CommitQuery>>,
         received_diff_request: Mutex<Option<DiffRequest>>,
@@ -390,6 +413,11 @@ mod tests {
                     revision: CommitHash::new("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef").unwrap(),
                     range: gitsail_domain::LineRange::new(1, 1),
                     entries: vec![],
+                },
+                file_content: FileContentAtRevision {
+                    path: PathBuf::from("src/lib.rs"),
+                    revision: CommitHash::new("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef").unwrap(),
+                    kind: FileContentKind::Text("fixture content".into()),
                 },
                 revisions: std::collections::HashMap::new(),
                 received_commit_query: Mutex::new(None),
@@ -475,6 +503,19 @@ mod tests {
         ) -> Result<LineHistory, GitSailError> {
             *self.received_line_history_request.lock().unwrap() = Some(request.clone());
             Ok(self.line_history.clone())
+        }
+
+        fn file_content(
+            &self,
+            _repo: &Repository,
+            revision: &CommitHash,
+            path: &Path,
+        ) -> Result<FileContentAtRevision, GitSailError> {
+            Ok(FileContentAtRevision {
+                path: path.to_path_buf(),
+                revision: revision.clone(),
+                kind: self.file_content.kind.clone(),
+            })
         }
     }
 
@@ -769,5 +810,20 @@ mod tests {
             *port.received_line_history_request.lock().unwrap(),
             Some(request)
         );
+    }
+
+    #[test]
+    fn get_file_content_delegates_to_port_and_echoes_the_query() {
+        let port = Arc::new(FakeReadPort::new());
+        let use_case = GetFileContent::new(port.clone());
+        let path = PathBuf::from("src/lib.rs");
+
+        let content = use_case
+            .execute(&port.repository, &port.single_commit.hash, &path)
+            .unwrap();
+
+        assert_eq!(content.path, path);
+        assert_eq!(content.revision, port.single_commit.hash);
+        assert_eq!(content.kind, FileContentKind::Text("fixture content".into()));
     }
 }

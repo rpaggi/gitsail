@@ -1,12 +1,10 @@
 # GitSail for VS Code
 
-EPIC-14 — VS Code Foundation (US-068–US-071). This extension gives VS Code
-repository context (which repository the active file belongs to, its
-current branch/HEAD state) by asking the `gitsail-cli` process, and nothing
-else — it never re-implements Git detection, log parsing, or blame parsing
-on the extension side (SAD §16, ADR-007). Blame/history/diff UI is EPIC-15's
-job; this foundation only wires activation, the CLI client, binary
-discovery/verification, and workspace lifecycle/trust.
+EPIC-14 — VS Code Foundation (US-068–US-071) plus EPIC-15 — Blame & History
+(US-072–US-077). This extension gives VS Code repository context, inline
+blame, and commit/file/line history by asking the `gitsail-cli` process, and
+nothing else — it never re-implements Git detection, log parsing, diffing,
+or blame parsing on the extension side (SAD §16, ADR-007).
 
 ## Architecture
 
@@ -36,7 +34,97 @@ implements):
 | `src/workspaceTrust.ts` | US-071 | Wraps `vscode.workspace.isTrusted`/`onDidGrantWorkspaceTrust`. |
 | `src/documentState.ts` | US-071 | Classifies unsaved-buffer vs. on-disk state. |
 | `src/hostTypes.ts` / `src/controller.ts` | all four | The testable orchestration layer, decoupled from the real `vscode` module. |
-| `src/extension.ts` | — | The one file that imports the real `vscode` module; adapts it to `hostTypes.ts` and hands it to `controller.ts`. |
+| `src/extension.ts` | — | The one file that imports the real `vscode` module; adapts it to `hostTypes.ts`/`historyHostTypes.ts` and hands them to `controller.ts`/`historyController.ts`. |
+
+### EPIC-15 (US-072–US-077)
+
+| File | Story | Responsibility |
+|---|---|---|
+| `src/blameFormat.ts` | US-072 | Config parsing (`gitsail.blame.*`) and pure text formatting for one blame line — never invents an author for an uncommitted line or a dirty buffer. |
+| `src/blamePlan.ts` | US-072 | Decides which lines get a decoration (current-line vs. all-visible-lines) from a full `BlameDto`. |
+| `src/blameService.ts` | US-072 | `gitsail blame` wrapper plus client-side caches (blame per content-version, commit subjects by hash). |
+| `src/hoverSanitizer.ts` | US-073 | Markdown escaping for repository text, plus `HoverContentBuilder.addCommandLink`'s scoped-trust command links — the security boundary preventing a malicious commit message from becoming an executable hover link. |
+| `src/commitDetailsUri.ts` / `src/commitDetailsText.ts` | US-073 | `gitsail-commit:` read-only virtual document (plain text, not Markdown) showing one commit's full details. |
+| `src/commitService.ts` | US-073/US-076 | `gitsail commit` / `gitsail commit-diff` / `gitsail show-file` wrappers. |
+| `src/fileHistoryService.ts` / `src/lineHistoryService.ts` | US-074/US-075 | `gitsail log --path` / `gitsail line-history` wrappers, plus explicit-empty-state and disk-vs-buffer-caveat helpers. |
+| `src/historyUri.ts` | US-076 | `gitsail-history:` read-only virtual document (a file's content at a revision) — never writes to a temp file, never touches the working tree. |
+| `src/historyPresentation.ts` | US-074/US-075 | Pure `QuickPickItemLike[]` builders from history DTOs. |
+| `src/desktopHandoff.ts` | US-077 | Builds/validates `--repo/--commit` arguments and launches GitSail Desktop, or reports a clear fallback when it is not configured/found. |
+| `src/historyHostTypes.ts` / `src/historyController.ts` | all six | The testable orchestration layer for decorations/hover/commands/quickpicks/diff/content-providers, decoupled from the real `vscode` module — the EPIC-15 sibling of `hostTypes.ts`/`controller.ts`. |
+
+### Configuration (EPIC-15)
+
+- `gitsail.blame.enabled` (boolean, default `true`).
+- `gitsail.blame.mode` (`"currentLine"` | `"allVisibleLines"`, default `"currentLine"`).
+- `gitsail.blame.delayMs` (number, default `400`).
+- `gitsail.blame.format` (string template — `${author}`, `${authorEmail}`, `${date}`, `${hash}`, `${shortHash}`, `${message}`).
+- `gitsail.desktop.path` (string, default `""`) — see "Desktop handoff" below.
+
+### Hover security (T-206 criterion 3)
+
+A commit message is repository-authored, untrusted content. `hoverSanitizer.ts`'s
+`escapeMarkdownText` neutralizes every Markdown control character in it before
+it ever reaches a `vscode.MarkdownString`, so a message like
+`[Click here](command:workbench.action.terminal.new)` can only ever render as
+literal text. On top of that, `extension.ts` always constructs the hover's
+`MarkdownString` with a **scoped** `isTrusted`:
+`{ enabledCommands: [...] }`, listing only the specific command ids this
+extension's own `HoverContentBuilder.addCommandLink` calls used (e.g.
+`gitsail.openCommitDetails`) — never a blanket `true` (which would let any
+`command:` link execute, including one hidden in imperfectly-escaped
+repository text) and never a blanket `false` either (which would also
+disable this extension's own legitimate "open full commit details" link).
+`enabledCommands` is derived from what `HoverContentBuilder` actually built,
+so it can never drift out of sync with the links the hover actually
+contains.
+
+### Historical content, never on disk (T-209 criterion 3)
+
+Opening an old version of a file, or a commit's full details, never writes a
+temp file: both are served through custom URI schemes
+(`gitsail-history:` for file content at a revision, `gitsail-commit:` for
+commit details) backed by a `vscode.TextDocumentContentProvider` this
+extension registers. `vscode.workspace.openTextDocument`/`vscode.diff` open
+these directly; VS Code has no save handler for either scheme, so the
+resulting editor is naturally read-only and the working tree is never
+touched.
+
+### Desktop handoff — an acknowledged gap on the Desktop side (US-077)
+
+`src/desktopHandoff.ts` implements and validates the full VS Code side of
+the handoff (`gitsail-desktop --repo <path> --commit <hash>`), and
+`gitsail.desktop.path` configures which executable to launch. **As of this
+writing, `apps/desktop` does not parse any command-line arguments at all**
+(`apps/desktop/src-tauri/src/{main,lib}.rs`'s `run()` takes none, and no
+CLI-parsing crate is wired in) — this is confirmed by reading that code, not
+assumed. Launching Desktop today therefore opens it to whatever it always
+opens to, ignoring `--repo`/`--commit`. This is a real, open gap on the
+**Desktop** side (tracked against EPIC-12/US-056, which has not shipped
+yet), not a failure of this extension's own command: the moment Desktop
+reads those arguments, this mechanism works with no VS Code-side change.
+Until then, a missing/unconfigured/not-found Desktop executable is handled
+without throwing, always offering "Copy commit hash" as a useful fallback
+(US-077 criterion 3).
+
+### Known limitations
+
+- **Blame decorations and a dirty (unsaved) buffer**: `gitsail-cli` only
+  ever reads what is saved on disk. A dirty document's blame decorations
+  still render (from the last-saved content), each with an explicit
+  disk-vs-buffer disclaimer in its hover — they are never silently
+  presented as describing the in-editor buffer, but line numbers can still
+  disagree with what is on screen if the unsaved edit inserted/removed
+  lines above the decorated one.
+- **Line history and a dirty buffer** (US-075 criterion 3): the same
+  caveat applies to the selection's line numbers sent to
+  `gitsail line-history` — `lineHistoryService.ts`'s
+  `describeLineHistoryBufferCaveat` surfaces this as an explicit warning
+  rather than silently querying a possibly-shifted range.
+- **File rename display** (US-074 criterion 3): `gitsail log --path`
+  already follows renames (US-018's existing default), so a renamed file's
+  full history is returned; the rename itself becomes visible when a
+  specific commit's diff is opened (`FileDiffDto.previousPath`), not as a
+  separate annotation in the history list itself.
 
 ### Why `src/controller.ts` never imports `vscode`
 
@@ -110,9 +198,28 @@ is the one place that would grow to also honor it.
 `gitsail-cli` only ever reads what is actually saved on disk. `src/documentState.ts` classifies the active document's dirty/saved state, and the
 controller logs an explicit note whenever the active file has unsaved
 changes, instead of silently presenting CLI results as if they described
-the in-editor buffer. Attaching that note to a specific piece of UI (e.g. a
-decoration) is EPIC-15's job once there is blame/history content to attach
-it to.
+the in-editor buffer. EPIC-15 attaches that same fact to concrete UI: blame
+decoration hovers (`blameFormat.ts`) and the line-history command
+(`lineHistoryService.ts`) both surface it as an explicit disclaimer instead
+of a silent, possibly-misleading result — see "Known limitations" above.
+
+## `gitsail-cli` commands this extension relies on (EPIC-15)
+
+EPIC-15 added four `gitsail-cli` subcommands the Core did not expose before
+(their underlying application use cases — `GetCommit`, `GetCommitDiff`,
+`GetLineHistory` — already existed; only the CLI/protocol surface was
+missing), plus a brand-new Core capability (`file_content`) added
+specifically for this epic:
+
+- `gitsail commit <revision>` — a single commit's full details (US-073).
+- `gitsail commit-diff <revision>` — a commit's diff against its correctly
+  resolved base (root commit → empty tree, merge → first parent), never
+  re-derived on the extension side (US-076 criterion 1).
+- `gitsail line-history <file> --range START-END [--revision REV]` —
+  commit-level history of a line range (US-075).
+- `gitsail show-file <file> --revision REV` — a file's full content as of a
+  revision, returning `{kind: "text"|"binary"|"missing", ...}` — backs the
+  read-only historical documents above (US-076 criterion 3).
 
 ## Testing
 

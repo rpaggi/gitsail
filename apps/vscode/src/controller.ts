@@ -34,7 +34,16 @@ export class ExtensionController {
    * things that can actually change this answer. */
   private cachedProbe: CliProbeResult | undefined;
   private resolver: RepositoryContextResolver | undefined;
+  /** The same client instance handed to `resolver` above — kept alongside
+   * it (rather than reconstructed) so `onRepositoryContextChanged`
+   * listeners (EPIC-15's `HistoryController`) share the exact same CLI
+   * client/binary resolution this controller already validated, instead of
+   * re-probing the binary a second time. */
+  private cliClient: GitSailCliClient | undefined;
   private notifiedCliProblemThisGeneration = false;
+  private readonly repositoryContextListeners = new Set<
+    (client: GitSailCliClient | undefined, repoRoot: string | undefined) => void
+  >();
 
   private readonly outputChannel;
   private readonly statusBarItem;
@@ -75,6 +84,8 @@ export class ExtensionController {
     }
     this.disposables = [];
     this.resolver = undefined;
+    this.notifyRepositoryContext(undefined);
+    this.repositoryContextListeners.clear();
   }
 
   /** A plain editor switch: which repository answers a query root does not
@@ -108,7 +119,44 @@ export class ExtensionController {
   private invalidateBinaryProbe(): void {
     this.cachedProbe = undefined;
     this.resolver = undefined;
+    this.cliClient = undefined;
     this.notifiedCliProblemThisGeneration = false;
+  }
+
+  /**
+   * Notifies a listener of the current repository binding (a CLI client
+   * plus the repository root it is scoped to) every time it changes,
+   * including to `undefined` when there is no usable repository context
+   * (no active file, no repository, or the CLI itself is unavailable) —
+   * `HistoryController` (EPIC-15) uses this instead of resolving a
+   * repository or probing the CLI binary itself, matching the layering
+   * `hostTypes.ts`'s own doc comment describes ("the extension owns:
+   * decorations, hover UI, commands... it does not own repository
+   * discovery"). Fires once immediately with the current binding so a
+   * listener registered after activation is not stuck waiting for the next
+   * change.
+   */
+  onRepositoryContextChanged(
+    listener: (client: GitSailCliClient | undefined, repoRoot: string | undefined) => void,
+  ): { dispose(): void } {
+    this.repositoryContextListeners.add(listener);
+    listener(this.currentRepoRoot !== undefined ? this.cliClient : undefined, this.currentRepoRoot);
+    return { dispose: () => this.repositoryContextListeners.delete(listener) };
+  }
+
+  private currentRepoRoot: string | undefined;
+
+  /** `repoRoot: undefined` means "no usable binding" — the client is never
+   * handed to a listener in that case, even if `this.cliClient` itself is
+   * still set (e.g. the active file simply has no repository), so a
+   * listener can treat `client === undefined` as the one authoritative
+   * "nothing to query" signal. */
+  private notifyRepositoryContext(repoRoot: string | undefined): void {
+    this.currentRepoRoot = repoRoot;
+    const client = repoRoot !== undefined ? this.cliClient : undefined;
+    for (const listener of this.repositoryContextListeners) {
+      listener(client, repoRoot);
+    }
   }
 
   private async ensureProbe(): Promise<CliProbeResult> {
@@ -136,7 +184,8 @@ export class ExtensionController {
     }
 
     if (!this.resolver) {
-      this.resolver = new RepositoryContextResolver(new GitSailCliClient({ binaryPath: probe.command }));
+      this.cliClient = new GitSailCliClient({ binaryPath: probe.command });
+      this.resolver = new RepositoryContextResolver(this.cliClient);
     }
 
     const editor = this.host.activeTextEditor;
@@ -176,20 +225,24 @@ export class ExtensionController {
         this.statusBarItem.text = `GitSail: ${branch}`;
         this.statusBarItem.tooltip = context.repository.rootPath;
         this.statusBarItem.show();
+        this.notifyRepositoryContext(context.repository.rootPath);
         return;
       }
       case "no-repository":
       case "no-context":
         this.statusBarItem.hide();
+        this.notifyRepositoryContext(undefined);
         return;
       case "cli-unavailable":
         this.statusBarItem.hide();
         this.notifyCliProblemOnce(context.error.message);
+        this.notifyRepositoryContext(undefined);
         return;
     }
   }
 
   private applyCliProblem(probe: CliProbeResult): void {
+    this.notifyRepositoryContext(undefined);
     const message = describeCliProbeProblem(probe);
     if (message) {
       this.notifyCliProblemOnce(message);

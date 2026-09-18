@@ -4,11 +4,15 @@
 use std::sync::Arc;
 
 use gitsail_application::{
-    BlameRequest, CommitQuery, CompareRevisions, DiffRequest, GetCommitHistory, GetDiff,
-    GetFileBlame, GetRepositoryStatus, ListBranches, OpenRepository, RepositoryReadPort,
+    BlameRequest, CommitQuery, CompareRevisions, DiffRequest, GetCommit, GetCommitDiff,
+    GetCommitHistory, GetDiff, GetFileBlame, GetFileContent, GetLineHistory, GetRepositoryStatus,
+    LineHistoryRequest, ListBranches, OpenRepository, RepositoryReadPort,
 };
 use gitsail_domain::{CancellationToken, ErrorCode, GitSailError, LineRange};
-use gitsail_protocol::{BlameDto, BranchDto, CommitDto, DiffDto, Page, RepositoryDto, RepositoryStatusDto};
+use gitsail_protocol::{
+    BlameDto, BranchDto, CommitDiffDto, CommitDto, DiffDto, FileContentDto, LineHistoryDto, Page,
+    RepositoryDto, RepositoryStatusDto,
+};
 
 use crate::cli::{BlameArgs, Command, DiffArgs};
 use crate::output::Output;
@@ -58,6 +62,40 @@ pub fn execute(
         Command::Blame(args) => {
             let blame = execute_blame(port, &repo, args, cancel)?;
             Ok(Output::Blame(BlameDto::from(&blame)))
+        }
+
+        Command::Commit(args) => {
+            let hash = port.resolve_revision(&repo, &args.revision)?;
+            let commit = GetCommit::new(port.clone()).execute(&repo, &hash)?;
+            Ok(Output::Commit(CommitDto::from(&commit)))
+        }
+
+        Command::CommitDiff(args) => {
+            let hash = port.resolve_revision(&repo, &args.revision)?;
+            let commit_diff = GetCommitDiff::new(port.clone()).execute(&repo, &hash, cancel)?;
+            Ok(Output::CommitDiff(CommitDiffDto::from(&commit_diff)))
+        }
+
+        Command::LineHistory(args) => {
+            let revision = args
+                .revision
+                .as_deref()
+                .map(|r| port.resolve_revision(&repo, r))
+                .transpose()?;
+            let range = parse_line_range(&args.range)?;
+            let request = LineHistoryRequest {
+                file: args.file.clone(),
+                revision,
+                range,
+            };
+            let history = GetLineHistory::new(port.clone()).execute(&repo, &request, cancel)?;
+            Ok(Output::LineHistory(LineHistoryDto::from(&history)))
+        }
+
+        Command::ShowFile(args) => {
+            let hash = port.resolve_revision(&repo, &args.revision)?;
+            let content = GetFileContent::new(port.clone()).execute(&repo, &hash, &args.file)?;
+            Ok(Output::FileContent(FileContentDto::from(&content)))
         }
     }
 }

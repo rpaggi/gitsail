@@ -25,9 +25,10 @@ use gitsail_application::{
 };
 use gitsail_domain::{
     Blame, BlameLine, BlameOrigin, Branch, BranchKind, BranchName, ChangeType, Commit, CommitHash,
-    Decoration, Diff, DiffHunk, DiffLine, DiffLineOrigin, ErrorCode, FileChange, FileDiff,
-    FileStatusCode, GitSailError, GitTimestamp, HeadState, LineHistory, LineHistoryEntry,
-    Repository, RepositoryId, RepositoryStatus, ShortHash, Signature,
+    Decoration, Diff, DiffHunk, DiffLine, DiffLineOrigin, ErrorCode, FileChange,
+    FileContentAtRevision, FileContentKind, FileDiff, FileStatusCode, GitSailError, GitTimestamp,
+    HeadState, LineHistory, LineHistoryEntry, Repository, RepositoryId, RepositoryStatus,
+    ShortHash, Signature,
 };
 
 use crate::runner::{CancellationToken, GitProcessRunner, ProcessOutput, ProcessRequest};
@@ -572,6 +573,40 @@ impl RepositoryReadPort for GitCliProvider {
             entries,
         })
     }
+
+    /// Reads `path`'s full content as of `revision` via `git show
+    /// <revision>:<path>` (EPIC-15/US-076) — a single positional argument,
+    /// colon-joined, exactly as `git show` itself expects; this cannot be
+    /// split into separate arguments or paired with a `--` separator without
+    /// changing what Git parses it as.
+    ///
+    /// The caller is expected to have already resolved `revision` to a real
+    /// commit (via `resolve_revision`), mirroring `commit`/`line_history`'s
+    /// own convention, so a non-zero exit here can only mean "path not found
+    /// in that tree" and is reported as [`FileContentKind::Missing`] rather
+    /// than an error. Content is classified as [`FileContentKind::Binary`]
+    /// when a NUL byte appears in its first 8000 bytes or it is not valid
+    /// UTF-8 — otherwise it is [`FileContentKind::Text`].
+    fn file_content(
+        &self,
+        repo: &Repository,
+        revision: &CommitHash,
+        path: &Path,
+    ) -> Result<FileContentAtRevision, GitSailError> {
+        let object = format!("{}:{}", revision.as_str(), path.to_string_lossy());
+        let args = vec!["show".to_string(), object];
+
+        let kind = match self.try_run(args, &repo.root_path)? {
+            None => FileContentKind::Missing,
+            Some(output) => classify_file_content(&output.stdout),
+        };
+
+        Ok(FileContentAtRevision {
+            path: path.to_path_buf(),
+            revision: revision.clone(),
+            kind,
+        })
+    }
 }
 
 impl RepositoryWritePort for GitCliProvider {
@@ -1003,6 +1038,26 @@ fn classify_line_history_failure(err: GitSailError) -> GitSailError {
         .with_source(err)
     } else {
         err
+    }
+}
+
+/// Number of leading bytes inspected for an embedded NUL byte when deciding
+/// whether `git show`'s output is binary content ([`classify_file_content`]).
+const BINARY_SNIFF_LEN: usize = 8000;
+
+/// Classifies raw `git show <rev>:<path>` stdout as [`FileContentKind::Text`]
+/// or [`FileContentKind::Binary`] (EPIC-15/US-076): binary when a NUL byte
+/// appears in the first [`BINARY_SNIFF_LEN`] bytes, or when the bytes are not
+/// valid UTF-8 — mirroring the common heuristic Git itself uses to decide
+/// whether a file is binary.
+fn classify_file_content(stdout: &[u8]) -> FileContentKind {
+    let sniff_len = stdout.len().min(BINARY_SNIFF_LEN);
+    if stdout[..sniff_len].contains(&0) {
+        return FileContentKind::Binary;
+    }
+    match String::from_utf8(stdout.to_vec()) {
+        Ok(text) => FileContentKind::Text(text),
+        Err(_) => FileContentKind::Binary,
     }
 }
 

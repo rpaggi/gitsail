@@ -328,3 +328,85 @@ describe("ExtensionController", () => {
     expect(runMock).not.toHaveBeenCalled();
   });
 });
+
+describe("ExtensionController.onRepositoryContextChanged (EPIC-15's hook into repository binding)", () => {
+  let runMock: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    runMock = vi.fn();
+    GitSailCliClientMock.mockImplementation(function () {
+      return { run: runMock };
+    });
+    probeCliBinaryMock.mockReset();
+    probeCliBinaryMock.mockResolvedValue(okProbe);
+  });
+
+  it("fires immediately with the current binding for a listener registered after activation", async () => {
+    const host = new FakeHost();
+    host.workspaceFolders = [{ uri: { fsPath: "/workspace/project" } }];
+    host.activeTextEditor = editorFor("/workspace/project/src/main.rs");
+    runMock.mockResolvedValue(repositoryEnvelope("/workspace/project", "main"));
+
+    const controller = new ExtensionController(host);
+    await controller.activate();
+
+    const calls: { client: unknown; repoRoot: string | undefined }[] = [];
+    controller.onRepositoryContextChanged((client, repoRoot) => calls.push({ client, repoRoot }));
+
+    expect(calls).toEqual([{ client: expect.anything(), repoRoot: "/workspace/project" }]);
+  });
+
+  it("notifies undefined/undefined when the active file has no repository", async () => {
+    const host = new FakeHost();
+    host.workspaceFolders = [{ uri: { fsPath: "/workspace/plain-folder" } }];
+    host.activeTextEditor = editorFor("/workspace/plain-folder/notes.txt");
+    runMock.mockResolvedValue(notFoundEnvelope);
+
+    const controller = new ExtensionController(host);
+    await controller.activate();
+
+    const calls: { client: unknown; repoRoot: string | undefined }[] = [];
+    controller.onRepositoryContextChanged((client, repoRoot) => calls.push({ client, repoRoot }));
+
+    expect(calls).toEqual([{ client: undefined, repoRoot: undefined }]);
+  });
+
+  it("notifies again when switching to a different repository across a multi-root workspace", async () => {
+    const host = new FakeHost();
+    host.workspaceFolders = [
+      { uri: { fsPath: "/workspace/a" } },
+      { uri: { fsPath: "/workspace/b" } },
+    ];
+    host.activeTextEditor = editorFor("/workspace/a/file.ts");
+    runMock.mockImplementation(async (args: readonly string[]) => {
+      const root = args[2];
+      return repositoryEnvelope(root as string, root === "/workspace/a" ? "branch-a" : "branch-b");
+    });
+
+    const controller = new ExtensionController(host);
+    await controller.activate();
+
+    const roots: (string | undefined)[] = [];
+    controller.onRepositoryContextChanged((_client, repoRoot) => roots.push(repoRoot));
+    expect(roots).toEqual(["/workspace/a"]);
+
+    host.changeActiveEditor(editorFor("/workspace/b/file.ts"));
+    await vi.waitFor(() => expect(roots).toEqual(["/workspace/a", "/workspace/b"]));
+  });
+
+  it("notifies undefined on dispose, so a listener never retains a stale binding", async () => {
+    const host = new FakeHost();
+    host.workspaceFolders = [{ uri: { fsPath: "/workspace/project" } }];
+    host.activeTextEditor = editorFor("/workspace/project/main.rs");
+    runMock.mockResolvedValue(repositoryEnvelope("/workspace/project", "main"));
+
+    const controller = new ExtensionController(host);
+    await controller.activate();
+
+    const roots: (string | undefined)[] = [];
+    controller.onRepositoryContextChanged((_client, repoRoot) => roots.push(repoRoot));
+    controller.dispose();
+
+    expect(roots).toEqual(["/workspace/project", undefined]);
+  });
+});

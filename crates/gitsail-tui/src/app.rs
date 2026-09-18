@@ -1409,7 +1409,7 @@ mod tests {
     use crate::clipboard::FakeClipboard;
     use gitsail_domain::{
         BranchKind, ChangeType, DiffHunk, DiffLine, DiffLineOrigin, ErrorCode, FileChange,
-        FileDiff, FileStatusCode, RepositoryId,
+        FileContentAtRevision, FileDiff, FileStatusCode, RepositoryId,
     };
     use std::path::PathBuf;
     use std::sync::mpsc;
@@ -1491,6 +1491,15 @@ mod tests {
             _request: &gitsail_application::LineHistoryRequest,
             _cancel: &gitsail_domain::CancellationToken,
         ) -> Result<gitsail_domain::LineHistory, GitSailError> {
+            unimplemented!("not exercised by app tests")
+        }
+
+        fn file_content(
+            &self,
+            _repo: &Repository,
+            _revision: &CommitHash,
+            _path: &Path,
+        ) -> Result<FileContentAtRevision, GitSailError> {
             unimplemented!("not exercised by app tests")
         }
     }

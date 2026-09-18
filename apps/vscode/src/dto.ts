@@ -8,11 +8,14 @@
 // source of truth, `apps/desktop/src/services/dto.ts`, and this file) —
 // `apps/desktop`'s own dto.ts already flags this exact risk ("if a second
 // consumer... makes hand-maintaining two clients painful, revisit codegen").
-// A third copy makes that revisit overdue: if EPIC-15's blame/history DTOs
-// push this file much further, adopt a shared codegen tool (e.g. ts-rs)
-// instead of adding a fourth hand-written mirror.
+// A third copy makes that revisit overdue: EPIC-15 does push this file
+// considerably further (commit/diff/blame/line-history/file-content DTOs
+// below) — the codegen revisit flagged above is now genuinely due, but out
+// of scope for this epic; tracked as follow-up rather than blocking six
+// stories on a tooling migration.
 //
-// Only what EPIC-14 (repository identity) needs is mirrored so far.
+// EPIC-14 (repository identity) plus EPIC-15 (blame/history/diff for the
+// editor) are mirrored so far.
 
 export type HeadStateDto =
   | { state: "attached"; branch: string }
@@ -26,4 +29,173 @@ export interface RepositoryDto {
   isBare: boolean;
   headState: HeadStateDto;
   currentBranch: string | null;
+}
+
+// ---------------------------------------------------------------------
+// Commits (EPIC-15). Mirrors `gitsail_protocol::{SignatureDto,
+// GitTimestampDto, DecorationDto, CommitDto}` — only the fields this
+// extension actually renders are given real attention below; the rest are
+// mirrored structurally so `CommitDto` type-checks end to end.
+// ---------------------------------------------------------------------
+
+export interface SignatureDto {
+  name: string;
+  email: string;
+}
+
+export interface GitTimestampDto {
+  secondsSinceEpoch: number;
+  utcOffsetMinutes: number;
+}
+
+export type DecorationDto =
+  | { kind: "head" }
+  | { kind: "branch"; name: string }
+  | { kind: "remoteBranch"; remote: string; branch: string }
+  | { kind: "tag"; name: string };
+
+export interface CommitDto {
+  hash: string;
+  shortHash: string;
+  parents: string[];
+  author: SignatureDto;
+  committer: SignatureDto;
+  authorDate: GitTimestampDto;
+  commitDate: GitTimestampDto;
+  subject: string;
+  body: string;
+  decorations: DecorationDto[];
+  isMerge: boolean;
+  isRoot: boolean;
+}
+
+// ---------------------------------------------------------------------
+// Diffs (EPIC-15). Mirrors `gitsail_protocol::{ChangeTypeDto,
+// DiffLineOriginDto, DiffLineDto, DiffHunkDto, FileDiffDto, DiffDto}`.
+//
+// Note the *different* serde casing conventions this mirrors exactly:
+// `ChangeTypeDto`/`DiffLineOriginDto` are Rust `#[serde(rename_all =
+// "snake_case")]` enums (wire values like `"type_changed"`), while every
+// struct *field* name in this file is `camelCase` — these are two
+// independent casing choices in the Rust source, not a typo here.
+// ---------------------------------------------------------------------
+
+export type ChangeTypeDto =
+  | "added"
+  | "modified"
+  | "deleted"
+  | "renamed"
+  | "copied"
+  | "type_changed"
+  | "unmerged"
+  | "untracked"
+  | "ignored";
+
+export type DiffLineOriginDto = "context" | "addition" | "deletion";
+
+export interface DiffLineDto {
+  origin: DiffLineOriginDto;
+  content: string;
+  hasTrailingNewline: boolean;
+}
+
+export interface DiffHunkDto {
+  oldStart: number;
+  oldLines: number;
+  newStart: number;
+  newLines: number;
+  lines: DiffLineDto[];
+}
+
+export interface FileDiffDto {
+  path: string;
+  previousPath: string | null;
+  changeType: ChangeTypeDto;
+  isBinary: boolean;
+  truncated: boolean;
+  hunks: DiffHunkDto[];
+}
+
+export interface DiffDto {
+  files: FileDiffDto[];
+}
+
+/** The diff of a single commit against its resolved base (US-026/US-076):
+ * `base` is `null` for a root commit (diffed against the empty tree) and the
+ * first-parent hash otherwise — this extension never re-derives that policy
+ * itself, it only ever displays what `gitsail commit-diff` already decided
+ * (T-209 criterion 1). */
+export interface CommitDiffDto {
+  target: string;
+  base: string | null;
+  diff: DiffDto;
+}
+
+// ---------------------------------------------------------------------
+// Blame (EPIC-07/EPIC-15). Mirrors `gitsail_protocol::{BlameOriginDto,
+// BlameLineDto, BlameDto}`.
+// ---------------------------------------------------------------------
+
+export type BlameOriginDto = "committed" | "local";
+
+export interface BlameLineDto {
+  finalLine: number;
+  originalLine: number;
+  commit: string;
+  author: SignatureDto;
+  timestamp: GitTimestampDto;
+  content: string;
+  origin: BlameOriginDto;
+}
+
+export interface BlameDto {
+  file: string;
+  revision: string | null;
+  lines: BlameLineDto[];
+}
+
+// ---------------------------------------------------------------------
+// Line history (EPIC-04/EPIC-15). Mirrors `gitsail_protocol::{LineRangeDto,
+// LineHistoryEntryDto, LineHistoryDto}`.
+// ---------------------------------------------------------------------
+
+export interface LineRangeDto {
+  start: number;
+  end: number;
+}
+
+export interface LineHistoryEntryDto {
+  commit: CommitDto;
+  hunks: DiffHunkDto[];
+}
+
+export interface LineHistoryDto {
+  file: string;
+  revision: string;
+  range: LineRangeDto;
+  entries: LineHistoryEntryDto[];
+}
+
+// ---------------------------------------------------------------------
+// File content at a revision (EPIC-15/US-076). Mirrors
+// `gitsail_protocol::FileContentDto` — a tagged union, like `HeadStateDto`:
+// `binary`/`missing` are legitimate, expected outcomes (never an error), so
+// this extension must handle all three `kind`s explicitly rather than
+// assuming `content` is always present.
+// ---------------------------------------------------------------------
+
+export type FileContentDto =
+  | { kind: "text"; path: string; revision: string; content: string }
+  | { kind: "binary"; path: string; revision: string }
+  | { kind: "missing"; path: string; revision: string };
+
+// ---------------------------------------------------------------------
+// Pagination envelope. Mirrors `gitsail_protocol::Page<T>` (used by
+// `gitsail log`, EPIC-15's file-history browsing).
+// ---------------------------------------------------------------------
+
+export interface PageDto<T> {
+  items: T[];
+  nextCursor?: string;
+  hasMore: boolean;
 }

@@ -15,11 +15,11 @@ pub mod request_id;
 
 pub use compat::{parse_envelope, EnvelopeDecodeError, SUPPORTED_SCHEMA_VERSIONS};
 pub use dto::{
-    BlameDto, BlameLineDto, BlameOriginDto, BranchDto, BranchKindDto, ChangeTypeDto, CommitDto,
-    CommitGraphPageDto, CommitGraphRowDto, DecorationDto, DiffDto, DiffHunkDto, DiffLineDto,
-    DiffLineOriginDto, FileChangeDto, FileDiffDto, FileStatusCodeDto, GitTimestampDto,
-    GraphEdgeDto, HeadStateDto, PatchExportDto, RecentRepositoryDto, RepositoryDto,
-    RepositoryStatusDto, SignatureDto,
+    BlameDto, BlameLineDto, BlameOriginDto, BranchDto, BranchKindDto, ChangeTypeDto, CommitDiffDto,
+    CommitDto, CommitGraphPageDto, CommitGraphRowDto, DecorationDto, DiffDto, DiffHunkDto,
+    DiffLineDto, DiffLineOriginDto, FileChangeDto, FileContentDto, FileDiffDto, FileStatusCodeDto,
+    GitTimestampDto, GraphEdgeDto, HeadStateDto, LineHistoryDto, LineHistoryEntryDto, LineRangeDto,
+    PatchExportDto, RecentRepositoryDto, RepositoryDto, RepositoryStatusDto, SignatureDto,
 };
 pub use envelope::{Envelope, Page, SCHEMA_VERSION};
 pub use error::ErrorPayload;
