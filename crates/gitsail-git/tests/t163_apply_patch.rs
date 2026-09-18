@@ -28,7 +28,8 @@ impl TempDir {
             .unwrap()
             .as_nanos();
         let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-        let path = std::env::temp_dir().join(format!("gitsail-git-apply-patch-{label}-{nanos}-{n}"));
+        let path =
+            std::env::temp_dir().join(format!("gitsail-git-apply-patch-{label}-{nanos}-{n}"));
         std::fs::create_dir_all(&path).expect("create temp dir");
         Self(path)
     }
@@ -106,7 +107,8 @@ fn preview_reports_a_valid_patch_as_supported_with_its_affected_file() {
     let provider = provider();
     let repo = provider.discover(repo_dir.path()).unwrap();
 
-    let patch = "--- a/a.txt\n+++ b/a.txt\n@@ -1,3 +1,3 @@\n line1\n-line2\n+line2-changed\n line3\n";
+    let patch =
+        "--- a/a.txt\n+++ b/a.txt\n@@ -1,3 +1,3 @@\n line1\n-line2\n+line2-changed\n line3\n";
     let preview = provider.preview_patch_application(&repo, patch).unwrap();
 
     assert!(preview.supported, "a valid patch must preview as supported");
@@ -125,7 +127,8 @@ fn apply_patch_applies_a_valid_patch_to_the_working_tree_only() {
     let provider = provider();
     let repo = provider.discover(repo_dir.path()).unwrap();
 
-    let patch = "--- a/a.txt\n+++ b/a.txt\n@@ -1,3 +1,3 @@\n line1\n-line2\n+line2-changed\n line3\n";
+    let patch =
+        "--- a/a.txt\n+++ b/a.txt\n@@ -1,3 +1,3 @@\n line1\n-line2\n+line2-changed\n line3\n";
     let result = provider.apply_patch(&repo, patch).unwrap();
 
     assert_eq!(result.applied_files, vec![PathBuf::from("a.txt")]);
@@ -135,7 +138,10 @@ fn apply_patch_applies_a_valid_patch_to_the_working_tree_only() {
     // Working tree only: never staged into the index (mirrors a plain
     // `git apply` with no `--cached`/`--index`).
     let status = status_porcelain(repo_dir.path());
-    assert!(status.starts_with(" M"), "expected an unstaged modification, got {status:?}");
+    assert!(
+        status.starts_with(" M"),
+        "expected an unstaged modification, got {status:?}"
+    );
 }
 
 #[test]
@@ -203,7 +209,8 @@ fn preview_rejects_a_patch_whose_context_no_longer_matches_the_current_file() {
 
     // This patch's context (`line1`/`line2`/`line3`) does not match the
     // file's real, current content.
-    let patch = "--- a/a.txt\n+++ b/a.txt\n@@ -1,3 +1,3 @@\n line1\n-line2\n+line2-changed\n line3\n";
+    let patch =
+        "--- a/a.txt\n+++ b/a.txt\n@@ -1,3 +1,3 @@\n line1\n-line2\n+line2-changed\n line3\n";
     let preview = provider.preview_patch_application(&repo, patch).unwrap();
 
     assert!(!preview.supported);
@@ -223,7 +230,8 @@ fn apply_patch_rejects_a_stale_context_as_an_operation_conflict_with_no_side_eff
     let provider = provider();
     let repo = provider.discover(repo_dir.path()).unwrap();
 
-    let patch = "--- a/a.txt\n+++ b/a.txt\n@@ -1,3 +1,3 @@\n line1\n-line2\n+line2-changed\n line3\n";
+    let patch =
+        "--- a/a.txt\n+++ b/a.txt\n@@ -1,3 +1,3 @@\n line1\n-line2\n+line2-changed\n line3\n";
     let err = provider.apply_patch(&repo, patch).unwrap_err();
 
     assert_eq!(err.code(), ErrorCode::OperationConflict);
@@ -249,7 +257,10 @@ fn apply_patch_rejects_a_path_traversal_patch_and_creates_nothing_outside_the_re
     // change.
     let outside = std::env::temp_dir().join(format!(
         "gitsail-t163-canary-{}",
-        SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
     ));
     std::fs::write(&outside, "untouched\n").unwrap();
 
@@ -262,9 +273,18 @@ fn apply_patch_rejects_a_path_traversal_patch_and_creates_nothing_outside_the_re
     );
 
     let preview = provider.preview_patch_application(&repo, &patch).unwrap();
-    assert!(!preview.supported, "a path-traversal patch must never preview as supported");
-    assert_eq!(preview.affected_files, vec![PathBuf::from(format!("../../{canary_name}"))]);
-    assert!(preview.rejection_reason.unwrap().contains("outside the repository"));
+    assert!(
+        !preview.supported,
+        "a path-traversal patch must never preview as supported"
+    );
+    assert_eq!(
+        preview.affected_files,
+        vec![PathBuf::from(format!("../../{canary_name}"))]
+    );
+    assert!(preview
+        .rejection_reason
+        .unwrap()
+        .contains("outside the repository"));
 
     let err = provider.apply_patch(&repo, &patch).unwrap_err();
     assert_eq!(err.code(), ErrorCode::InvalidRepositoryState);
@@ -293,17 +313,29 @@ fn apply_patch_rejects_an_absolute_path_patch_and_creates_nothing_outside_the_re
 
     let target = std::env::temp_dir().join(format!(
         "gitsail-t163-abspath-{}.txt",
-        SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
     ));
     // Ensure a clean slate: this file must not exist before, and must not
     // exist after the rejected apply either.
     let _ = std::fs::remove_file(&target);
 
-    let patch = format!("--- /dev/null\n+++ b/{}\n@@ -0,0 +1,1 @@\n+pwned\n", target.display());
+    let patch = format!(
+        "--- /dev/null\n+++ b/{}\n@@ -0,0 +1,1 @@\n+pwned\n",
+        target.display()
+    );
 
     let preview = provider.preview_patch_application(&repo, &patch).unwrap();
-    assert!(!preview.supported, "an absolute-path patch must never preview as supported");
-    assert!(preview.rejection_reason.unwrap().contains("outside the repository"));
+    assert!(
+        !preview.supported,
+        "an absolute-path patch must never preview as supported"
+    );
+    assert!(preview
+        .rejection_reason
+        .unwrap()
+        .contains("outside the repository"));
 
     let err = provider.apply_patch(&repo, &patch).unwrap_err();
     assert_eq!(err.code(), ErrorCode::InvalidRepositoryState);
@@ -322,7 +354,10 @@ fn apply_patch_rejects_a_symlink_escape_patch_and_creates_nothing_outside_the_re
 
     let outside_dir = std::env::temp_dir().join(format!(
         "gitsail-t163-symlink-target-{}",
-        SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
     ));
     std::fs::create_dir_all(&outside_dir).unwrap();
 
@@ -339,10 +374,14 @@ fn apply_patch_rejects_a_symlink_escape_patch_and_creates_nothing_outside_the_re
     // the repository by following a symlink the repository itself
     // contains, exercising Git's own "beyond a symbolic link" refusal
     // rather than this adapter's own `..`/absolute-path pre-check.
-    let patch = "--- /dev/null\n+++ b/link_to_outside/pwned_via_symlink.txt\n@@ -0,0 +1,1 @@\n+pwned\n";
+    let patch =
+        "--- /dev/null\n+++ b/link_to_outside/pwned_via_symlink.txt\n@@ -0,0 +1,1 @@\n+pwned\n";
 
     let preview = provider.preview_patch_application(&repo, patch).unwrap();
-    assert!(!preview.supported, "a symlink-escape patch must never preview as supported");
+    assert!(
+        !preview.supported,
+        "a symlink-escape patch must never preview as supported"
+    );
 
     let err = provider.apply_patch(&repo, patch).unwrap_err();
     assert_eq!(err.code(), ErrorCode::InvalidRepositoryState);
@@ -399,7 +438,9 @@ fn preview_and_apply_refuse_a_bare_repository_with_no_working_tree() {
 
     let patch = "--- a/a.txt\n+++ b/a.txt\n@@ -1,1 +1,1 @@\n-old\n+new\n";
 
-    let preview_err = provider.preview_patch_application(&repo, patch).unwrap_err();
+    let preview_err = provider
+        .preview_patch_application(&repo, patch)
+        .unwrap_err();
     assert_eq!(preview_err.code(), ErrorCode::InvalidRepositoryState);
 
     let apply_err = provider.apply_patch(&repo, patch).unwrap_err();

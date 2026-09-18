@@ -23,7 +23,9 @@ fn open_and_load(app: &mut App, dir: &std::path::Path) {
             _ => None,
         })
         .expect("RefreshStatus command");
-    let status = GetRepositoryStatus::new(port.clone()).execute(&repo).unwrap();
+    let status = GetRepositoryStatus::new(port.clone())
+        .execute(&repo)
+        .unwrap();
     app.on_status_refreshed(ticket, Ok(status));
 
     let generation = app.session().unwrap().generation();
@@ -48,7 +50,8 @@ fn run_mutation(app: &mut App, commands: Vec<Command>) {
                 app.on_merge_finished(result)
             }
             Command::ContinueOperation(repo) => {
-                let result = gitsail_application::ContinueOperation::new(write.clone()).execute(&repo);
+                let result =
+                    gitsail_application::ContinueOperation::new(write.clone()).execute(&repo);
                 app.on_operation_resolution_finished(result)
             }
             Command::AbortOperation(repo) => {
@@ -56,8 +59,8 @@ fn run_mutation(app: &mut App, commands: Vec<Command>) {
                 app.on_operation_resolution_finished(result)
             }
             Command::MarkConflictResolved(repo, path) => {
-                let result =
-                    gitsail_application::MarkConflictResolved::new(write.clone()).execute(&repo, &path);
+                let result = gitsail_application::MarkConflictResolved::new(write.clone())
+                    .execute(&repo, &path);
                 app.on_conflict_resolution_finished(result)
             }
             Command::TakeConflictSide(repo, path, side) => {
@@ -297,12 +300,18 @@ fn a_binary_conflict_resolves_via_take_conflict_side() {
     git(dir.path(), &["checkout", "-q", "-b", "feature"]);
     std::fs::write(dir.path().join("img.bin"), [0u8, 9, 9, 9]).unwrap();
     git(dir.path(), &["add", "-A"]);
-    git(dir.path(), &["commit", "--quiet", "-m", "feature binary change"]);
+    git(
+        dir.path(),
+        &["commit", "--quiet", "-m", "feature binary change"],
+    );
 
     git(dir.path(), &["checkout", "-q", "main"]);
     std::fs::write(dir.path().join("img.bin"), [0u8, 5, 5, 5]).unwrap();
     git(dir.path(), &["add", "-A"]);
-    git(dir.path(), &["commit", "--quiet", "-m", "main binary change"]);
+    git(
+        dir.path(),
+        &["commit", "--quiet", "-m", "main binary change"],
+    );
 
     let (mut app, _commands) = App::new(dir.path().to_path_buf(), read_port(), false);
     open_and_load(&mut app, dir.path());
@@ -311,7 +320,10 @@ fn a_binary_conflict_resolves_via_take_conflict_side() {
     app.update(Action::RequestMerge);
     let commands = app.update(Action::Activate);
     run_mutation(&mut app, commands);
-    assert!(matches!(app.last_merge_result(), Some(MergeResult::Conflict { .. })));
+    assert!(matches!(
+        app.last_merge_result(),
+        Some(MergeResult::Conflict { .. })
+    ));
 
     app.update(Action::ToggleConflictsPanel);
     let commands = app.update(Action::TakeConflictSideTheirs);
@@ -348,7 +360,10 @@ fn aborting_a_pending_merge_restores_head_and_preserves_unrelated_work() {
     app.update(Action::RequestMerge);
     let commands = app.update(Action::Activate);
     run_mutation(&mut app, commands);
-    assert!(matches!(app.last_merge_result(), Some(MergeResult::Conflict { .. })));
+    assert!(matches!(
+        app.last_merge_result(),
+        Some(MergeResult::Conflict { .. })
+    ));
 
     app.update(Action::ToggleConflictsPanel);
     app.update(Action::RequestAbortOperation);

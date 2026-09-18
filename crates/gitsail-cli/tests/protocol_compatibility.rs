@@ -19,7 +19,10 @@ use gitsail_protocol::{parse_envelope, EnvelopeDecodeError, RepositoryStatusDto}
 
 fn temp_repo_dir() -> PathBuf {
     static COUNTER: AtomicU32 = AtomicU32::new(0);
-    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
     let n = COUNTER.fetch_add(1, Ordering::SeqCst);
     let path = std::env::temp_dir().join(format!("gitsail-cli-protocol-compat-{nanos}-{n}"));
     std::fs::create_dir_all(&path).expect("create temp dir");
@@ -54,15 +57,22 @@ fn the_real_cli_producer_output_is_accepted_by_the_real_protocol_consumer() {
         .args(["status", "--repo", dir.to_str().unwrap(), "--json"])
         .output()
         .expect("failed to run gitsail status --json");
-    assert!(output.status.success(), "gitsail status --json failed: {output:?}");
+    assert!(
+        output.status.success(),
+        "gitsail status --json failed: {output:?}"
+    );
     let stdout = String::from_utf8(output.stdout).expect("stdout must be UTF-8");
 
     // The real producer's bytes, fed straight into the real consumer-side
     // helper: no hand-written fixture stands in for either side here.
-    let envelope = parse_envelope::<RepositoryStatusDto>(stdout.trim())
-        .expect("gitsail-cli's real --json output must be accepted by gitsail_protocol::parse_envelope");
+    let envelope = parse_envelope::<RepositoryStatusDto>(stdout.trim()).expect(
+        "gitsail-cli's real --json output must be accepted by gitsail_protocol::parse_envelope",
+    );
     assert!(envelope.is_ok());
-    assert!(envelope.data().unwrap().is_clean, "a freshly initialized repo has a clean status");
+    assert!(
+        envelope.data().unwrap().is_clean,
+        "a freshly initialized repo has a clean status"
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -94,6 +104,10 @@ fn the_consumer_rejects_a_hand_crafted_unsupported_schema_version_the_same_way()
     // half of the contract is exercised with a stand-in payload shaped
     // like `docs/architecture/fixtures/protocol-compatibility/unsupported-v2.json`.
     let raw = r#"{"schemaVersion":2,"ok":true,"requestId":"req-1","result":{"isClean":false}}"#;
-    let err = parse_envelope::<RepositoryStatusDto>(raw).expect_err("schemaVersion 2 must be rejected");
-    assert!(matches!(err, EnvelopeDecodeError::UnsupportedSchemaVersion(2)));
+    let err =
+        parse_envelope::<RepositoryStatusDto>(raw).expect_err("schemaVersion 2 must be rejected");
+    assert!(matches!(
+        err,
+        EnvelopeDecodeError::UnsupportedSchemaVersion(2)
+    ));
 }

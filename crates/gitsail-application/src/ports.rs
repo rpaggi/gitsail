@@ -145,7 +145,11 @@ pub trait RepositoryReadPort: Send + Sync {
     /// unambiguously names (US-028 criterion 1). Fails rather than
     /// returning a stale or partial result for a revision that does not
     /// resolve (US-028 criterion 3).
-    fn resolve_revision(&self, repo: &Repository, revision: &str) -> Result<CommitHash, GitSailError>;
+    fn resolve_revision(
+        &self,
+        repo: &Repository,
+        revision: &str,
+    ) -> Result<CommitHash, GitSailError>;
     /// `cancel` lets a caller stop a long-running blame query from another
     /// thread (US-034 criterion 3), matching [`Self::diff`].
     fn blame(
@@ -290,7 +294,11 @@ pub trait RepositoryReadPort: Send + Sync {
     /// legitimate default" convention. [`crate::ports::RepositoryReadPort`]'s
     /// only real implementation (`gitsail_git::GitCliProvider`) overrides
     /// this with a real index read.
-    fn conflict_sides(&self, repo: &Repository, path: &Path) -> Result<ConflictSides, GitSailError> {
+    fn conflict_sides(
+        &self,
+        repo: &Repository,
+        path: &Path,
+    ) -> Result<ConflictSides, GitSailError> {
         let _ = repo;
         Ok(ConflictSides {
             path: path.to_path_buf(),

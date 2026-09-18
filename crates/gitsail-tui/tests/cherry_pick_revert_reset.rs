@@ -44,7 +44,9 @@ fn open_and_load(app: &mut App, dir: &std::path::Path) {
             _ => None,
         })
         .expect("RefreshStatus command");
-    let status = GetRepositoryStatus::new(port.clone()).execute(&repo).unwrap();
+    let status = GetRepositoryStatus::new(port.clone())
+        .execute(&repo)
+        .unwrap();
     app.on_status_refreshed(ticket, Ok(status));
 
     let generation = app.session().unwrap().generation();
@@ -95,18 +97,28 @@ fn run_mutation(app: &mut App, commands: Vec<Command>) {
     while let Some(command) = queue.pop() {
         let follow_up = match command {
             Command::CherryPick(repo, commit, merge_parent) => {
-                let result = gitsail_application::CherryPick::new(write.clone())
-                    .execute(&repo, &commit, merge_parent);
+                let result = gitsail_application::CherryPick::new(write.clone()).execute(
+                    &repo,
+                    &commit,
+                    merge_parent,
+                );
                 app.on_cherry_pick_finished(result)
             }
             Command::Revert(repo, commit, merge_parent) => {
-                let result = gitsail_application::Revert::new(write.clone())
-                    .execute(&repo, &commit, merge_parent);
+                let result = gitsail_application::Revert::new(write.clone()).execute(
+                    &repo,
+                    &commit,
+                    merge_parent,
+                );
                 app.on_revert_finished(result)
             }
             Command::Reset(repo, target, mode, expected_head) => {
-                let result = gitsail_application::Reset::new(write.clone())
-                    .execute(&repo, &target, mode, &expected_head);
+                let result = gitsail_application::Reset::new(write.clone()).execute(
+                    &repo,
+                    &target,
+                    mode,
+                    &expected_head,
+                );
                 app.on_operation_finished(result)
             }
             Command::RefreshStatus(ticket, repo) => {
@@ -237,7 +249,10 @@ fn reverting_the_highlighted_graph_commit_undoes_it_via_the_tui_flow() {
     assert_eq!(highlighted.subject, "add line2");
 
     app.update(Action::RequestRevert);
-    assert!(matches!(app.operation(), OperationState::Confirming(OperationKind::Revert { .. })));
+    assert!(matches!(
+        app.operation(),
+        OperationState::Confirming(OperationKind::Revert { .. })
+    ));
 
     let commands = app.update(Action::Activate);
     run_mutation(&mut app, commands);
@@ -288,9 +303,14 @@ fn resetting_hard_via_the_mode_chooser_moves_head_index_and_working_tree() {
     assert_eq!(app.reset_mode_cursor(), 2);
 
     let confirm_commands = app.update(Action::Activate); // chooser -> Confirming
-    assert!(confirm_commands.is_empty(), "choosing a mode only starts confirmation");
+    assert!(
+        confirm_commands.is_empty(),
+        "choosing a mode only starts confirmation"
+    );
     match app.operation() {
-        OperationState::Confirming(OperationKind::Reset { mode, target: t, .. }) => {
+        OperationState::Confirming(OperationKind::Reset {
+            mode, target: t, ..
+        }) => {
             assert_eq!(*mode, gitsail_application::ResetMode::Hard);
             assert_eq!(t, target.hash.as_str());
         }
@@ -316,7 +336,10 @@ fn resetting_hard_via_the_mode_chooser_moves_head_index_and_working_tree() {
         .output()
         .unwrap();
     assert!(
-        String::from_utf8(status_output.stdout).unwrap().trim().is_empty(),
+        String::from_utf8(status_output.stdout)
+            .unwrap()
+            .trim()
+            .is_empty(),
         "a hard reset leaves nothing staged or unstaged"
     );
 }

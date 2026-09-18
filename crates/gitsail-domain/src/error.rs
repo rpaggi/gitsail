@@ -208,8 +208,8 @@ mod tests {
         }
         impl StdError for Secret {}
 
-        let err = GitSailError::new(ErrorCode::ProcessFailure, "git process failed")
-            .with_source(Secret);
+        let err =
+            GitSailError::new(ErrorCode::ProcessFailure, "git process failed").with_source(Secret);
 
         let rendered = err.to_string();
         assert!(rendered.contains("git process failed"));

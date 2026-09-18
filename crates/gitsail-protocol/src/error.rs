@@ -65,7 +65,10 @@ mod tests {
             .with_operation_id(OperationId::new("op-1"));
         let payload = ErrorPayload::from(&err);
 
-        assert_eq!(payload.remediation.as_deref(), Some("retry with a longer timeout"));
+        assert_eq!(
+            payload.remediation.as_deref(),
+            Some("retry with a longer timeout")
+        );
         assert_eq!(payload.operation_id.as_deref(), Some("op-1"));
 
         let json = serde_json::to_value(&payload).unwrap();
@@ -83,8 +86,8 @@ mod tests {
         }
         impl std::error::Error for Secret {}
 
-        let err = GitSailError::new(ErrorCode::ProcessFailure, "git process failed")
-            .with_source(Secret);
+        let err =
+            GitSailError::new(ErrorCode::ProcessFailure, "git process failed").with_source(Secret);
         let payload = ErrorPayload::from(&err);
         let json = serde_json::to_string(&payload).unwrap();
 

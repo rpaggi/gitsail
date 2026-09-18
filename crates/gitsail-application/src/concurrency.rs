@@ -74,7 +74,10 @@ impl RepositoryLockRegistry {
     /// [`crate::cache::GenerationCache`], which bounds *query result*
     /// growth for exactly this reason).
     pub fn lock_for(&self, key: &Path) -> Arc<Mutex<()>> {
-        let mut locks = self.locks.lock().unwrap_or_else(|poison| poison.into_inner());
+        let mut locks = self
+            .locks
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         locks
             .entry(key.to_path_buf())
             .or_insert_with(|| Arc::new(Mutex::new(())))

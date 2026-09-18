@@ -69,7 +69,17 @@ fn init_repo_with_a_merge(dir: &std::path::Path) {
     std::fs::write(dir.join("main.txt"), "main work\n").unwrap();
     git(dir, &["add", "main.txt"]);
     git(dir, &["commit", "--quiet", "-m", "main commit"]);
-    git(dir, &["merge", "--quiet", "--no-ff", "-m", "merge feature", "feature"]);
+    git(
+        dir,
+        &[
+            "merge",
+            "--quiet",
+            "--no-ff",
+            "-m",
+            "merge feature",
+            "feature",
+        ],
+    );
 }
 
 #[test]
@@ -81,9 +91,16 @@ fn opening_a_repository_loads_the_commit_graph_and_associates_rows_with_commits(
     let graph_command = open_and_capture_graph_command(&mut app, dir.path());
     run_graph_command(&mut app, graph_command);
 
-    assert_eq!(app.commit_graph().rows().len(), 1, "the single initial commit must be loaded");
+    assert_eq!(
+        app.commit_graph().rows().len(),
+        1,
+        "the single initial commit must be loaded"
+    );
     assert_eq!(app.graph_commits().len(), 1);
-    assert_eq!(app.commit_graph().rows()[0].commit, app.graph_commits()[0].hash);
+    assert_eq!(
+        app.commit_graph().rows()[0].commit,
+        app.graph_commits()[0].hash
+    );
     assert!(!app.graph_has_more());
     assert!(app.graph_error().is_none());
 
@@ -134,18 +151,28 @@ fn scrolling_to_the_last_loaded_row_does_not_fetch_more_once_history_is_exhauste
     let (mut app, _commands) = App::new(dir.path().to_path_buf(), read_port(), false);
     let graph_command = open_and_capture_graph_command(&mut app, dir.path());
     run_graph_command(&mut app, graph_command);
-    assert!(!app.graph_has_more(), "the fixture repository is far smaller than one page");
+    assert!(
+        !app.graph_has_more(),
+        "the fixture repository is far smaller than one page"
+    );
 
     focus_graph(&mut app);
     let row_count = app.commit_graph().rows().len();
-    assert!(row_count >= 3, "the merge fixture has at least three commits");
+    assert!(
+        row_count >= 3,
+        "the merge fixture has at least three commits"
+    );
 
     let mut extra_commands = Vec::new();
     for _ in 0..row_count + 2 {
         extra_commands.extend(app.update(Action::MoveDown));
     }
 
-    assert_eq!(app.graph_cursor(), row_count - 1, "the cursor clamps at the last loaded row");
+    assert_eq!(
+        app.graph_cursor(),
+        row_count - 1,
+        "the cursor clamps at the last loaded row"
+    );
     assert!(
         extra_commands.is_empty(),
         "no further page must be requested once has_more is false: {extra_commands:?}"
@@ -181,7 +208,10 @@ fn appending_a_second_page_resolves_the_first_pages_continuation_and_preserves_i
     let first_page = GetCommitHistory::new(port.clone())
         .execute(&repo, &first_query)
         .unwrap();
-    assert!(first_page.has_more, "the merge fixture has more than one commit");
+    assert!(
+        first_page.has_more,
+        "the merge fixture has more than one commit"
+    );
     app.on_commit_graph_page_loaded(request_id, Ok(first_page.clone()));
 
     let selected_hash = app.commit_graph().rows()[0].commit.clone();
@@ -214,7 +244,10 @@ fn appending_a_second_page_resolves_the_first_pages_continuation_and_preserves_i
         Some(row_index_before),
         "a selection tracked by hash must resolve to the same row after a page is appended"
     );
-    assert_eq!(app.commit_graph().rows()[row_index_before].lane, lane_before);
+    assert_eq!(
+        app.commit_graph().rows()[row_index_before].lane,
+        lane_before
+    );
     assert_eq!(
         app.graph_commits().len(),
         app.commit_graph().rows().len(),

@@ -602,7 +602,11 @@ mod tests {
             ) -> Result<Page<Commit>, GitSailError> {
                 unimplemented!()
             }
-            fn commit(&self, _repo: &Repository, _hash: &CommitHash) -> Result<Commit, GitSailError> {
+            fn commit(
+                &self,
+                _repo: &Repository,
+                _hash: &CommitHash,
+            ) -> Result<Commit, GitSailError> {
                 unimplemented!()
             }
             fn branches(&self, _repo: &Repository) -> Result<Vec<Branch>, GitSailError> {
@@ -800,7 +804,10 @@ mod tests {
 
         let err = session
             .run_mutation(|| {
-                Err::<(), _>(GitSailError::new(ErrorCode::RepositoryLocked, "locked by another process"))
+                Err::<(), _>(GitSailError::new(
+                    ErrorCode::RepositoryLocked,
+                    "locked by another process",
+                ))
             })
             .unwrap_err();
 

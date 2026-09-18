@@ -1228,7 +1228,11 @@ impl RepositoryReadPort for GitCliProvider {
     /// missing at that point" convention. Binary vs. text classification
     /// reuses [`classify_file_content`], the exact same heuristic
     /// `file_content` already applies.
-    fn conflict_sides(&self, repo: &Repository, path: &Path) -> Result<ConflictSides, GitSailError> {
+    fn conflict_sides(
+        &self,
+        repo: &Repository,
+        path: &Path,
+    ) -> Result<ConflictSides, GitSailError> {
         require_worktree(repo, "read conflict sides")?;
         Ok(ConflictSides {
             path: path.to_path_buf(),
@@ -1876,7 +1880,11 @@ impl RepositoryWritePort for GitCliProvider {
     /// immediate re-check this performs right before writing anything can
     /// never classify a rejection differently than the preview a caller
     /// just showed a moment earlier.
-    fn apply_patch(&self, repo: &Repository, patch_text: &str) -> Result<ApplyPatchResult, GitSailError> {
+    fn apply_patch(
+        &self,
+        repo: &Repository,
+        patch_text: &str,
+    ) -> Result<ApplyPatchResult, GitSailError> {
         let (preview, rejection_code) = self.check_patch_application(repo, patch_text)?;
         if let Some(code) = rejection_code {
             return Err(GitSailError::new(
@@ -1984,7 +1992,9 @@ impl RepositoryWritePort for GitCliProvider {
             Ok(_) => {
                 let head_after = RepositoryReadPort::resolve_revision(self, repo, "HEAD")?;
                 if head_after == target_before {
-                    Ok(MergeResult::FastForwarded { new_head: head_after })
+                    Ok(MergeResult::FastForwarded {
+                        new_head: head_after,
+                    })
                 } else {
                     Ok(MergeResult::MergeCommitCreated { hash: head_after })
                 }
@@ -2254,7 +2264,11 @@ impl RepositoryWritePort for GitCliProvider {
     /// `git log` invocation never depends on a ref still resolving the same
     /// way (that is exactly what [`Self::execute_rebase_plan`] revalidates
     /// before ever applying the result).
-    fn plan_rebase(&self, repo: &Repository, onto_revision: &str) -> Result<RebasePlan, GitSailError> {
+    fn plan_rebase(
+        &self,
+        repo: &Repository,
+        onto_revision: &str,
+    ) -> Result<RebasePlan, GitSailError> {
         require_worktree(repo, "plan rebase")?;
         let onto = RepositoryReadPort::resolve_revision(self, repo, onto_revision)?;
         let branch_head = RepositoryReadPort::resolve_revision(self, repo, "HEAD")?;
@@ -2392,9 +2406,7 @@ impl RepositoryWritePort for GitCliProvider {
             plan.onto.as_str().to_string(),
         ];
 
-        let mut pending_err = self
-            .run_with_env(args, &repo.root_path, extra_env)
-            .err();
+        let mut pending_err = self.run_with_env(args, &repo.root_path, extra_env).err();
 
         // Bounded defensively: at most one clean pause per entry in the
         // plan (every pause is one of this plan's own `Reword` entries),
@@ -2419,7 +2431,9 @@ impl RepositoryWritePort for GitCliProvider {
                     let new_head = RepositoryReadPort::resolve_revision(self, repo, "HEAD")?;
                     return Ok(RebaseResult::Completed { new_head });
                 }
-                InProgressOperation::Rebase(rebase_op) if !rebase_op.conflicted_files.is_empty() => {
+                InProgressOperation::Rebase(rebase_op)
+                    if !rebase_op.conflicted_files.is_empty() =>
+                {
                     return Ok(RebaseResult::Conflict {
                         files: rebase_op.conflicted_files,
                     });
@@ -2514,7 +2528,9 @@ impl RepositoryWritePort for GitCliProvider {
         } else if merge_parent.is_some() {
             return Err(GitSailError::new(
                 ErrorCode::InvalidRepositoryState,
-                format!("{commit} is not a merge commit: a merge parent policy does not apply to it"),
+                format!(
+                    "{commit} is not a merge commit: a merge parent policy does not apply to it"
+                ),
             ));
         }
         args.push("--end-of-options".to_string());
@@ -2590,7 +2606,9 @@ impl RepositoryWritePort for GitCliProvider {
         } else if merge_parent.is_some() {
             return Err(GitSailError::new(
                 ErrorCode::InvalidRepositoryState,
-                format!("{commit} is not a merge commit: a merge parent policy does not apply to it"),
+                format!(
+                    "{commit} is not a merge commit: a merge parent policy does not apply to it"
+                ),
             ));
         }
         args.push("--end-of-options".to_string());
@@ -2994,7 +3012,10 @@ fn classify_apply_failure(err: GitSailError) -> GitSailError {
 fn declared_patch_paths(patch_text: &str) -> Vec<PathBuf> {
     let mut paths = Vec::new();
     for line in patch_text.lines() {
-        let Some(raw) = line.strip_prefix("+++ ").or_else(|| line.strip_prefix("--- ")) else {
+        let Some(raw) = line
+            .strip_prefix("+++ ")
+            .or_else(|| line.strip_prefix("--- "))
+        else {
             continue;
         };
         let raw = raw.split('\t').next().unwrap_or(raw).trim();
@@ -3059,9 +3080,15 @@ fn classify_patch_check_failure(err: &GitSailError) -> (ErrorCode, String) {
         || diagnostic_text.contains("patch fragment without header")
         || diagnostic_text.contains("unrecognized input")
     {
-        (ErrorCode::ParseFailure, "the patch is malformed".to_string())
+        (
+            ErrorCode::ParseFailure,
+            "the patch is malformed".to_string(),
+        )
     } else {
-        (ErrorCode::ProcessFailure, "git could not apply the patch".to_string())
+        (
+            ErrorCode::ProcessFailure,
+            "git could not apply the patch".to_string(),
+        )
     }
 }
 
@@ -3535,9 +3562,7 @@ fn classify_remote_transport_failure(err: GitSailError) -> GitSailError {
             ErrorCode::NetworkFailure,
             "the remote could not be reached, or does not exist",
         )
-        .with_remediation(
-            "verify the remote's name/URL and your network connection, then retry",
-        )
+        .with_remediation("verify the remote's name/URL and your network connection, then retry")
         .with_source(err);
     }
 
@@ -3935,14 +3960,16 @@ fn render_rebase_todo(entries: &[RebasePlanEntry]) -> (String, VecDeque<String>)
             RebaseAction::Drop => "drop",
         };
         if entry.action == RebaseAction::Reword {
-            let message = entry
-                .message_override
-                .clone()
-                .expect("RebasePlan::validate guarantees a Reword entry carries a message_override");
+            let message = entry.message_override.clone().expect(
+                "RebasePlan::validate guarantees a Reword entry carries a message_override",
+            );
             reword_messages.push_back(message);
         }
         let safe_subject = entry.subject.replace(['\n', '\r'], " ");
-        todo.push_str(&format!("{command} {} {safe_subject}\n", entry.commit.as_str()));
+        todo.push_str(&format!(
+            "{command} {} {safe_subject}\n",
+            entry.commit.as_str()
+        ));
     }
     (todo, reword_messages)
 }
@@ -5436,7 +5463,10 @@ mod tests {
 
         assert!(todo.starts_with("edit bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb "));
         assert!(!todo.contains("rm -rf"));
-        assert_eq!(rewords.pop_front(), Some("a new message; rm -rf /".to_string()));
+        assert_eq!(
+            rewords.pop_front(),
+            Some("a new message; rm -rf /".to_string())
+        );
     }
 
     fn modified_file_diff() -> FileDiff {
@@ -5690,7 +5720,8 @@ mod tests {
 
     #[test]
     fn pull_failure_classification_still_recognizes_transport_failures() {
-        let err = process_failure("fatal: Authentication failed for 'https://example.com/repo.git/'\n");
+        let err =
+            process_failure("fatal: Authentication failed for 'https://example.com/repo.git/'\n");
 
         let classified = classify_pull_failure(err);
 

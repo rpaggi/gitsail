@@ -56,7 +56,10 @@ mod tests {
     /// spontaneous network transmission.
     #[test]
     fn factory_default_configuration_never_authorizes_spontaneous_transmission() {
-        assert_eq!(TelemetryPreference::default(), TelemetryPreference::Disabled);
+        assert_eq!(
+            TelemetryPreference::default(),
+            TelemetryPreference::Disabled
+        );
         assert!(!TelemetryPreference::default().is_enabled());
 
         assert_eq!(

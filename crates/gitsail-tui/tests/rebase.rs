@@ -23,7 +23,9 @@ fn open_and_load(app: &mut App, dir: &std::path::Path) {
             _ => None,
         })
         .expect("RefreshStatus command");
-    let status = GetRepositoryStatus::new(port.clone()).execute(&repo).unwrap();
+    let status = GetRepositoryStatus::new(port.clone())
+        .execute(&repo)
+        .unwrap();
     app.on_status_refreshed(ticket, Ok(status));
 
     let generation = app.session().unwrap().generation();
@@ -50,13 +52,14 @@ fn run_mutation(app: &mut App, commands: Vec<Command>) {
                 app.on_rebase_finished(result)
             }
             Command::PlanRebase(repo, onto) => {
-                let result = gitsail_application::PlanRebase::new(write.clone()).execute(&repo, &onto);
+                let result =
+                    gitsail_application::PlanRebase::new(write.clone()).execute(&repo, &onto);
                 app.on_rebase_plan_loaded(result);
                 Vec::new()
             }
             Command::ExecuteRebasePlan(repo, plan) => {
-                let result =
-                    gitsail_application::ExecuteRebasePlan::new(write.clone()).execute(&repo, &plan);
+                let result = gitsail_application::ExecuteRebasePlan::new(write.clone())
+                    .execute(&repo, &plan);
                 app.on_rebase_finished(result)
             }
             Command::SkipOperation(repo) => {
@@ -64,7 +67,8 @@ fn run_mutation(app: &mut App, commands: Vec<Command>) {
                 app.on_operation_resolution_finished(result)
             }
             Command::ContinueOperation(repo) => {
-                let result = gitsail_application::ContinueOperation::new(write.clone()).execute(&repo);
+                let result =
+                    gitsail_application::ContinueOperation::new(write.clone()).execute(&repo);
                 app.on_operation_resolution_finished(result)
             }
             Command::AbortOperation(repo) => {
@@ -72,8 +76,8 @@ fn run_mutation(app: &mut App, commands: Vec<Command>) {
                 app.on_operation_resolution_finished(result)
             }
             Command::MarkConflictResolved(repo, path) => {
-                let result =
-                    gitsail_application::MarkConflictResolved::new(write.clone()).execute(&repo, &path);
+                let result = gitsail_application::MarkConflictResolved::new(write.clone())
+                    .execute(&repo, &path);
                 app.on_conflict_resolution_finished(result)
             }
             Command::RefreshStatus(ticket, repo) => {
@@ -306,7 +310,10 @@ fn rebase_conflict_recovers_via_skip_from_the_conflicts_overlay() {
     app.update(Action::RequestRebase);
     let commands = app.update(Action::Activate);
     run_mutation(&mut app, commands);
-    assert!(matches!(app.last_rebase_result(), Some(RebaseResult::Conflict { .. })));
+    assert!(matches!(
+        app.last_rebase_result(),
+        Some(RebaseResult::Conflict { .. })
+    ));
 
     app.update(Action::ToggleConflictsPanel);
     app.update(Action::RequestSkipOperation);
@@ -438,7 +445,9 @@ fn reordering_and_rewording_a_rebase_plan_reapplies_commits_in_the_new_order() {
     app.update(Action::Activate); // submits the reword prompt
     assert!(app.rebase_plan_reword_input().is_none());
     assert_eq!(
-        app.rebase_plan().unwrap().entries[0].message_override.as_deref(),
+        app.rebase_plan().unwrap().entries[0]
+            .message_override
+            .as_deref(),
         Some("reworded B")
     );
 
@@ -447,7 +456,10 @@ fn reordering_and_rewording_a_rebase_plan_reapplies_commits_in_the_new_order() {
     app.update(Action::Activate);
     assert!(matches!(
         app.operation(),
-        OperationState::Confirming(OperationKind::ExecuteRebasePlan { commit_count: 2, .. })
+        OperationState::Confirming(OperationKind::ExecuteRebasePlan {
+            commit_count: 2,
+            ..
+        })
     ));
     let commands = app.update(Action::Activate);
     run_mutation(&mut app, commands);
@@ -545,8 +557,13 @@ fn escaping_the_reword_prompt_discards_only_the_unsubmitted_text() {
         app.rebase_plan_open(),
         "escaping the reword prompt must not close the whole plan overlay"
     );
-    assert_eq!(app.rebase_plan().unwrap().entries[0].action, RebaseAction::Reword);
-    assert!(app.rebase_plan().unwrap().entries[0].message_override.is_none());
+    assert_eq!(
+        app.rebase_plan().unwrap().entries[0].action,
+        RebaseAction::Reword
+    );
+    assert!(app.rebase_plan().unwrap().entries[0]
+        .message_override
+        .is_none());
 
     // A second Esc closes the plan overlay outright.
     app.update(Action::Dismiss);
@@ -586,7 +603,9 @@ fn a_stale_plan_is_refused_clearly_rather_than_silently_rebuilt() {
     match app.operation() {
         OperationState::Failed(OperationKind::ExecuteRebasePlan { .. }, error) => {
             assert_eq!(error.code(), ErrorCode::OperationConflict);
-            assert!(error.to_string().contains("now resolves to a different commit"));
+            assert!(error
+                .to_string()
+                .contains("now resolves to a different commit"));
         }
         other => panic!("expected Some(Failed(ExecuteRebasePlan, ..)), got {other:?}"),
     }

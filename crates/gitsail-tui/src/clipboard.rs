@@ -45,7 +45,9 @@ pub struct SystemClipboard;
 impl ClipboardPort for SystemClipboard {
     fn set_text(&self, text: &str) -> Result<(), String> {
         let mut clipboard = arboard::Clipboard::new().map_err(|e| e.to_string())?;
-        clipboard.set_text(text.to_string()).map_err(|e| e.to_string())
+        clipboard
+            .set_text(text.to_string())
+            .map_err(|e| e.to_string())
     }
 
     fn get_text(&self) -> Result<String, String> {

@@ -102,7 +102,10 @@ impl GitLabMergeRequestAdapter {
 }
 
 fn now_unix() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 /// GitLab's own `X-Next-Page` pagination header: present but empty on the
@@ -111,7 +114,10 @@ fn now_unix() -> u64 {
 /// it as always present on a paginated endpoint, but "no next page" is the
 /// safe default if that ever changes).
 fn has_next_page(response: &HttpResponse) -> bool {
-    response.header("x-next-page").map(|v| !v.trim().is_empty()).unwrap_or(false)
+    response
+        .header("x-next-page")
+        .map(|v| !v.trim().is_empty())
+        .unwrap_or(false)
 }
 
 impl PullRequestQueryPort for GitLabMergeRequestAdapter {
@@ -168,14 +174,21 @@ fn percent_encode_path(path: &str) -> String {
 }
 
 fn parse_page(response: &HttpResponse) -> Result<PullRequestPage, PullRequestQueryError> {
-    let merge_requests: Vec<GitLabMergeRequest> = serde_json::from_str(&response.body).map_err(|err| {
-        PullRequestQueryError::Other(
-            GitSailError::new(ErrorCode::ParseFailure, "could not parse GitLab's merge request response")
+    let merge_requests: Vec<GitLabMergeRequest> =
+        serde_json::from_str(&response.body).map_err(|err| {
+            PullRequestQueryError::Other(
+                GitSailError::new(
+                    ErrorCode::ParseFailure,
+                    "could not parse GitLab's merge request response",
+                )
                 .with_source(err),
-        )
-    })?;
+            )
+        })?;
     Ok(PullRequestPage {
-        items: merge_requests.into_iter().map(PullRequestSummary::from).collect(),
+        items: merge_requests
+            .into_iter()
+            .map(PullRequestSummary::from)
+            .collect(),
         has_next_page: has_next_page(response),
     })
 }
@@ -191,7 +204,11 @@ mod tests {
         ForgeRepositoryRef {
             kind: ForgeKind::GitLab,
             host: "gitlab.com".to_string(),
-            path_segments: vec!["group".to_string(), "subgroup".to_string(), "repo".to_string()],
+            path_segments: vec![
+                "group".to_string(),
+                "subgroup".to_string(),
+                "repo".to_string(),
+            ],
         }
     }
 
@@ -251,7 +268,9 @@ mod tests {
         adapter.list_pull_requests(&repository(), 1, None).unwrap();
 
         let calls = http.calls();
-        assert!(calls[0].0.contains("/projects/group%2Fsubgroup%2Frepo/merge_requests"));
+        assert!(calls[0]
+            .0
+            .contains("/projects/group%2Fsubgroup%2Frepo/merge_requests"));
     }
 
     #[test]
@@ -298,12 +317,19 @@ mod tests {
         let adapter = GitLabMergeRequestAdapter::new(http.clone());
 
         adapter
-            .list_pull_requests(&repository(), 1, Some(&ForgeToken::new("sentinel-fake-token")))
+            .list_pull_requests(
+                &repository(),
+                1,
+                Some(&ForgeToken::new("sentinel-fake-token")),
+            )
             .unwrap();
 
         let calls = http.calls();
         let (_, headers) = &calls[0];
-        assert!(headers.contains(&("PRIVATE-TOKEN".to_string(), "sentinel-fake-token".to_string())));
+        assert!(headers.contains(&(
+            "PRIVATE-TOKEN".to_string(),
+            "sentinel-fake-token".to_string()
+        )));
         assert!(!headers.iter().any(|(name, _)| name == "Authorization"));
     }
 
@@ -314,7 +340,9 @@ mod tests {
         let adapter = GitLabMergeRequestAdapter::new(http);
 
         assert!(matches!(
-            adapter.list_pull_requests(&repository(), 1, None).unwrap_err(),
+            adapter
+                .list_pull_requests(&repository(), 1, None)
+                .unwrap_err(),
             PullRequestQueryError::AuthenticationRequired
         ));
     }
@@ -326,7 +354,9 @@ mod tests {
         let adapter = GitLabMergeRequestAdapter::new(http);
 
         assert!(matches!(
-            adapter.list_pull_requests(&repository(), 1, None).unwrap_err(),
+            adapter
+                .list_pull_requests(&repository(), 1, None)
+                .unwrap_err(),
             PullRequestQueryError::PermissionDenied
         ));
     }
@@ -338,7 +368,9 @@ mod tests {
         let adapter = GitLabMergeRequestAdapter::new(http);
 
         assert!(matches!(
-            adapter.list_pull_requests(&repository(), 1, None).unwrap_err(),
+            adapter
+                .list_pull_requests(&repository(), 1, None)
+                .unwrap_err(),
             PullRequestQueryError::PermissionDenied
         ));
     }
@@ -349,8 +381,13 @@ mod tests {
         http.queue(Ok(json_response(429, &[("Retry-After", "15")], "{}")));
         let adapter = GitLabMergeRequestAdapter::new(http);
 
-        match adapter.list_pull_requests(&repository(), 1, None).unwrap_err() {
-            PullRequestQueryError::RateLimited { retry_after_seconds } => {
+        match adapter
+            .list_pull_requests(&repository(), 1, None)
+            .unwrap_err()
+        {
+            PullRequestQueryError::RateLimited {
+                retry_after_seconds,
+            } => {
                 assert_eq!(retry_after_seconds, Some(15));
             }
             other => panic!("expected RateLimited, got {other:?}"),
@@ -361,10 +398,15 @@ mod tests {
     fn a_transport_failure_maps_to_network_failure_offline() {
         use crate::http::HttpTransportError;
         let http = Arc::new(FakeHttpClient::default());
-        http.queue(Err(HttpTransportError { message: "timed out".to_string() }));
+        http.queue(Err(HttpTransportError {
+            message: "timed out".to_string(),
+        }));
         let adapter = GitLabMergeRequestAdapter::new(http);
 
-        match adapter.list_pull_requests(&repository(), 1, None).unwrap_err() {
+        match adapter
+            .list_pull_requests(&repository(), 1, None)
+            .unwrap_err()
+        {
             PullRequestQueryError::NetworkFailure(message) => assert_eq!(message, "timed out"),
             other => panic!("expected NetworkFailure, got {other:?}"),
         }
@@ -377,7 +419,9 @@ mod tests {
         let adapter = GitLabMergeRequestAdapter::new(http);
 
         assert!(matches!(
-            adapter.list_pull_requests(&repository(), 1, None).unwrap_err(),
+            adapter
+                .list_pull_requests(&repository(), 1, None)
+                .unwrap_err(),
             PullRequestQueryError::Other(_)
         ));
     }

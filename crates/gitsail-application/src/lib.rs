@@ -33,6 +33,9 @@ pub use forge_links::GetForgeLink;
 pub use graph_cache::{GraphCache, GraphPageKey, DEFAULT_GRAPH_CACHE_CAPACITY};
 pub use mutation::{MutationKind, Precondition, RiskLevel};
 pub use patch::{export_patch, render_unified_diff, PatchExport};
+pub use ports::{
+    BlameRequest, CommitQuery, DiffRequest, LineHistoryRequest, Page, RepositoryReadPort,
+};
 pub use preferences::{
     LoadPreferences, Preferences, PreferencesLoadOutcome, PreferencesPort, SavePreferences,
     SetThemePreference, ThemePreference,
@@ -42,7 +45,6 @@ pub use pull_requests::{
     ForgeRepositoryRef, ListPullRequests, ListPullRequestsOutcome, PullRequestPage,
     PullRequestQueryError, PullRequestQueryPort, PullRequestState, PullRequestSummary,
 };
-pub use ports::{BlameRequest, CommitQuery, DiffRequest, LineHistoryRequest, Page, RepositoryReadPort};
 pub use recent_repositories::{
     ForgetRecentRepository, ListRecentRepositories, RecentRepositories, RecentRepositoriesPort,
     RecentRepositoryEntry, RecordRecentRepository, MAX_RECENT_REPOSITORIES,

@@ -77,7 +77,10 @@ fn patch_paths(file: &FileDiff) -> (String, String) {
         _ => (
             format!(
                 "a/{}",
-                file.previous_path.as_ref().unwrap_or(&file.path).to_string_lossy()
+                file.previous_path
+                    .as_ref()
+                    .unwrap_or(&file.path)
+                    .to_string_lossy()
             ),
             format!("b/{}", file.path.to_string_lossy()),
         ),
@@ -219,7 +222,10 @@ mod tests {
         let export = export_patch(&[file]);
 
         assert!(export.included_files.is_empty());
-        assert_eq!(export.skipped_binary_files, vec![PathBuf::from("image.png")]);
+        assert_eq!(
+            export.skipped_binary_files,
+            vec![PathBuf::from("image.png")]
+        );
         assert!(export.is_empty());
         assert!(export.is_incomplete());
     }
@@ -238,7 +244,10 @@ mod tests {
         let export = export_patch(&[file]);
 
         assert!(export.included_files.is_empty());
-        assert_eq!(export.skipped_truncated_files, vec![PathBuf::from("huge.txt")]);
+        assert_eq!(
+            export.skipped_truncated_files,
+            vec![PathBuf::from("huge.txt")]
+        );
         assert!(export.is_incomplete());
     }
 

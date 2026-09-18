@@ -46,8 +46,14 @@ mod tests {
 
     #[test]
     fn distinguishes_git_absent_permission_parsing_and_cancelled() {
-        assert_eq!(exit_code_for(ErrorCode::GitNotInstalled), EXIT_GIT_UNAVAILABLE);
-        assert_eq!(exit_code_for(ErrorCode::PermissionDenied), EXIT_ACCESS_DENIED);
+        assert_eq!(
+            exit_code_for(ErrorCode::GitNotInstalled),
+            EXIT_GIT_UNAVAILABLE
+        );
+        assert_eq!(
+            exit_code_for(ErrorCode::PermissionDenied),
+            EXIT_ACCESS_DENIED
+        );
         assert_eq!(exit_code_for(ErrorCode::ParseFailure), EXIT_GENERIC_FAILURE);
         assert_eq!(exit_code_for(ErrorCode::Cancelled), EXIT_CANCELLED);
         assert_ne!(

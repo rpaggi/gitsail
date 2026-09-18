@@ -12,7 +12,9 @@ use gitsail_domain::{
 };
 
 use crate::blame_cache::{BlameCache, BlameCacheKey};
-use crate::ports::{BlameRequest, CommitQuery, DiffRequest, LineHistoryRequest, Page, RepositoryReadPort};
+use crate::ports::{
+    BlameRequest, CommitQuery, DiffRequest, LineHistoryRequest, Page, RepositoryReadPort,
+};
 
 /// The SHA-1 hash of the empty tree object: a value fixed by Git's object
 /// format (identical in every repository, not repository state) used as
@@ -414,8 +416,8 @@ impl PreviewAmend {
 mod tests {
     use super::*;
     use gitsail_domain::{
-        BranchName, ChangeType, FileChange, FileContentAtRevision, FileContentKind,
-        FileStatusCode, HeadState, RepositoryId, Signature,
+        BranchName, ChangeType, FileChange, FileContentAtRevision, FileContentKind, FileStatusCode,
+        HeadState, RepositoryId, Signature,
     };
     use std::path::PathBuf;
     use std::sync::Mutex;
@@ -581,15 +583,12 @@ mod tests {
             _repo: &Repository,
             revision: &str,
         ) -> Result<CommitHash, GitSailError> {
-            self.revisions
-                .get(revision)
-                .cloned()
-                .ok_or_else(|| {
-                    GitSailError::new(
-                        gitsail_domain::ErrorCode::RepositoryNotFound,
-                        format!("revision '{revision}' could not be resolved to a commit"),
-                    )
-                })
+            self.revisions.get(revision).cloned().ok_or_else(|| {
+                GitSailError::new(
+                    gitsail_domain::ErrorCode::RepositoryNotFound,
+                    format!("revision '{revision}' could not be resolved to a commit"),
+                )
+            })
         }
 
         fn blame(
@@ -822,7 +821,12 @@ mod tests {
         let use_case = CompareRevisions::new(port.clone());
 
         let err = use_case
-            .execute(&port.repository, "does-not-exist", "main", &CancellationToken::new())
+            .execute(
+                &port.repository,
+                "does-not-exist",
+                "main",
+                &CancellationToken::new(),
+            )
             .unwrap_err();
 
         assert_eq!(err.code(), gitsail_domain::ErrorCode::RepositoryNotFound);
@@ -846,7 +850,10 @@ mod tests {
 
         assert_eq!(preview.head, port.single_commit);
         let request = port.received_diff_request.lock().unwrap().clone().unwrap();
-        assert!(request.staged, "an amend preview must inspect the staged diff, never the worktree diff");
+        assert!(
+            request.staged,
+            "an amend preview must inspect the staged diff, never the worktree diff"
+        );
     }
 
     #[test]
@@ -967,7 +974,10 @@ mod tests {
 
         assert_eq!(content.path, path);
         assert_eq!(content.revision, port.single_commit.hash);
-        assert_eq!(content.kind, FileContentKind::Text("fixture content".into()));
+        assert_eq!(
+            content.kind,
+            FileContentKind::Text("fixture content".into())
+        );
     }
 
     #[test]

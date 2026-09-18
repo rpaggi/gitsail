@@ -265,16 +265,28 @@ mod tests {
 
     impl ForgeCredentialPort for AlwaysFailingPort {
         fn connect(&self, _: &ForgeAccountId, _: ForgeToken) -> Result<(), GitSailError> {
-            Err(GitSailError::new(gitsail_domain::ErrorCode::Internal, "boom"))
+            Err(GitSailError::new(
+                gitsail_domain::ErrorCode::Internal,
+                "boom",
+            ))
         }
         fn disconnect(&self, _: &ForgeAccountId) -> Result<(), GitSailError> {
-            Err(GitSailError::new(gitsail_domain::ErrorCode::Internal, "boom"))
+            Err(GitSailError::new(
+                gitsail_domain::ErrorCode::Internal,
+                "boom",
+            ))
         }
         fn status(&self, _: &ForgeAccountId) -> Result<ForgeConnectionStatus, GitSailError> {
-            Err(GitSailError::new(gitsail_domain::ErrorCode::Internal, "boom"))
+            Err(GitSailError::new(
+                gitsail_domain::ErrorCode::Internal,
+                "boom",
+            ))
         }
         fn token(&self, _: &ForgeAccountId) -> Result<Option<ForgeToken>, GitSailError> {
-            Err(GitSailError::new(gitsail_domain::ErrorCode::Internal, "boom"))
+            Err(GitSailError::new(
+                gitsail_domain::ErrorCode::Internal,
+                "boom",
+            ))
         }
     }
 

@@ -74,7 +74,9 @@ impl ForgeCredentialPort for InMemoryForgeCredentialStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gitsail_application::{ConnectForgeAccount, DisconnectForgeAccount, GetForgeConnectionStatus};
+    use gitsail_application::{
+        ConnectForgeAccount, DisconnectForgeAccount, GetForgeConnectionStatus,
+    };
     use gitsail_domain::ForgeKind;
     use std::sync::Arc;
 
@@ -111,8 +113,16 @@ mod tests {
         let github = ForgeAccountId::new(ForgeKind::GitHub, "github.com");
         let gitlab = ForgeAccountId::new(ForgeKind::GitLab, "gitlab.com");
 
-        store.connect(&github, ForgeToken::new("gh-sentinel")).unwrap();
-        assert_eq!(store.status(&gitlab).unwrap(), ForgeConnectionStatus::NotConnected);
-        assert_eq!(store.status(&github).unwrap(), ForgeConnectionStatus::Connected);
+        store
+            .connect(&github, ForgeToken::new("gh-sentinel"))
+            .unwrap();
+        assert_eq!(
+            store.status(&gitlab).unwrap(),
+            ForgeConnectionStatus::NotConnected
+        );
+        assert_eq!(
+            store.status(&github).unwrap(),
+            ForgeConnectionStatus::Connected
+        );
     }
 }

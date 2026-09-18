@@ -103,7 +103,10 @@ fn discovers_an_unborn_repository() {
     assert!(!repo.is_bare);
     assert_eq!(repo.head_state, HeadState::Unborn);
     assert_eq!(repo.current_branch, None);
-    assert_eq!(repo.worktree_path.as_deref(), Some(repo.root_path.as_path()));
+    assert_eq!(
+        repo.worktree_path.as_deref(),
+        Some(repo.root_path.as_path())
+    );
 }
 
 #[test]
@@ -112,7 +115,9 @@ fn status_on_an_unborn_repository_reports_unborn_with_no_files() {
     let provider = provider();
     let repo = provider.discover(repo_dir.path()).unwrap();
 
-    let status = provider.status(&repo).expect("status should succeed on an unborn repository");
+    let status = provider
+        .status(&repo)
+        .expect("status should succeed on an unborn repository");
 
     assert_eq!(status.head_state, HeadState::Unborn);
     assert!(status.branch.is_none());
@@ -151,7 +156,10 @@ fn discovers_a_repository_with_one_commit_on_a_branch() {
         HeadState::Attached { branch } => assert_eq!(branch.as_str(), "main"),
         other => panic!("expected Attached, got {other:?}"),
     }
-    assert_eq!(repo.current_branch.as_ref().map(|b| b.as_str()), Some("main"));
+    assert_eq!(
+        repo.current_branch.as_ref().map(|b| b.as_str()),
+        Some("main")
+    );
 }
 
 #[test]
@@ -247,7 +255,14 @@ fn commit_history_and_lookup_preserve_all_parents_of_a_merge_commit() {
 
     git(
         repo_dir.path(),
-        &["merge", "--quiet", "--no-ff", "-m", "merge feature into main", "feature"],
+        &[
+            "merge",
+            "--quiet",
+            "--no-ff",
+            "-m",
+            "merge feature into main",
+            "feature",
+        ],
     );
     let merge_hash = head_commit_hash(repo_dir.path());
 
@@ -289,9 +304,7 @@ fn opening_from_root_or_a_subdirectory_resolves_the_same_repository() {
 
     let provider = provider();
     let from_root = provider.discover(repo_dir.path()).unwrap();
-    let from_subdir = provider
-        .discover(&repo_dir.path().join("nested"))
-        .unwrap();
+    let from_subdir = provider.discover(&repo_dir.path().join("nested")).unwrap();
     let from_deeper = provider
         .discover(&repo_dir.path().join("nested/deeper"))
         .unwrap();
@@ -333,7 +346,10 @@ fn opening_a_linked_worktree_does_not_assume_dot_git_is_a_directory() {
         .expect("discovering a linked worktree should succeed");
 
     assert!(!repo.is_bare);
-    assert_eq!(repo.worktree_path.as_deref(), Some(repo.root_path.as_path()));
+    assert_eq!(
+        repo.worktree_path.as_deref(),
+        Some(repo.root_path.as_path())
+    );
     match &repo.head_state {
         HeadState::Attached { branch } => assert_eq!(branch.as_str(), "wt-branch"),
         other => panic!("expected Attached, got {other:?}"),
@@ -447,9 +463,7 @@ fn lists_multiple_local_branches_with_the_current_one_marked() {
     assert!(names.contains(&"main"));
     assert!(names.contains(&"feature"));
     assert!(names.contains(&"release"));
-    assert!(branches
-        .iter()
-        .all(|b| matches!(b.kind, BranchKind::Local)));
+    assert!(branches.iter().all(|b| matches!(b.kind, BranchKind::Local)));
 
     let current: Vec<&str> = branches
         .iter()
@@ -469,7 +483,10 @@ fn branches_on_an_unborn_repository_is_empty() {
         .branches(&repo)
         .expect("branches should succeed (as an empty list) on an unborn repository");
 
-    assert!(branches.is_empty(), "an unborn repository must not report a fictitious branch");
+    assert!(
+        branches.is_empty(),
+        "an unborn repository must not report a fictitious branch"
+    );
 }
 
 #[test]
@@ -503,9 +520,17 @@ fn branches_report_upstream_and_ahead_behind_when_calculable_and_absence_differs
     let commit_a = head_commit_hash(repo_dir.path());
     git(
         repo_dir.path(),
-        &["remote", "add", "origin", remote_dir.path().to_str().unwrap()],
+        &[
+            "remote",
+            "add",
+            "origin",
+            remote_dir.path().to_str().unwrap(),
+        ],
     );
-    git(repo_dir.path(), &["push", "--quiet", "-u", "origin", "main"]);
+    git(
+        repo_dir.path(),
+        &["push", "--quiet", "-u", "origin", "main"],
+    );
     // A local-only branch, deliberately left without an upstream.
     git(repo_dir.path(), &["branch", "feature", commit_a.as_str()]);
 
@@ -520,7 +545,10 @@ fn branches_report_upstream_and_ahead_behind_when_calculable_and_absence_differs
     );
     assert_eq!((main.ahead, main.behind), (0, 0));
 
-    let feature = branches.iter().find(|b| b.name.as_str() == "feature").unwrap();
+    let feature = branches
+        .iter()
+        .find(|b| b.name.as_str() == "feature")
+        .unwrap();
     assert_eq!(
         feature.upstream, None,
         "a branch with no upstream must report None, not merely 0/0 ahead/behind"
@@ -534,7 +562,10 @@ fn branches_report_upstream_and_ahead_behind_when_calculable_and_absence_differs
 
     // Reset the local branch back to commit a without touching the
     // remote-tracking ref: `main` is now purely behind its upstream.
-    git(repo_dir.path(), &["reset", "--quiet", "--hard", commit_a.as_str()]);
+    git(
+        repo_dir.path(),
+        &["reset", "--quiet", "--hard", commit_a.as_str()],
+    );
     let branches = provider.branches(&repo).unwrap();
     let main = branches.iter().find(|b| b.name.as_str() == "main").unwrap();
     assert_eq!((main.ahead, main.behind), (0, 1));
@@ -565,7 +596,10 @@ fn discovers_a_detached_head() {
         .current_dir(repo_dir.path())
         .output()
         .unwrap();
-    let target = String::from_utf8(head_output.stdout).unwrap().trim().to_string();
+    let target = String::from_utf8(head_output.stdout)
+        .unwrap()
+        .trim()
+        .to_string();
     git(repo_dir.path(), &["checkout", "--quiet", &target]);
 
     let provider = provider();
@@ -577,7 +611,9 @@ fn discovers_a_detached_head() {
     }
     assert_eq!(repo.current_branch, None);
 
-    let status = provider.status(&repo).expect("status should succeed while detached");
+    let status = provider
+        .status(&repo)
+        .expect("status should succeed while detached");
     match &status.head_state {
         HeadState::Detached { commit } => assert_eq!(commit.as_str(), target),
         other => panic!("expected Detached in status, got {other:?}"),
@@ -615,7 +651,10 @@ fn commit_history_is_available_while_head_is_detached() {
 
 fn init_bare_repo(label: &str) -> TempDir {
     let dir = TempDir::new(label);
-    git(dir.path(), &["init", "--quiet", "--bare", "--initial-branch=main"]);
+    git(
+        dir.path(),
+        &["init", "--quiet", "--bare", "--initial-branch=main"],
+    );
     dir
 }
 
@@ -681,7 +720,9 @@ fn status_reports_staged_unstaged_and_untracked_changes() {
 
     let provider = provider();
     let repo = provider.discover(repo_dir.path()).unwrap();
-    let status = provider.status(&repo).expect("status should succeed on a dirty tree");
+    let status = provider
+        .status(&repo)
+        .expect("status should succeed on a dirty tree");
 
     assert!(!status.is_clean());
     let by_path = |name: &str| {
@@ -780,7 +821,10 @@ fn diff_detects_a_rename() {
     let file = &staged_diff.files[0];
     assert_eq!(file.change_type, ChangeType::Renamed);
     assert_eq!(file.path, Path::new("renamed.txt"));
-    assert_eq!(file.previous_path.as_deref(), Some(Path::new("original.txt")));
+    assert_eq!(
+        file.previous_path.as_deref(),
+        Some(Path::new("original.txt"))
+    );
     assert!(!file.is_binary);
     assert!(!file.hunks.is_empty());
 }
@@ -855,10 +899,18 @@ fn diff_reports_modified_content_hunks_between_two_commits() {
 #[test]
 fn diff_reports_a_binary_file_change_without_fabricating_hunks() {
     let repo_dir = init_repo("binary-diff");
-    write_bytes(repo_dir.path(), "image.png", &[0x89, b'P', b'N', b'G', 0x00, 0x01]);
+    write_bytes(
+        repo_dir.path(),
+        "image.png",
+        &[0x89, b'P', b'N', b'G', 0x00, 0x01],
+    );
     commit_all(repo_dir.path(), "add binary");
 
-    write_bytes(repo_dir.path(), "image.png", &[0x89, b'P', b'N', b'G', 0x02, 0x03, 0x04]);
+    write_bytes(
+        repo_dir.path(),
+        "image.png",
+        &[0x89, b'P', b'N', b'G', 0x02, 0x03, 0x04],
+    );
     commit_all(repo_dir.path(), "change binary");
 
     let provider = provider();
@@ -910,7 +962,10 @@ fn diff_preserves_crlf_line_endings_in_line_content() {
     let repo_dir = init_repo("crlf-diff");
     write_bytes(repo_dir.path(), "a.txt", b"one\r\ntwo\r\nthree\r\n");
     git(repo_dir.path(), &["add", "-A"]);
-    git(repo_dir.path(), &["commit", "--quiet", "-m", "first commit"]);
+    git(
+        repo_dir.path(),
+        &["commit", "--quiet", "-m", "first commit"],
+    );
 
     write_bytes(repo_dir.path(), "a.txt", b"one\r\nTWO\r\nthree\r\n");
     git(repo_dir.path(), &["add", "-A"]);
@@ -969,7 +1024,9 @@ fn diff_truncates_a_file_whose_content_exceeds_the_size_limit() {
     commit_all(repo_dir.path(), "first commit");
 
     // Well beyond the adapter's 512 KiB per-file hunk cap.
-    let large_content: String = (0..40_000).map(|i| format!("line {i} of a very large file\n")).collect();
+    let large_content: String = (0..40_000)
+        .map(|i| format!("line {i} of a very large file\n"))
+        .collect();
     write_file(repo_dir.path(), "a.txt", &large_content);
     commit_all(repo_dir.path(), "grow the file");
 
@@ -1096,9 +1153,7 @@ fn resolve_revision_resolves_branches_and_relative_refs() {
     assert_eq!(provider.resolve_revision(&repo, "main").unwrap(), second);
     assert_eq!(provider.resolve_revision(&repo, "HEAD~1").unwrap(), first);
     assert_eq!(
-        provider
-            .resolve_revision(&repo, second.as_str())
-            .unwrap(),
+        provider.resolve_revision(&repo, second.as_str()).unwrap(),
         second
     );
 }
@@ -1138,7 +1193,10 @@ fn commit_diff_of_a_root_commit_uses_the_empty_tree_as_its_base() {
         .execute(&repo, &root, &CancellationToken::new())
         .unwrap();
 
-    assert!(result.base.is_none(), "a root commit has no parent to name as base");
+    assert!(
+        result.base.is_none(),
+        "a root commit has no parent to name as base"
+    );
     assert_eq!(result.diff.files.len(), 1);
     assert_eq!(result.diff.files[0].change_type, ChangeType::Added);
     assert_eq!(result.diff.files[0].path, Path::new("a.txt"));
@@ -1161,7 +1219,17 @@ fn commit_diff_of_a_merge_commit_uses_the_first_parent() {
     // this commit, not the earlier "base commit".
     let main_tip = head_commit_hash(repo_dir.path());
 
-    git(repo_dir.path(), &["merge", "--no-ff", "--quiet", "-m", "merge feature", "feature"]);
+    git(
+        repo_dir.path(),
+        &[
+            "merge",
+            "--no-ff",
+            "--quiet",
+            "-m",
+            "merge feature",
+            "feature",
+        ],
+    );
     let merge = head_commit_hash(repo_dir.path());
 
     let provider = Arc::new(provider());
@@ -1316,7 +1384,10 @@ fn commit_history_filters_by_author() {
     write_file(repo_dir.path(), "a.txt", "one\n");
     commit_all(repo_dir.path(), "commit by test user");
     git(repo_dir.path(), &["config", "user.name", "Someone Else"]);
-    git(repo_dir.path(), &["config", "user.email", "else@example.com"]);
+    git(
+        repo_dir.path(),
+        &["config", "user.email", "else@example.com"],
+    );
     write_file(repo_dir.path(), "a.txt", "two\n");
     commit_all(repo_dir.path(), "commit by someone else");
 
@@ -1404,10 +1475,15 @@ fn commit_history_combines_a_filter_with_pagination() {
         ..CommitQuery::default()
     };
 
-    let first_page = provider.commits(&repo, &query).expect("first filtered page should succeed");
+    let first_page = provider
+        .commits(&repo, &query)
+        .expect("first filtered page should succeed");
     assert_eq!(first_page.items.len(), 2);
     assert!(first_page.has_more);
-    assert!(first_page.items.iter().all(|c| c.subject.starts_with("relevant")));
+    assert!(first_page
+        .items
+        .iter()
+        .all(|c| c.subject.starts_with("relevant")));
 
     let second_page = provider
         .commits(
@@ -1420,7 +1496,10 @@ fn commit_history_combines_a_filter_with_pagination() {
         .expect("second filtered page should succeed");
     assert_eq!(second_page.items.len(), 2);
     assert!(!second_page.has_more);
-    assert!(second_page.items.iter().all(|c| c.subject.starts_with("relevant")));
+    assert!(second_page
+        .items
+        .iter()
+        .all(|c| c.subject.starts_with("relevant")));
 }
 
 // ---------------------------------------------------------------------
@@ -1494,8 +1573,11 @@ fn file_history_follows_renames_when_requested_and_stops_at_the_boundary_otherwi
             },
         )
         .expect("non-followed file history should succeed");
-    let not_followed_subjects: Vec<&str> =
-        not_followed.items.iter().map(|c| c.subject.as_str()).collect();
+    let not_followed_subjects: Vec<&str> = not_followed
+        .items
+        .iter()
+        .map(|c| c.subject.as_str())
+        .collect();
     assert_eq!(
         not_followed_subjects,
         vec!["edit new.txt", "rename to new.txt"],
@@ -1620,10 +1702,7 @@ fn blame_reports_distinct_original_and_final_line_numbers_when_lines_shift() {
 fn blame_with_multiple_authors_attributes_each_line_to_its_own_author() {
     let repo_dir = init_repo("blame-multi-author");
     write_file(repo_dir.path(), "a.txt", "line1\n");
-    git(
-        repo_dir.path(),
-        &["add", "a.txt"],
-    );
+    git(repo_dir.path(), &["add", "a.txt"]);
     git(
         repo_dir.path(),
         &[
@@ -1737,7 +1816,11 @@ fn blame_on_an_empty_file_returns_no_lines_without_an_error() {
     let repo = provider.discover(repo_dir.path()).unwrap();
 
     let blame = provider
-        .blame(&repo, &blame_request("empty.txt"), &CancellationToken::new())
+        .blame(
+            &repo,
+            &blame_request("empty.txt"),
+            &CancellationToken::new(),
+        )
         .expect("blaming an empty file must succeed with no lines");
 
     assert!(blame.lines.is_empty());
@@ -2073,10 +2156,18 @@ fn line_history_traces_a_lines_evolution_and_ignores_a_pure_position_shift() {
     let repo = provider.discover(repo_dir.path()).unwrap();
 
     let history = provider
-        .line_history(&repo, &line_history_request("f.txt", LineRange::new(3, 3)), &CancellationToken::new())
+        .line_history(
+            &repo,
+            &line_history_request("f.txt", LineRange::new(3, 3)),
+            &CancellationToken::new(),
+        )
         .expect("line history should succeed for a valid range");
 
-    assert_eq!(history.entries.len(), 2, "the position-only shift must not produce an entry");
+    assert_eq!(
+        history.entries.len(),
+        2,
+        "the position-only shift must not produce an entry"
+    );
     assert_eq!(history.entries[0].commit.subject, "modify");
     assert_eq!(history.entries[0].commit.hash, modify_hash);
     assert_eq!(history.entries[1].commit.subject, "introduce");
@@ -2146,7 +2237,11 @@ fn line_history_ignores_uncommitted_working_tree_changes() {
     let repo = provider.discover(repo_dir.path()).unwrap();
 
     let history = provider
-        .line_history(&repo, &line_history_request("f.txt", LineRange::new(1, 1)), &CancellationToken::new())
+        .line_history(
+            &repo,
+            &line_history_request("f.txt", LineRange::new(1, 1)),
+            &CancellationToken::new(),
+        )
         .expect("history should reflect only committed content");
 
     assert_eq!(history.entries.len(), 1);
@@ -2175,7 +2270,10 @@ fn line_history_result_echoes_the_queried_file_range_and_resolves_head() {
 
     assert_eq!(history.file, PathBuf::from("f.txt"));
     assert_eq!(history.range, LineRange::new(1, 1));
-    assert_eq!(history.revision, head, "a None revision must resolve to the actual HEAD commit");
+    assert_eq!(
+        history.revision, head,
+        "a None revision must resolve to the actual HEAD commit"
+    );
 }
 
 #[test]
@@ -2188,7 +2286,11 @@ fn line_history_with_a_structurally_invalid_line_range_is_rejected_before_runnin
     let repo = provider.discover(repo_dir.path()).unwrap();
 
     let err = provider
-        .line_history(&repo, &line_history_request("f.txt", LineRange::new(5, 1)), &CancellationToken::new())
+        .line_history(
+            &repo,
+            &line_history_request("f.txt", LineRange::new(5, 1)),
+            &CancellationToken::new(),
+        )
         .expect_err("start after end must be rejected");
 
     assert_eq!(err.code(), ErrorCode::ParseFailure);
@@ -2204,8 +2306,14 @@ fn line_history_with_a_line_range_beyond_the_files_length_returns_a_defined_erro
     let repo = provider.discover(repo_dir.path()).unwrap();
 
     let err = provider
-        .line_history(&repo, &line_history_request("f.txt", LineRange::new(10, 20)), &CancellationToken::new())
-        .expect_err("a range beyond the file's length must not silently return another range's data");
+        .line_history(
+            &repo,
+            &line_history_request("f.txt", LineRange::new(10, 20)),
+            &CancellationToken::new(),
+        )
+        .expect_err(
+            "a range beyond the file's length must not silently return another range's data",
+        );
 
     assert_eq!(err.code(), ErrorCode::ParseFailure);
 }
@@ -2263,7 +2371,11 @@ fn line_history_fails_with_cancelled_when_the_token_is_already_cancelled() {
     cancel.cancel();
 
     let err = provider
-        .line_history(&repo, &line_history_request("f.txt", LineRange::new(1, 1)), &cancel)
+        .line_history(
+            &repo,
+            &line_history_request("f.txt", LineRange::new(1, 1)),
+            &cancel,
+        )
         .expect_err("a pre-cancelled token must stop the line-history query before it succeeds");
 
     assert_eq!(err.code(), ErrorCode::Cancelled);
@@ -2289,7 +2401,10 @@ fn file_content_reads_text_at_a_real_revision() {
 
     assert_eq!(content.path, PathBuf::from("a.txt"));
     assert_eq!(content.revision, first);
-    assert_eq!(content.kind, FileContentKind::Text("line1\nline2\n".to_string()));
+    assert_eq!(
+        content.kind,
+        FileContentKind::Text("line1\nline2\n".to_string())
+    );
 }
 
 #[test]
@@ -2437,7 +2552,10 @@ fn unstage_files_preserves_working_tree_content() {
     assert_eq!(status.files[0].index_status, FileStatusCode::Unmodified);
     assert_eq!(status.files[0].worktree_status, FileStatusCode::Modified);
     let contents = std::fs::read_to_string(repo_dir.path().join("a.txt")).unwrap();
-    assert_eq!(contents, "staged change\n", "unstage must not touch the working tree");
+    assert_eq!(
+        contents, "staged change\n",
+        "unstage must not touch the working tree"
+    );
 }
 
 #[test]
@@ -2478,7 +2596,11 @@ fn unstage_files_fully_unstages_a_rename_selected_by_only_the_new_path() {
     let by_path = |name: &str| status.files.iter().find(|f| f.path == Path::new(name));
 
     let old = by_path("old.txt").expect("old.txt must be reported once fully unstaged");
-    assert_eq!(old.index_status, FileStatusCode::Unmodified, "old.txt's index must fully match HEAD again, not stay staged as removed");
+    assert_eq!(
+        old.index_status,
+        FileStatusCode::Unmodified,
+        "old.txt's index must fully match HEAD again, not stay staged as removed"
+    );
     assert_eq!(old.worktree_status, FileStatusCode::Deleted);
     let new = by_path("new.txt").expect("new.txt should be untracked again");
     assert_eq!(new.change_type, ChangeType::Untracked);
@@ -2495,7 +2617,9 @@ fn create_commit_returns_the_new_hash_and_advances_head() {
 
     let provider = provider();
     let repo = provider.discover(repo_dir.path()).unwrap();
-    provider.stage_files(&repo, &[PathBuf::from("a.txt")]).unwrap();
+    provider
+        .stage_files(&repo, &[PathBuf::from("a.txt")])
+        .unwrap();
 
     let hash = provider
         .create_commit(&repo, "first commit")
@@ -2542,17 +2666,27 @@ fn create_commit_on_hook_failure_preserves_the_staged_index() {
     write_file(repo_dir.path(), "a.txt", "hello\n");
     let provider = provider();
     let repo = provider.discover(repo_dir.path()).unwrap();
-    provider.stage_files(&repo, &[PathBuf::from("a.txt")]).unwrap();
+    provider
+        .stage_files(&repo, &[PathBuf::from("a.txt")])
+        .unwrap();
 
     let err = provider
         .create_commit(&repo, "blocked")
         .expect_err("a failing pre-commit hook must fail the commit");
 
     assert_eq!(err.code(), ErrorCode::ProcessFailure);
-    assert!(err.diagnostic().unwrap().to_string().contains("blocked by hook"));
+    assert!(err
+        .diagnostic()
+        .unwrap()
+        .to_string()
+        .contains("blocked by hook"));
 
     let status = provider.status(&repo).unwrap();
-    assert_eq!(status.files[0].index_status, FileStatusCode::Added, "the staged work must survive a failed commit");
+    assert_eq!(
+        status.files[0].index_status,
+        FileStatusCode::Added,
+        "the staged work must survive a failed commit"
+    );
 }
 
 // ---------------------------------------------------------------------
@@ -2569,17 +2703,25 @@ fn amend_commit_replaces_head_message_and_folds_in_staged_changes() {
     let provider = provider();
     let repo = provider.discover(repo_dir.path()).unwrap();
     write_file(repo_dir.path(), "b.txt", "extra\n");
-    provider.stage_files(&repo, &[PathBuf::from("b.txt")]).unwrap();
+    provider
+        .stage_files(&repo, &[PathBuf::from("b.txt")])
+        .unwrap();
 
     let new_hash = provider
         .amend_commit(&repo, "amended message", &original_head)
         .expect("amend should succeed when HEAD still matches expected_head");
 
-    assert_ne!(new_hash, original_head, "amend must produce a new commit object");
+    assert_ne!(
+        new_hash, original_head,
+        "amend must produce a new commit object"
+    );
     assert_eq!(head_commit_hash(repo_dir.path()), new_hash);
     assert_eq!(head_commit_message(repo_dir.path()), "amended message");
     let status = provider.status(&repo).unwrap();
-    assert!(status.is_clean(), "the staged file must be folded into the amended commit");
+    assert!(
+        status.is_clean(),
+        "the staged file must be folded into the amended commit"
+    );
 }
 
 #[test]
@@ -2601,7 +2743,9 @@ fn amend_commit_refuses_when_head_moved_since_the_expected_hash() {
 
     let err = provider
         .amend_commit(&repo, "should not be applied", &stale_head)
-        .expect_err("amend must refuse a stale expected_head rather than rewriting the wrong commit");
+        .expect_err(
+            "amend must refuse a stale expected_head rather than rewriting the wrong commit",
+        );
 
     assert_eq!(err.code(), ErrorCode::OperationConflict);
     assert_eq!(
@@ -2648,7 +2792,9 @@ fn staged_diff_compares_the_index_against_head_independent_of_the_working_tree()
     let provider = provider();
     let repo = provider.discover(repo_dir.path()).unwrap();
 
-    let staged = provider.diff(&repo, &staged_diff_request(), &CancellationToken::new()).unwrap();
+    let staged = provider
+        .diff(&repo, &staged_diff_request(), &CancellationToken::new())
+        .unwrap();
     assert_eq!(staged.files.len(), 1);
     let staged_lines: Vec<_> = staged.files[0]
         .hunks
@@ -2659,7 +2805,9 @@ fn staged_diff_compares_the_index_against_head_independent_of_the_working_tree()
         .collect();
     assert_eq!(staged_lines, vec!["two".to_string(), "TWO".to_string()]);
 
-    let unstaged = provider.diff(&repo, &unstaged_diff_request(), &CancellationToken::new()).unwrap();
+    let unstaged = provider
+        .diff(&repo, &unstaged_diff_request(), &CancellationToken::new())
+        .unwrap();
     let unstaged_lines: Vec<_> = unstaged.files[0]
         .hunks
         .iter()
@@ -2667,7 +2815,10 @@ fn staged_diff_compares_the_index_against_head_independent_of_the_working_tree()
         .filter(|l| l.origin != DiffLineOrigin::Context)
         .map(|l| l.content.clone())
         .collect();
-    assert_eq!(unstaged_lines, vec!["three".to_string(), "THREE".to_string()]);
+    assert_eq!(
+        unstaged_lines,
+        vec!["three".to_string(), "THREE".to_string()]
+    );
 }
 
 // ---------------------------------------------------------------------
@@ -2696,9 +2847,15 @@ fn stage_hunks_stages_only_the_selected_hunk() {
 
     let provider = provider();
     let repo = provider.discover(repo_dir.path()).unwrap();
-    let diff = provider.diff(&repo, &unstaged_diff_request(), &CancellationToken::new()).unwrap();
+    let diff = provider
+        .diff(&repo, &unstaged_diff_request(), &CancellationToken::new())
+        .unwrap();
     assert_eq!(diff.files.len(), 1);
-    assert_eq!(diff.files[0].hunks.len(), 2, "the fixture must produce two disjoint hunks");
+    assert_eq!(
+        diff.files[0].hunks.len(),
+        2,
+        "the fixture must produce two disjoint hunks"
+    );
 
     let first_hunk_only = FileDiff {
         hunks: vec![diff.files[0].hunks[0].clone()],
@@ -2708,7 +2865,9 @@ fn stage_hunks_stages_only_the_selected_hunk() {
         .stage_hunks(&repo, &[first_hunk_only])
         .expect("staging a single known-good hunk should succeed");
 
-    let staged = provider.diff(&repo, &staged_diff_request(), &CancellationToken::new()).unwrap();
+    let staged = provider
+        .diff(&repo, &staged_diff_request(), &CancellationToken::new())
+        .unwrap();
     assert_eq!(staged.files[0].hunks.len(), 1);
     assert!(staged.files[0]
         .hunks
@@ -2716,7 +2875,9 @@ fn stage_hunks_stages_only_the_selected_hunk() {
         .flat_map(|h| &h.lines)
         .any(|l| l.content == "L3-changed"));
 
-    let remaining_unstaged = provider.diff(&repo, &unstaged_diff_request(), &CancellationToken::new()).unwrap();
+    let remaining_unstaged = provider
+        .diff(&repo, &unstaged_diff_request(), &CancellationToken::new())
+        .unwrap();
     assert_eq!(remaining_unstaged.files[0].hunks.len(), 1);
     assert!(remaining_unstaged.files[0]
         .hunks
@@ -2735,7 +2896,9 @@ fn unstage_hunks_unstages_only_the_selected_hunk() {
 
     let provider = provider();
     let repo = provider.discover(repo_dir.path()).unwrap();
-    let staged = provider.diff(&repo, &staged_diff_request(), &CancellationToken::new()).unwrap();
+    let staged = provider
+        .diff(&repo, &staged_diff_request(), &CancellationToken::new())
+        .unwrap();
     assert_eq!(staged.files[0].hunks.len(), 2);
 
     let first_hunk_only = FileDiff {
@@ -2746,7 +2909,9 @@ fn unstage_hunks_unstages_only_the_selected_hunk() {
         .unstage_hunks(&repo, &[first_hunk_only])
         .expect("unstaging a single known-good hunk should succeed");
 
-    let remaining_staged = provider.diff(&repo, &staged_diff_request(), &CancellationToken::new()).unwrap();
+    let remaining_staged = provider
+        .diff(&repo, &staged_diff_request(), &CancellationToken::new())
+        .unwrap();
     assert_eq!(remaining_staged.files[0].hunks.len(), 1);
     assert!(remaining_staged.files[0]
         .hunks
@@ -2754,7 +2919,9 @@ fn unstage_hunks_unstages_only_the_selected_hunk() {
         .flat_map(|h| &h.lines)
         .any(|l| l.content == "L17-changed"));
 
-    let unstaged_again = provider.diff(&repo, &unstaged_diff_request(), &CancellationToken::new()).unwrap();
+    let unstaged_again = provider
+        .diff(&repo, &unstaged_diff_request(), &CancellationToken::new())
+        .unwrap();
     assert_eq!(unstaged_again.files[0].hunks.len(), 1);
     assert!(unstaged_again.files[0]
         .hunks
@@ -2772,7 +2939,9 @@ fn stage_hunks_rejects_a_stale_selection_as_operation_conflict() {
 
     let provider = provider();
     let repo = provider.discover(repo_dir.path()).unwrap();
-    let diff = provider.diff(&repo, &unstaged_diff_request(), &CancellationToken::new()).unwrap();
+    let diff = provider
+        .diff(&repo, &unstaged_diff_request(), &CancellationToken::new())
+        .unwrap();
     let stale_hunk = FileDiff {
         hunks: vec![diff.files[0].hunks[0].clone()],
         ..diff.files[0].clone()
@@ -2939,7 +3108,10 @@ fn create_branch_rejects_an_existing_name_without_overwriting_it() {
 
     assert_eq!(err.code(), ErrorCode::InvalidRepositoryState);
     let branches = provider.branches(&repo).unwrap();
-    let feature = branches.iter().find(|b| b.name.as_str() == "feature").unwrap();
+    let feature = branches
+        .iter()
+        .find(|b| b.name.as_str() == "feature")
+        .unwrap();
     assert_eq!(
         feature.target, commit_a,
         "the existing branch must still point at its original commit"
@@ -3105,7 +3277,12 @@ fn rename_branch_preserves_upstream_tracking_configuration() {
     commit_all(repo_dir.path(), "first commit");
     git(
         repo_dir.path(),
-        &["remote", "add", "origin", remote_dir.path().to_str().unwrap()],
+        &[
+            "remote",
+            "add",
+            "origin",
+            remote_dir.path().to_str().unwrap(),
+        ],
     );
     git(
         repo_dir.path(),
@@ -3160,7 +3337,10 @@ fn rename_branch_rejects_a_colliding_new_name_without_overwriting_it() {
 
     assert_eq!(err.code(), ErrorCode::InvalidRepositoryState);
     let branches = provider.branches(&repo).unwrap();
-    let feature = branches.iter().find(|b| b.name.as_str() == "feature").unwrap();
+    let feature = branches
+        .iter()
+        .find(|b| b.name.as_str() == "feature")
+        .unwrap();
     assert_eq!(
         feature.target, commit_a,
         "the colliding existing branch must still point at its original commit"
@@ -3192,7 +3372,9 @@ fn rename_branch_with_a_nonexistent_old_name_fails_clearly() {
 
     assert_eq!(err.code(), ErrorCode::RepositoryNotFound);
     let branches = provider.branches(&repo).unwrap();
-    assert!(!branches.iter().any(|b| b.name.as_str() == "also-irrelevant"));
+    assert!(!branches
+        .iter()
+        .any(|b| b.name.as_str() == "also-irrelevant"));
 }
 
 #[test]

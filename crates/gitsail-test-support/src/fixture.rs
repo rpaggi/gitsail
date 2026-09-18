@@ -162,7 +162,11 @@ impl Fixture {
             dir,
             state: FixtureState {
                 commit_count: 3,
-                branches: vec!["main".to_string(), "feature".to_string(), "develop".to_string()],
+                branches: vec![
+                    "main".to_string(),
+                    "feature".to_string(),
+                    "develop".to_string(),
+                ],
                 current_branch: Some("main".to_string()),
                 ..Default::default()
             },
@@ -186,11 +190,7 @@ impl Fixture {
         write_file(dir.path(), "b.txt", "b\nmain change\n");
         commit_all(dir.path(), "main change", 2);
 
-        git_ok_at(
-            dir.path(),
-            &["merge", "--no-ff", "--no-edit", "feature"],
-            3,
-        );
+        git_ok_at(dir.path(), &["merge", "--no-ff", "--no-edit", "feature"], 3);
 
         Self {
             dir,
@@ -254,7 +254,11 @@ impl Fixture {
     /// real to find.
     pub fn with_renamed_file() -> Self {
         let dir = init_repo("fixture-renamed-file");
-        write_file(dir.path(), "old_name.txt", "content that survives the rename\n");
+        write_file(
+            dir.path(),
+            "old_name.txt",
+            "content that survives the rename\n",
+        );
         commit_all(dir.path(), "add old_name.txt", 0);
 
         git_ok(dir.path(), &["mv", "old_name.txt", "new_name.txt"]);
@@ -333,8 +337,14 @@ impl Fixture {
                     .expect("temp dir path is valid UTF-8"),
             ],
         );
-        git_ok(clone_dir.path(), &["config", "user.name", FIXTURE_AUTHOR_NAME]);
-        git_ok(clone_dir.path(), &["config", "user.email", FIXTURE_AUTHOR_EMAIL]);
+        git_ok(
+            clone_dir.path(),
+            &["config", "user.name", FIXTURE_AUTHOR_NAME],
+        );
+        git_ok(
+            clone_dir.path(),
+            &["config", "user.email", FIXTURE_AUTHOR_EMAIL],
+        );
         // `source` is dropped (and its directory removed) here: a local
         // clone's objects are its own, independent copy (or hardlinks that
         // remain valid after one side is unlinked), never a reference back
@@ -575,10 +585,7 @@ mod tests {
     #[test]
     fn with_binary_file_is_reported_as_binary_by_git_itself() {
         let fixture = Fixture::with_binary_file();
-        let diff = git(
-            fixture.path(),
-            &["show", "--numstat", "--format=", "HEAD"],
-        );
+        let diff = git(fixture.path(), &["show", "--numstat", "--format=", "HEAD"]);
         let diff = String::from_utf8(diff.stdout).unwrap();
         // `git show --numstat` reports `-\t-\t<path>` (dashes instead of
         // line counts) for a binary file, never fabricated textual line
@@ -603,7 +610,10 @@ mod tests {
     fn bare_repo_has_no_worktree() {
         let fixture = Fixture::bare_repo();
         assert!(fixture.state.bare);
-        assert!(!fixture.path().join(".git").exists(), "a bare repo has no .git subdirectory");
+        assert!(
+            !fixture.path().join(".git").exists(),
+            "a bare repo has no .git subdirectory"
+        );
         assert!(fixture.path().join("HEAD").exists());
     }
 
@@ -612,7 +622,10 @@ mod tests {
         let fixture = Fixture::with_conflict();
         let status = git(fixture.path(), &["status", "--porcelain=v2"]);
         let status = String::from_utf8(status.stdout).unwrap();
-        assert!(status.contains("u "), "expected an unmerged entry, got: {status}");
+        assert!(
+            status.contains("u "),
+            "expected an unmerged entry, got: {status}"
+        );
         assert!(fixture.path().join(".git").join("MERGE_HEAD").exists());
         assert!(fixture.state.has_conflict);
         assert_eq!(

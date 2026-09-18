@@ -56,7 +56,10 @@ pub struct JsonFileRecentRepositoriesStore {
 
 impl JsonFileRecentRepositoriesStore {
     pub fn new(file_path: PathBuf) -> Self {
-        Self { file_path, lock: Mutex::new(()) }
+        Self {
+            file_path,
+            lock: Mutex::new(()),
+        }
     }
 
     /// The default file location for this platform (see the module
@@ -68,28 +71,43 @@ impl JsonFileRecentRepositoriesStore {
                 "could not resolve the OS configuration directory",
             )
         })?;
-        Ok(config_dir.join("gitsail").join("desktop").join("recent-repositories.json"))
+        Ok(config_dir
+            .join("gitsail")
+            .join("desktop")
+            .join("recent-repositories.json"))
     }
 
     fn read_error(err: std::io::Error) -> GitSailError {
-        GitSailError::new(ErrorCode::Internal, "failed to read the recent repositories file")
-            .with_source(err)
+        GitSailError::new(
+            ErrorCode::Internal,
+            "failed to read the recent repositories file",
+        )
+        .with_source(err)
     }
 
     fn write_error(err: std::io::Error) -> GitSailError {
-        GitSailError::new(ErrorCode::Internal, "failed to write the recent repositories file")
-            .with_source(err)
+        GitSailError::new(
+            ErrorCode::Internal,
+            "failed to write the recent repositories file",
+        )
+        .with_source(err)
     }
 
     fn parse_error(err: serde_json::Error) -> GitSailError {
-        GitSailError::new(ErrorCode::ParseFailure, "the recent repositories file is corrupted")
-            .with_source(err)
+        GitSailError::new(
+            ErrorCode::ParseFailure,
+            "the recent repositories file is corrupted",
+        )
+        .with_source(err)
     }
 }
 
 impl RecentRepositoriesPort for JsonFileRecentRepositoriesStore {
     fn load(&self) -> Result<RecentRepositories, GitSailError> {
-        let _guard = self.lock.lock().expect("recent repositories store mutex poisoned");
+        let _guard = self
+            .lock
+            .lock()
+            .expect("recent repositories store mutex poisoned");
 
         if !self.file_path.exists() {
             return Ok(RecentRepositories::new());
@@ -111,7 +129,10 @@ impl RecentRepositoriesPort for JsonFileRecentRepositoriesStore {
     }
 
     fn save(&self, recents: &RecentRepositories) -> Result<(), GitSailError> {
-        let _guard = self.lock.lock().expect("recent repositories store mutex poisoned");
+        let _guard = self
+            .lock
+            .lock()
+            .expect("recent repositories store mutex poisoned");
 
         if let Some(parent) = self.file_path.parent() {
             fs::create_dir_all(parent).map_err(Self::write_error)?;

@@ -1065,6 +1065,21 @@ Positive: a future cache (e.g. for diff results, another SAD §23 candidate) has
 ### Consequences
 Positive: a contributor or downstream packager now has one authoritative place (`LICENSE`, this ADR, and the updated backlog decision table — docs/product/GitSail_Product_Backlog_v1.0.md §8) instead of an open question repeated across PRD §22/SAD §39/backlog §8. Verified-floor MSRV and the Git-version floor are both derived from evidence already in this repository (installed toolchain, and `provider.rs`'s own arguments) rather than picked arbitrarily. Trade-off: the MSRV floor is only as trustworthy as "the one toolchain this has ever been built with" — it is expected to be revisited (likely lowered, after real testing) once CI exists and can matrix-test older Rust releases; this ADR does not claim that testing has happened. Likewise, trademark/brand availability for the name "GitSail" is explicitly **not** evaluated or asserted here — see `docs/product/brand-identity.md` (US-129) — choosing Apache-2.0 says nothing about that separate, unresolved question.
 
+## ADR-022 — Multi-platform CI and architectural fitness functions
+
+**Status:** Accepted
+
+### Context
+No CI existed in this repository before T-254/US-121 (`.github/workflows/` did not exist): every check — formatting, lint, tests, build, and any architectural rule such as "domain must not depend on infrastructure" or "only `gitsail-git` shells out to `git`" — was enforced only by convention and manual review. Section 40's "architecture definition of done for v0.1" already listed "Windows/Linux/macOS CI passes" as a completion bar for v0.1, unmet until now. `apps/desktop/src-tauri` and `gitsail-tui` are already regular members of the root workspace `Cargo.toml`, and `apps/vscode` already exists, so a CI baseline scoped to "just CLI + Core" would have ignored components already present in the tree.
+
+### Decision
+1. `.github/workflows/ci.yml` adds five jobs: `rust` (matrix `ubuntu-latest`/`windows-latest`/`macos-latest`, running `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test --workspace`, `cargo build --workspace` — this covers the whole Rust workspace, not just CLI/Core, since TUI and Desktop's Rust side are already workspace members), `desktop` and `vscode` (Node/TS builds and tests, `ubuntu-latest` only — documented as a deliberate cost trade-off, not an oversight, in `docs/architecture/ci-policy.md`), `architecture-fitness` (see below), and `dependency-audit` (`cargo audit`/`npm audit`, informative only for this first version).
+2. `scripts/ci/check-architecture.sh` implements two approximate, grep/text-based architectural fitness functions: `gitsail-domain`'s `Cargo.toml` must not list any other GitSail workspace crate as a dependency (domain isolation, ADR-002), and no `*.rs` file outside `crates/gitsail-git/**` may construct a subprocess literally named `"git"` (restricted parsing), with documented, reviewed exceptions for test-only fixture code. The protocol/`SCHEMA_VERSION` check US-121 also asks for is not reimplemented — T-172/ADR-016's existing compatibility tests already run inside `cargo test --workspace`.
+3. `docs/architecture/ci-policy.md` is the single source of truth for which checks are required for merge vs. informative, and records this pipeline's explicit assumptions (GitHub-hosted runners ship `git`; Tauri v2 needs Linux-only system packages) and its sandbox-verification limits (every command the workflow runs was run directly on Linux before this file existed; the workflow's own YAML syntax was checked with `actionlint` and `python3 -c "import yaml"`, but no live GitHub Actions run — on any OS — was possible from this environment).
+
+### Consequences
+Positive: v0.1's "Windows/Linux/macOS CI passes" completion bar (§40) is now met; two real, previously-undetected architectural rules get automated enforcement instead of relying on review; a first-ever dependency audit exists and is visible in every run's logs even before it blocks anything. Trade-off: the fitness functions are intentionally shallow (text/grep-based, with an explicit allowlist for one file a plain grep cannot parse `#[cfg(test)]` boundaries in) rather than a true architectural-conformance tool — acceptable for a first version per US-121's own scope, revisit if a real violation ever slips past them undetected. Turning on `cargo fmt --check` as a new gate also surfaced pre-existing, workspace-wide formatting drift (84 files, accumulated because no CI ever enforced `rustfmt` before); that drift was corrected via a single `cargo fmt --all` pass as part of landing this ADR, since shipping a fmt gate that is red on `main` from its very first run would contradict this ADR's own goal.
+
 # 39. Open architecture decisions
 
 The following remain deliberately unresolved:
@@ -1095,5 +1110,7 @@ Before v0.1 is considered architecturally complete:
 - Repository fixtures cover key edge cases.
 - No UI layer executes raw Git commands.
 - Architecture decisions are stored with the source repository.
+
+> **Update (ADR-022, 2026-09-18):** "Windows/Linux/macOS CI passes" is now met — `.github/workflows/ci.yml`'s `rust` job runs `cargo fmt`/`clippy`/`test`/`build` on all three OSes. See ADR-022 and `docs/architecture/ci-policy.md` for the full pipeline, which checks are required for merge vs. informative, and its documented assumptions/sandbox-verification limits.
 
 **GitSail — Navigate your Git history.**

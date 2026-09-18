@@ -10,7 +10,10 @@ use gitsail_application::{GetRepositoryStatus, ListBranches, OpenRepository, Pul
 use gitsail_tui::{ui, Action, App, Command, OperationKind, OperationState};
 use ratatui::backend::TestBackend;
 use ratatui::Terminal;
-use support::{clone_repo, git, init_bare_remote, init_repo_with_initial_commit, read_port, write_port, TempDir};
+use support::{
+    clone_repo, git, init_bare_remote, init_repo_with_initial_commit, read_port, write_port,
+    TempDir,
+};
 
 /// Opens `dir` and drains every command `on_repository_opened` issues
 /// (status, branches, tags, remotes, stash, the first commit-graph page)
@@ -29,7 +32,9 @@ fn open_and_load(app: &mut App, dir: &std::path::Path) {
             _ => None,
         })
         .expect("RefreshStatus command");
-    let status = GetRepositoryStatus::new(read.clone()).execute(&repo).unwrap();
+    let status = GetRepositoryStatus::new(read.clone())
+        .execute(&repo)
+        .unwrap();
     app.on_status_refreshed(ticket, Ok(status));
 
     for command in commands {
@@ -177,7 +182,10 @@ fn requesting_fetch_shows_the_resolved_remote_before_dispatching() {
     open_and_load(&mut app, local_dir.path());
 
     assert_eq!(
-        app.remotes().iter().map(|r| r.name.as_str()).collect::<Vec<_>>(),
+        app.remotes()
+            .iter()
+            .map(|r| r.name.as_str())
+            .collect::<Vec<_>>(),
         vec!["origin"],
         "a fresh clone must report its single 'origin' remote"
     );
@@ -216,7 +224,10 @@ fn fetch_updates_remote_tracking_refs_without_touching_the_working_tree() {
     let other_dir = clone_repo(remote_dir.path(), "sync-fetch2-other");
     std::fs::write(other_dir.path().join("new.txt"), "content\n").unwrap();
     git(other_dir.path(), &["add", "new.txt"]);
-    git(other_dir.path(), &["commit", "--quiet", "-m", "advance remote"]);
+    git(
+        other_dir.path(),
+        &["commit", "--quiet", "-m", "advance remote"],
+    );
     git(other_dir.path(), &["push", "--quiet", "origin", "main"]);
     let advanced_head = head(other_dir.path());
 
@@ -326,7 +337,10 @@ fn pushing_publishes_local_commits_to_the_remote() {
         .current_dir(remote_dir.path())
         .output()
         .unwrap();
-    let remote_head = String::from_utf8(remote_head.stdout).unwrap().trim().to_string();
+    let remote_head = String::from_utf8(remote_head.stdout)
+        .unwrap()
+        .trim()
+        .to_string();
     assert_eq!(
         remote_head, new_head,
         "the bare remote must now have the pushed commit"
@@ -345,7 +359,10 @@ fn a_non_fast_forward_push_is_rejected_and_the_remote_state_is_preserved() {
     let other_dir = clone_repo(remote_dir.path(), "sync-push-reject-other");
     std::fs::write(other_dir.path().join("other.txt"), "content\n").unwrap();
     git(other_dir.path(), &["add", "other.txt"]);
-    git(other_dir.path(), &["commit", "--quiet", "-m", "other's commit"]);
+    git(
+        other_dir.path(),
+        &["commit", "--quiet", "-m", "other's commit"],
+    );
     git(other_dir.path(), &["push", "--quiet", "origin", "main"]);
     let remote_head_before = std::process::Command::new("git")
         .args(["rev-parse", "refs/heads/main"])
@@ -361,7 +378,10 @@ fn a_non_fast_forward_push_is_rejected_and_the_remote_state_is_preserved() {
     // pushing now would be a non-fast-forward.
     std::fs::write(seed_dir.path().join("mine.txt"), "content\n").unwrap();
     git(seed_dir.path(), &["add", "mine.txt"]);
-    git(seed_dir.path(), &["commit", "--quiet", "-m", "my divergent commit"]);
+    git(
+        seed_dir.path(),
+        &["commit", "--quiet", "-m", "my divergent commit"],
+    );
 
     let (mut app, _commands) = App::new(seed_dir.path().to_path_buf(), read_port(), false);
     open_and_load(&mut app, seed_dir.path());
@@ -406,7 +426,10 @@ fn fetch_with_no_remote_configured_shows_a_clear_error_instead_of_guessing() {
     assert!(app.remotes().is_empty());
 
     let commands = app.update(Action::RequestFetch);
-    assert!(commands.is_empty(), "nothing must be dispatched without a resolvable remote");
+    assert!(
+        commands.is_empty(),
+        "nothing must be dispatched without a resolvable remote"
+    );
     assert!(app.sync_error().is_some());
     let text = render(&app);
     assert!(

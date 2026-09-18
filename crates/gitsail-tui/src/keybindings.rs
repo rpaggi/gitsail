@@ -83,14 +83,24 @@ pub struct ConfigurableAction {
 /// on. See this module's own doc comment for why leaving out the first two
 /// specifically is the actual safety guarantee T-251 criterion 3 requires.
 pub const CONFIGURABLE_ACTIONS: &[ConfigurableAction] = &[
-    ConfigurableAction { id: "quit", label: "Quit", action: Action::Quit, default_key: 'q' },
+    ConfigurableAction {
+        id: "quit",
+        label: "Quit",
+        action: Action::Quit,
+        default_key: 'q',
+    },
     ConfigurableAction {
         id: "toggle-help",
         label: "Toggle help",
         action: Action::ToggleHelp,
         default_key: '?',
     },
-    ConfigurableAction { id: "refresh", label: "Refresh", action: Action::Refresh, default_key: 'r' },
+    ConfigurableAction {
+        id: "refresh",
+        label: "Refresh",
+        action: Action::Refresh,
+        default_key: 'r',
+    },
     ConfigurableAction {
         id: "toggle-stage",
         label: "Stage/unstage",
@@ -184,7 +194,10 @@ pub fn parse_config(source: &str) -> ParsedConfig {
         overrides.insert(action.id.to_string(), key);
     }
 
-    ParsedConfig { overrides, warnings }
+    ParsedConfig {
+        overrides,
+        warnings,
+    }
 }
 
 /// Merges each [`CONFIGURABLE_ACTIONS`] entry's default key with any
@@ -197,7 +210,10 @@ pub fn parse_config(source: &str) -> ParsedConfig {
 pub fn effective_bindings(overrides: &HashMap<String, char>) -> HashMap<char, Action> {
     let mut result = HashMap::new();
     for action in CONFIGURABLE_ACTIONS {
-        let key = overrides.get(action.id).copied().unwrap_or(action.default_key);
+        let key = overrides
+            .get(action.id)
+            .copied()
+            .unwrap_or(action.default_key);
         result.insert(key, action.action);
     }
     result
@@ -213,7 +229,10 @@ pub fn effective_bindings(overrides: &HashMap<String, char>) -> HashMap<char, Ac
 pub fn find_conflicts(overrides: &HashMap<String, char>) -> HashMap<char, Vec<&'static str>> {
     let mut by_key: HashMap<char, Vec<&'static str>> = HashMap::new();
     for action in CONFIGURABLE_ACTIONS {
-        let key = overrides.get(action.id).copied().unwrap_or(action.default_key);
+        let key = overrides
+            .get(action.id)
+            .copied()
+            .unwrap_or(action.default_key);
         by_key.entry(key).or_default().push(action.id);
     }
     by_key.retain(|_, ids| ids.len() > 1);
@@ -255,7 +274,10 @@ mod tests {
         // own keys, not a parallel invention.
         for action in CONFIGURABLE_ACTIONS {
             use crossterm::event::{KeyCode, KeyEvent};
-            let key = KeyEvent::new(KeyCode::Char(action.default_key), crossterm::event::KeyModifiers::NONE);
+            let key = KeyEvent::new(
+                KeyCode::Char(action.default_key),
+                crossterm::event::KeyModifiers::NONE,
+            );
             assert_eq!(
                 crate::keymap::action_for(key, InputContext::Normal),
                 Some(action.action),
@@ -282,8 +304,16 @@ mod tests {
 
         let bindings = effective_bindings(&parsed.overrides);
         assert_eq!(bindings.get(&'Q'), Some(&Action::Quit));
-        assert_eq!(bindings.get(&'q'), None, "the old default key is no longer bound");
-        assert_eq!(bindings.get(&'?'), Some(&Action::ToggleHelp), "an unrelated action keeps its default");
+        assert_eq!(
+            bindings.get(&'q'),
+            None,
+            "the old default key is no longer bound"
+        );
+        assert_eq!(
+            bindings.get(&'?'),
+            Some(&Action::ToggleHelp),
+            "an unrelated action keeps its default"
+        );
     }
 
     #[test]

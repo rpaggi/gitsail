@@ -250,7 +250,10 @@ pub fn apply_patch(
     apply_patch_impl(&state, &patch_text).map_err(|err| ErrorPayload::from(&err))
 }
 
-fn apply_patch_impl(state: &AppState, patch_text: &str) -> Result<ApplyPatchResultDto, GitSailError> {
+fn apply_patch_impl(
+    state: &AppState,
+    patch_text: &str,
+) -> Result<ApplyPatchResultDto, GitSailError> {
     let result = run_mutation(state, |repository| {
         ApplyPatch::new(state.write_port()).execute(repository, patch_text)
     })?;
@@ -299,7 +302,11 @@ fn list_recent_repositories_impl(
     state: &AppState,
 ) -> Result<Vec<RecentRepositoryDto>, GitSailError> {
     let recents = ListRecentRepositories::new(state.recent_repositories()).execute()?;
-    Ok(recents.entries().iter().map(RecentRepositoryDto::from).collect())
+    Ok(recents
+        .entries()
+        .iter()
+        .map(RecentRepositoryDto::from)
+        .collect())
 }
 
 fn forget_recent_repository_impl(
@@ -308,7 +315,11 @@ fn forget_recent_repository_impl(
 ) -> Result<Vec<RecentRepositoryDto>, GitSailError> {
     let recents =
         ForgetRecentRepository::new(state.recent_repositories()).execute(Path::new(path))?;
-    Ok(recents.entries().iter().map(RecentRepositoryDto::from).collect())
+    Ok(recents
+        .entries()
+        .iter()
+        .map(RecentRepositoryDto::from)
+        .collect())
 }
 
 fn export_patch_impl(
@@ -477,7 +488,11 @@ pub fn get_diff(
     get_diff_impl(&state, staged, path.as_deref()).map_err(|err| ErrorPayload::from(&err))
 }
 
-fn get_diff_impl(state: &AppState, staged: bool, path: Option<&str>) -> Result<DiffDto, GitSailError> {
+fn get_diff_impl(
+    state: &AppState,
+    staged: bool,
+    path: Option<&str>,
+) -> Result<DiffDto, GitSailError> {
     let (repository, _epoch) = state.repository_with_epoch()?;
     let request = DiffRequest {
         staged,
@@ -504,7 +519,10 @@ fn stage_paths_impl(state: &AppState, paths: Vec<String>) -> Result<(), GitSailE
 }
 
 #[tauri::command]
-pub fn unstage_paths(paths: Vec<String>, state: tauri::State<AppState>) -> Result<(), ErrorPayload> {
+pub fn unstage_paths(
+    paths: Vec<String>,
+    state: tauri::State<AppState>,
+) -> Result<(), ErrorPayload> {
     unstage_paths_impl(&state, paths).map_err(|err| ErrorPayload::from(&err))
 }
 
@@ -522,7 +540,10 @@ fn unstage_paths_impl(state: &AppState, paths: Vec<String>) -> Result<(), GitSai
 /// (`gitsail_protocol::dto`'s reverse `From` impls) is the only "logic"
 /// here; the actual hunk application is `gitsail-git`'s, unchanged.
 #[tauri::command]
-pub fn stage_hunks(selection: Vec<FileDiffDto>, state: tauri::State<AppState>) -> Result<(), ErrorPayload> {
+pub fn stage_hunks(
+    selection: Vec<FileDiffDto>,
+    state: tauri::State<AppState>,
+) -> Result<(), ErrorPayload> {
     stage_hunks_impl(&state, &selection).map_err(|err| ErrorPayload::from(&err))
 }
 
@@ -534,7 +555,10 @@ fn stage_hunks_impl(state: &AppState, selection: &[FileDiffDto]) -> Result<(), G
 }
 
 #[tauri::command]
-pub fn unstage_hunks(selection: Vec<FileDiffDto>, state: tauri::State<AppState>) -> Result<(), ErrorPayload> {
+pub fn unstage_hunks(
+    selection: Vec<FileDiffDto>,
+    state: tauri::State<AppState>,
+) -> Result<(), ErrorPayload> {
     unstage_hunks_impl(&state, &selection).map_err(|err| ErrorPayload::from(&err))
 }
 
@@ -618,7 +642,8 @@ pub fn create_branch(
     start_point: Option<String>,
     state: tauri::State<AppState>,
 ) -> Result<(), ErrorPayload> {
-    create_branch_impl(&state, &name, start_point.as_deref()).map_err(|err| ErrorPayload::from(&err))
+    create_branch_impl(&state, &name, start_point.as_deref())
+        .map_err(|err| ErrorPayload::from(&err))
 }
 
 fn create_branch_impl(
@@ -631,7 +656,11 @@ fn create_branch_impl(
         let resolved_start = start_point
             .map(|revision| state.port().resolve_revision(repository, revision))
             .transpose()?;
-        CreateBranch::new(state.write_port()).execute(repository, &branch_name, resolved_start.as_ref())
+        CreateBranch::new(state.write_port()).execute(
+            repository,
+            &branch_name,
+            resolved_start.as_ref(),
+        )
     })
 }
 
@@ -677,7 +706,11 @@ pub fn rename_branch(
     rename_branch_impl(&state, &old_name, &new_name).map_err(|err| ErrorPayload::from(&err))
 }
 
-fn rename_branch_impl(state: &AppState, old_name: &str, new_name: &str) -> Result<(), GitSailError> {
+fn rename_branch_impl(
+    state: &AppState,
+    old_name: &str,
+    new_name: &str,
+) -> Result<(), GitSailError> {
     let old_name = BranchName::new(old_name)?;
     let new_name = BranchName::new(new_name)?;
     run_mutation(state, |repository| {
@@ -809,7 +842,10 @@ pub fn open_forge_link(
     open_forge_link_impl(&state, &target).map_err(|err| ErrorPayload::from(&err))
 }
 
-fn open_forge_link_impl(state: &AppState, target: &ForgeLinkTargetDto) -> Result<bool, GitSailError> {
+fn open_forge_link_impl(
+    state: &AppState,
+    target: &ForgeLinkTargetDto,
+) -> Result<bool, GitSailError> {
     match get_forge_link_impl(state, target)? {
         Some(url) => {
             crate::browser::open_url(&url)?;
@@ -836,7 +872,10 @@ pub fn forge_connection_status(
     forge_connection_status_impl(&state, &account)
 }
 
-fn forge_connection_status_impl(state: &AppState, account: &ForgeAccountDto) -> ForgeConnectionStatusDto {
+fn forge_connection_status_impl(
+    state: &AppState,
+    account: &ForgeAccountDto,
+) -> ForgeConnectionStatusDto {
     let status = GetForgeConnectionStatus::new(state.forge_credentials()).execute(&account.into());
     ForgeConnectionStatusDto::from(status)
 }
@@ -858,7 +897,8 @@ fn connect_forge_account_impl(
     account: &ForgeAccountDto,
     token: String,
 ) -> Result<(), GitSailError> {
-    ConnectForgeAccount::new(state.forge_credentials()).execute(&account.into(), ForgeToken::new(token))
+    ConnectForgeAccount::new(state.forge_credentials())
+        .execute(&account.into(), ForgeToken::new(token))
 }
 
 /// Disconnects `account`, removing its token from OS-secure storage
@@ -873,7 +913,10 @@ pub fn disconnect_forge_account(
     disconnect_forge_account_impl(&state, &account).map_err(|err| ErrorPayload::from(&err))
 }
 
-fn disconnect_forge_account_impl(state: &AppState, account: &ForgeAccountDto) -> Result<(), GitSailError> {
+fn disconnect_forge_account_impl(
+    state: &AppState,
+    account: &ForgeAccountDto,
+) -> Result<(), GitSailError> {
     DisconnectForgeAccount::new(state.forge_credentials()).execute(&account.into())
 }
 
@@ -903,11 +946,14 @@ pub fn list_pull_requests(
     list_pull_requests_impl(&state, page).map_err(|err| ErrorPayload::from(&err))
 }
 
-fn list_pull_requests_impl(state: &AppState, page: u32) -> Result<ListPullRequestsOutcomeDto, GitSailError> {
+fn list_pull_requests_impl(
+    state: &AppState,
+    page: u32,
+) -> Result<ListPullRequestsOutcomeDto, GitSailError> {
     let (repository, _epoch) = state.repository_with_epoch()?;
     let remotes = state.port().list_remotes(&repository)?;
-    let outcome =
-        ListPullRequests::new(state.pull_request_query(), state.forge_credentials()).execute(&remotes, page);
+    let outcome = ListPullRequests::new(state.pull_request_query(), state.forge_credentials())
+        .execute(&remotes, page);
     Ok(ListPullRequestsOutcomeDto::from(outcome))
 }
 
@@ -957,7 +1003,10 @@ fn open_pull_request_link_impl(state: &AppState, url: &str) -> Result<bool, GitS
 /// tests consistent with that, rather than launching a real (and, in a
 /// headless/CI sandbox, failing) browser-opener process as a side effect
 /// of a unit test.
-fn resolve_pull_request_link_impl(state: &AppState, url: &str) -> Result<Option<String>, GitSailError> {
+fn resolve_pull_request_link_impl(
+    state: &AppState,
+    url: &str,
+) -> Result<Option<String>, GitSailError> {
     let (repository, _epoch) = state.repository_with_epoch()?;
     let remotes = state.port().list_remotes(&repository)?;
     let Some((remote, kind)) = gitsail_application::forge_links::pick_forge_remote(&remotes) else {
@@ -969,7 +1018,10 @@ fn resolve_pull_request_link_impl(state: &AppState, url: &str) -> Result<Option<
     let Ok(parsed) = url::Url::parse(url) else {
         return Ok(None);
     };
-    let host_matches = parsed.host_str().map(|h| h.eq_ignore_ascii_case(&host)).unwrap_or(false);
+    let host_matches = parsed
+        .host_str()
+        .map(|h| h.eq_ignore_ascii_case(&host))
+        .unwrap_or(false);
     if parsed.scheme() != "https" || !host_matches {
         return Ok(None);
     }
@@ -1137,8 +1189,7 @@ pub fn get_conflict_sides(
 
 fn get_conflict_sides_impl(state: &AppState, path: &str) -> Result<ConflictSidesDto, GitSailError> {
     let (repository, _epoch) = state.repository_with_epoch()?;
-    let sides =
-        GetConflictSides::new(state.port()).execute(&repository, Path::new(path))?;
+    let sides = GetConflictSides::new(state.port()).execute(&repository, Path::new(path))?;
     Ok(ConflictSidesDto::from(&sides))
 }
 
@@ -1146,7 +1197,10 @@ fn get_conflict_sides_impl(state: &AppState, path: &str) -> Result<ConflictSides
 /// content (T-232/US-080 criterion 3) — only ever this explicit call, never
 /// inferred by the frontend from the file merely "looking" resolved.
 #[tauri::command]
-pub fn mark_conflict_resolved(path: String, state: tauri::State<AppState>) -> Result<(), ErrorPayload> {
+pub fn mark_conflict_resolved(
+    path: String,
+    state: tauri::State<AppState>,
+) -> Result<(), ErrorPayload> {
     mark_conflict_resolved_impl(&state, &path).map_err(|err| ErrorPayload::from(&err))
 }
 
@@ -1276,7 +1330,9 @@ fn skip_operation_impl(state: &AppState) -> Result<(), GitSailError> {
 /// was chosen" — [`RepositoryWritePort::cherry_pick`]/`revert` themselves
 /// refuse a merge commit with no policy rather than this function ever
 /// guessing one.
-fn parse_merge_parent_policy(merge_parent: Option<&str>) -> Result<Option<MergeParentPolicy>, GitSailError> {
+fn parse_merge_parent_policy(
+    merge_parent: Option<&str>,
+) -> Result<Option<MergeParentPolicy>, GitSailError> {
     match merge_parent {
         None => Ok(None),
         Some("firstParent") => Ok(Some(MergeParentPolicy::FirstParent)),
@@ -1371,7 +1427,8 @@ pub fn reset(
     expected_head: String,
     state: tauri::State<AppState>,
 ) -> Result<(), ErrorPayload> {
-    reset_impl(&state, &target_revision, &mode, &expected_head).map_err(|err| ErrorPayload::from(&err))
+    reset_impl(&state, &target_revision, &mode, &expected_head)
+        .map_err(|err| ErrorPayload::from(&err))
 }
 
 fn reset_impl(
@@ -1495,7 +1552,10 @@ fn parse_theme_preference(theme: &str) -> Result<ThemePreference, GitSailError> 
 /// dark). Calling this with `"dark"` or `"light"` is what actually switches
 /// and persists a person's explicit choice.
 #[tauri::command]
-pub fn set_theme(theme: String, state: tauri::State<AppState>) -> Result<PreferencesDto, ErrorPayload> {
+pub fn set_theme(
+    theme: String,
+    state: tauri::State<AppState>,
+) -> Result<PreferencesDto, ErrorPayload> {
     set_theme_impl(&state, &theme).map_err(|err| ErrorPayload::from(&err))
 }
 
@@ -1522,8 +1582,13 @@ fn set_theme_impl(state: &AppState, theme: &str) -> Result<PreferencesDto, GitSa
 /// criterion 1). An action with no entry here is using its frontend-defined
 /// default.
 #[tauri::command]
-pub fn get_keybinding_overrides(state: tauri::State<AppState>) -> Result<HashMap<String, String>, ErrorPayload> {
-    state.keybindings().load().map_err(|err| ErrorPayload::from(&err))
+pub fn get_keybinding_overrides(
+    state: tauri::State<AppState>,
+) -> Result<HashMap<String, String>, ErrorPayload> {
+    state
+        .keybindings()
+        .load()
+        .map_err(|err| ErrorPayload::from(&err))
 }
 
 /// Remaps `action_id` to `binding`, persisting it immediately.
@@ -1546,14 +1611,20 @@ pub fn reset_keybinding_override(
     action_id: String,
     state: tauri::State<AppState>,
 ) -> Result<HashMap<String, String>, ErrorPayload> {
-    state.keybindings().set_override(&action_id, None).map_err(|err| ErrorPayload::from(&err))
+    state
+        .keybindings()
+        .set_override(&action_id, None)
+        .map_err(|err| ErrorPayload::from(&err))
 }
 
 /// Clears every override at once (US-107 criterion 1's "restaurar padrão",
 /// applied to the whole list).
 #[tauri::command]
 pub fn reset_all_keybinding_overrides(state: tauri::State<AppState>) -> Result<(), ErrorPayload> {
-    state.keybindings().reset_all().map_err(|err| ErrorPayload::from(&err))
+    state
+        .keybindings()
+        .reset_all()
+        .map_err(|err| ErrorPayload::from(&err))
 }
 
 #[cfg(test)]
@@ -1571,8 +1642,8 @@ mod tests {
     };
     use gitsail_domain::{
         Blame, Branch, BranchName, CancellationToken, ChangeType, Commit, CommitHash, ErrorCode,
-        FileChange, FileStatusCode, GitSailError, GitTimestamp, HeadState, LineHistory,
-        Repository, RepositoryId, RepositoryStatus, Signature,
+        FileChange, FileStatusCode, GitSailError, GitTimestamp, HeadState, LineHistory, Repository,
+        RepositoryId, RepositoryStatus, Signature,
     };
 
     /// An in-memory [`RecentRepositoriesPort`] double — `commands.rs` tests
@@ -1634,9 +1705,13 @@ mod tests {
         use std::sync::atomic::{AtomicU64, Ordering};
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let id = COUNTER.fetch_add(1, Ordering::SeqCst);
-        let path = std::env::temp_dir()
-            .join(format!("gitsail-commands-test-keybindings-{}-{id}.json", std::process::id()));
-        Arc::new(crate::keybindings_store::JsonFileKeybindingsStore::new(path))
+        let path = std::env::temp_dir().join(format!(
+            "gitsail-commands-test-keybindings-{}-{id}.json",
+            std::process::id()
+        ));
+        Arc::new(crate::keybindings_store::JsonFileKeybindingsStore::new(
+            path,
+        ))
     }
 
     /// A `RepositoryReadPort` double exercising `discover`, `status`, and
@@ -1702,10 +1777,15 @@ mod tests {
             };
             let mut items: Vec<Commit> = self.history.clone();
             if let Some(author) = &query.author {
-                items.retain(|c| c.author.name.contains(author.as_str()) || c.author.email.contains(author.as_str()));
+                items.retain(|c| {
+                    c.author.name.contains(author.as_str())
+                        || c.author.email.contains(author.as_str())
+                });
             }
             if let Some(text) = &query.text_query {
-                items.retain(|c| c.subject.contains(text.as_str()) || c.body.contains(text.as_str()));
+                items.retain(|c| {
+                    c.subject.contains(text.as_str()) || c.body.contains(text.as_str())
+                });
             }
             let items: Vec<Commit> = items.into_iter().skip(offset).take(limit).collect();
             let next_offset = offset + items.len();
@@ -1816,7 +1896,10 @@ mod tests {
         Commit {
             short_hash: hash.to_short(8),
             hash,
-            parents: parents.iter().map(|p| CommitHash::new(*p).unwrap()).collect(),
+            parents: parents
+                .iter()
+                .map(|p| CommitHash::new(*p).unwrap())
+                .collect(),
             author: Signature::new("Ada", "ada@example.com"),
             committer: Signature::new("Ada", "ada@example.com"),
             author_date: GitTimestamp::new(0, 0),
@@ -1873,7 +1956,8 @@ mod tests {
         pull_requests: gitsail_forge::FakePullRequestQueryPort,
     ) -> AppState {
         let read_port: Arc<dyn gitsail_application::RepositoryReadPort> = Arc::new(port);
-        let write_port: Arc<dyn gitsail_application::RepositoryWritePort> = Arc::new(FakeWritePort::new());
+        let write_port: Arc<dyn gitsail_application::RepositoryWritePort> =
+            Arc::new(FakeWritePort::new());
         AppState::new(
             read_port,
             write_port,
@@ -1946,11 +2030,17 @@ mod tests {
         }
 
         fn failing() -> Self {
-            Self { fail: true, ..Self::new() }
+            Self {
+                fail: true,
+                ..Self::new()
+            }
         }
 
         fn with_pull_outcome(outcome: gitsail_application::PullOutcome) -> Self {
-            Self { pull_outcome: outcome, ..Self::new() }
+            Self {
+                pull_outcome: outcome,
+                ..Self::new()
+            }
         }
     }
 
@@ -1958,7 +2048,10 @@ mod tests {
         fn stage_files(&self, _repo: &Repository, paths: &[PathBuf]) -> Result<(), GitSailError> {
             *self.received_stage.lock().unwrap() = Some(paths.to_vec());
             if self.fail {
-                return Err(GitSailError::new(ErrorCode::OperationConflict, "stale status"));
+                return Err(GitSailError::new(
+                    ErrorCode::OperationConflict,
+                    "stale status",
+                ));
             }
             Ok(())
         }
@@ -1966,15 +2059,25 @@ mod tests {
         fn unstage_files(&self, _repo: &Repository, paths: &[PathBuf]) -> Result<(), GitSailError> {
             *self.received_unstage.lock().unwrap() = Some(paths.to_vec());
             if self.fail {
-                return Err(GitSailError::new(ErrorCode::OperationConflict, "stale status"));
+                return Err(GitSailError::new(
+                    ErrorCode::OperationConflict,
+                    "stale status",
+                ));
             }
             Ok(())
         }
 
-        fn create_commit(&self, _repo: &Repository, message: &str) -> Result<CommitHash, GitSailError> {
+        fn create_commit(
+            &self,
+            _repo: &Repository,
+            message: &str,
+        ) -> Result<CommitHash, GitSailError> {
             *self.received_commit_message.lock().unwrap() = Some(message.to_string());
             if self.fail {
-                return Err(GitSailError::new(ErrorCode::InvalidRepositoryState, "nothing staged"));
+                return Err(GitSailError::new(
+                    ErrorCode::InvalidRepositoryState,
+                    "nothing staged",
+                ));
             }
             Ok(self.commit_hash.clone())
         }
@@ -1986,7 +2089,10 @@ mod tests {
         ) -> Result<(), GitSailError> {
             *self.received_stage_hunks.lock().unwrap() = Some(selection.to_vec());
             if self.fail {
-                return Err(GitSailError::new(ErrorCode::OperationConflict, "stale diff"));
+                return Err(GitSailError::new(
+                    ErrorCode::OperationConflict,
+                    "stale diff",
+                ));
             }
             Ok(())
         }
@@ -1998,15 +2104,25 @@ mod tests {
         ) -> Result<(), GitSailError> {
             *self.received_unstage_hunks.lock().unwrap() = Some(selection.to_vec());
             if self.fail {
-                return Err(GitSailError::new(ErrorCode::OperationConflict, "stale diff"));
+                return Err(GitSailError::new(
+                    ErrorCode::OperationConflict,
+                    "stale diff",
+                ));
             }
             Ok(())
         }
 
-        fn switch_branch(&self, _repo: &Repository, target: &BranchName) -> Result<(), GitSailError> {
+        fn switch_branch(
+            &self,
+            _repo: &Repository,
+            target: &BranchName,
+        ) -> Result<(), GitSailError> {
             *self.received_switch_target.lock().unwrap() = Some(target.clone());
             if self.fail {
-                return Err(GitSailError::new(ErrorCode::OperationConflict, "would overwrite local changes"));
+                return Err(GitSailError::new(
+                    ErrorCode::OperationConflict,
+                    "would overwrite local changes",
+                ));
             }
             Ok(())
         }
@@ -2017,17 +2133,29 @@ mod tests {
             name: &BranchName,
             start_point: Option<&CommitHash>,
         ) -> Result<(), GitSailError> {
-            *self.received_create_branch.lock().unwrap() = Some((name.clone(), start_point.cloned()));
+            *self.received_create_branch.lock().unwrap() =
+                Some((name.clone(), start_point.cloned()));
             if self.fail {
-                return Err(GitSailError::new(ErrorCode::InvalidRepositoryState, "already exists"));
+                return Err(GitSailError::new(
+                    ErrorCode::InvalidRepositoryState,
+                    "already exists",
+                ));
             }
             Ok(())
         }
 
-        fn delete_branch(&self, _repo: &Repository, name: &BranchName, force: bool) -> Result<(), GitSailError> {
+        fn delete_branch(
+            &self,
+            _repo: &Repository,
+            name: &BranchName,
+            force: bool,
+        ) -> Result<(), GitSailError> {
             *self.received_delete_branch.lock().unwrap() = Some((name.clone(), force));
             if self.fail {
-                return Err(GitSailError::new(ErrorCode::OperationConflict, "not fully merged"));
+                return Err(GitSailError::new(
+                    ErrorCode::OperationConflict,
+                    "not fully merged",
+                ));
             }
             Ok(())
         }
@@ -2038,9 +2166,13 @@ mod tests {
             old_name: &BranchName,
             new_name: &BranchName,
         ) -> Result<(), GitSailError> {
-            *self.received_rename_branch.lock().unwrap() = Some((old_name.clone(), new_name.clone()));
+            *self.received_rename_branch.lock().unwrap() =
+                Some((old_name.clone(), new_name.clone()));
             if self.fail {
-                return Err(GitSailError::new(ErrorCode::InvalidRepositoryState, "already exists"));
+                return Err(GitSailError::new(
+                    ErrorCode::InvalidRepositoryState,
+                    "already exists",
+                ));
             }
             Ok(())
         }
@@ -2051,9 +2183,13 @@ mod tests {
             message: &str,
             expected_head: &CommitHash,
         ) -> Result<CommitHash, GitSailError> {
-            *self.received_amend.lock().unwrap() = Some((message.to_string(), expected_head.clone()));
+            *self.received_amend.lock().unwrap() =
+                Some((message.to_string(), expected_head.clone()));
             if self.fail {
-                return Err(GitSailError::new(ErrorCode::OperationConflict, "HEAD changed since preview"));
+                return Err(GitSailError::new(
+                    ErrorCode::OperationConflict,
+                    "HEAD changed since preview",
+                ));
             }
             Ok(self.commit_hash.clone())
         }
@@ -2080,7 +2216,10 @@ mod tests {
         ) -> Result<gitsail_application::PullOutcome, GitSailError> {
             *self.received_pull.lock().unwrap() = Some((remote.to_string(), branch.clone()));
             if self.fail {
-                return Err(GitSailError::new(ErrorCode::OperationConflict, "would diverge history"));
+                return Err(GitSailError::new(
+                    ErrorCode::OperationConflict,
+                    "would diverge history",
+                ));
             }
             Ok(self.pull_outcome.clone())
         }
@@ -2094,7 +2233,10 @@ mod tests {
         ) -> Result<(), GitSailError> {
             *self.received_push.lock().unwrap() = Some((remote.to_string(), branch.clone()));
             if self.fail {
-                return Err(GitSailError::new(ErrorCode::OperationConflict, "non-fast-forward"));
+                return Err(GitSailError::new(
+                    ErrorCode::OperationConflict,
+                    "non-fast-forward",
+                ));
             }
             Ok(())
         }
@@ -2106,7 +2248,10 @@ mod tests {
         ) -> Result<gitsail_application::PatchPreview, GitSailError> {
             *self.received_preview_patch.lock().unwrap() = Some(patch_text.to_string());
             if self.fail {
-                return Err(GitSailError::new(ErrorCode::ParseFailure, "the patch is malformed"));
+                return Err(GitSailError::new(
+                    ErrorCode::ParseFailure,
+                    "the patch is malformed",
+                ));
             }
             Ok(self.patch_preview.clone())
         }
@@ -2191,9 +2336,15 @@ mod tests {
     #[test]
     fn parse_refresh_reason_maps_known_strings_and_defaults_unknown_ones_to_manual() {
         assert_eq!(parse_refresh_reason("focus"), RefreshReason::Focus);
-        assert_eq!(parse_refresh_reason("after_mutation"), RefreshReason::AfterMutation);
+        assert_eq!(
+            parse_refresh_reason("after_mutation"),
+            RefreshReason::AfterMutation
+        );
         assert_eq!(parse_refresh_reason("manual"), RefreshReason::Manual);
-        assert_eq!(parse_refresh_reason("something-unknown"), RefreshReason::Manual);
+        assert_eq!(
+            parse_refresh_reason("something-unknown"),
+            RefreshReason::Manual
+        );
     }
 
     // -- US-029/T-162: copy or export a patch -----------------------------
@@ -2359,7 +2510,10 @@ mod tests {
             page.rows[0].edges[0].resolved,
             "the parent is in the same page, so the edge must resolve immediately"
         );
-        assert!(page.rows[1].edges.is_empty(), "the root commit has no edges");
+        assert!(
+            page.rows[1].edges.is_empty(),
+            "the root commit has no edges"
+        );
     }
 
     #[test]
@@ -2453,7 +2607,10 @@ mod tests {
     #[test]
     fn list_branches_returns_every_branch_the_port_reports() {
         let state = state_from_port(FakePort {
-            branches: vec![sample_branch("main", true), sample_branch("feature/x", false)],
+            branches: vec![
+                sample_branch("main", true),
+                sample_branch("feature/x", false),
+            ],
             ..FakePort::default()
         });
         open_repository_impl(&state, "/repo").unwrap();
@@ -2637,7 +2794,9 @@ mod tests {
                 "HEAD".to_string(),
                 CommitHash::new(head_hash.clone()).unwrap(),
             )]),
-            diff: gitsail_domain::Diff { files: vec![modified_file_diff("a.txt")] },
+            diff: gitsail_domain::Diff {
+                files: vec![modified_file_diff("a.txt")],
+            },
             ..FakePort::default()
         });
         open_repository_impl(&state, "/repo").unwrap();
@@ -2664,8 +2823,7 @@ mod tests {
 
     #[test]
     fn amend_commit_reports_a_conflict_when_the_write_port_refuses_a_stale_head() {
-        let state =
-            state_from_port_and_write_port(FakePort::default(), FakeWritePort::failing());
+        let state = state_from_port_and_write_port(FakePort::default(), FakeWritePort::failing());
         open_repository_impl(&state, "/repo").unwrap();
 
         let err = amend_commit_impl(&state, "amended message", &"a".repeat(40)).unwrap_err();
@@ -2764,8 +2922,7 @@ mod tests {
 
     #[test]
     fn create_branch_propagates_a_name_collision_error() {
-        let state =
-            state_from_port_and_write_port(FakePort::default(), FakeWritePort::failing());
+        let state = state_from_port_and_write_port(FakePort::default(), FakeWritePort::failing());
         open_repository_impl(&state, "/repo").unwrap();
 
         let err = create_branch_impl(&state, "main", None).unwrap_err();
@@ -2783,8 +2940,7 @@ mod tests {
 
     #[test]
     fn switch_branch_propagates_an_overwrite_conflict() {
-        let state =
-            state_from_port_and_write_port(FakePort::default(), FakeWritePort::failing());
+        let state = state_from_port_and_write_port(FakePort::default(), FakeWritePort::failing());
         open_repository_impl(&state, "/repo").unwrap();
 
         let err = switch_branch_impl(&state, "develop").unwrap_err();
@@ -2802,8 +2958,7 @@ mod tests {
 
     #[test]
     fn delete_branch_propagates_an_unmerged_branch_conflict() {
-        let state =
-            state_from_port_and_write_port(FakePort::default(), FakeWritePort::failing());
+        let state = state_from_port_and_write_port(FakePort::default(), FakeWritePort::failing());
         open_repository_impl(&state, "/repo").unwrap();
 
         let err = delete_branch_impl(&state, "feature/x", false).unwrap_err();
@@ -2821,8 +2976,7 @@ mod tests {
 
     #[test]
     fn rename_branch_propagates_a_name_collision_error() {
-        let state =
-            state_from_port_and_write_port(FakePort::default(), FakeWritePort::failing());
+        let state = state_from_port_and_write_port(FakePort::default(), FakeWritePort::failing());
         open_repository_impl(&state, "/repo").unwrap();
 
         let err = rename_branch_impl(&state, "feature/x", "main").unwrap_err();
@@ -2947,7 +3101,9 @@ mod tests {
         let state = state_from_port(FakePort::default());
         open_repository_impl(&state, "/repo").unwrap();
 
-        let target = ForgeLinkTargetDto::Commit { hash: "not-a-hash!".to_string() };
+        let target = ForgeLinkTargetDto::Commit {
+            hash: "not-a-hash!".to_string(),
+        };
         assert!(get_forge_link_impl(&state, &target).is_err());
     }
 
@@ -2987,7 +3143,10 @@ mod tests {
         result: Result<PullRequestPage, PullRequestQueryError>,
     ) -> AppState {
         let state = state_from_port_and_pull_requests(
-            FakePort { remotes: vec![github_remote()], ..FakePort::default() },
+            FakePort {
+                remotes: vec![github_remote()],
+                ..FakePort::default()
+            },
             gitsail_forge::FakePullRequestQueryPort::new(result),
         );
         open_repository_impl(&state, "/repo").unwrap();
@@ -3007,7 +3166,10 @@ mod tests {
     #[test]
     fn list_pull_requests_with_no_recognized_forge_remote_reports_no_forge_detected() {
         let state = state_from_port_and_pull_requests(
-            FakePort { remotes: vec![sample_remote("origin")], ..FakePort::default() },
+            FakePort {
+                remotes: vec![sample_remote("origin")],
+                ..FakePort::default()
+            },
             gitsail_forge::FakePullRequestQueryPort::default(),
         );
         open_repository_impl(&state, "/repo").unwrap();
@@ -3032,7 +3194,10 @@ mod tests {
 
     #[test]
     fn list_pull_requests_maps_a_nonempty_page_preserving_every_field() {
-        let page = PullRequestPage { items: vec![sample_pull_request()], has_next_page: true };
+        let page = PullRequestPage {
+            items: vec![sample_pull_request()],
+            has_next_page: true,
+        };
         let state = state_with_pull_requests(Ok(page));
 
         let outcome = list_pull_requests_impl(&state, 1).unwrap();
@@ -3070,7 +3235,9 @@ mod tests {
 
         assert_eq!(
             list_pull_requests_impl(&state, 1).unwrap(),
-            ListPullRequestsOutcomeDto::RateLimited { retry_after_seconds: Some(30) }
+            ListPullRequestsOutcomeDto::RateLimited {
+                retry_after_seconds: Some(30)
+            }
         );
     }
 
@@ -3083,11 +3250,15 @@ mod tests {
         let outcome = list_pull_requests_impl(&state, 1).unwrap();
         assert_eq!(
             outcome,
-            ListPullRequestsOutcomeDto::Offline { message: "connection refused".to_string() }
+            ListPullRequestsOutcomeDto::Offline {
+                message: "connection refused".to_string()
+            }
         );
         assert_ne!(
             outcome,
-            ListPullRequestsOutcomeDto::Page { page: gitsail_protocol::PullRequestPageDto::default() },
+            ListPullRequestsOutcomeDto::Page {
+                page: gitsail_protocol::PullRequestPageDto::default()
+            },
             "an offline failure must never be representable as (and confusable with) an empty page"
         );
     }
@@ -3103,7 +3274,10 @@ mod tests {
             author: Some("[click](javascript:alert(1))".to_string()),
             ..sample_pull_request()
         };
-        let page = PullRequestPage { items: vec![malicious], has_next_page: false };
+        let page = PullRequestPage {
+            items: vec![malicious],
+            has_next_page: false,
+        };
         let state = state_with_pull_requests(Ok(page));
 
         let outcome = list_pull_requests_impl(&state, 1).unwrap();
@@ -3127,7 +3301,10 @@ mod tests {
         let state = state_with_pull_requests(Ok(PullRequestPage::default()));
         let resolved =
             resolve_pull_request_link_impl(&state, "https://github.com/org/repo/pull/1").unwrap();
-        assert_eq!(resolved.as_deref(), Some("https://github.com/org/repo/pull/1"));
+        assert_eq!(
+            resolved.as_deref(),
+            Some("https://github.com/org/repo/pull/1")
+        );
     }
 
     #[test]
@@ -3135,7 +3312,10 @@ mod tests {
         let state = state_with_pull_requests(Ok(PullRequestPage::default()));
         let resolved =
             resolve_pull_request_link_impl(&state, "https://evil.example/org/repo/pull/1").unwrap();
-        assert_eq!(resolved, None, "a URL whose host does not match the detected forge must never be opened");
+        assert_eq!(
+            resolved, None,
+            "a URL whose host does not match the detected forge must never be opened"
+        );
     }
 
     #[test]
@@ -3152,7 +3332,10 @@ mod tests {
     #[test]
     fn resolve_pull_request_link_with_no_recognized_forge_remote_is_none_not_an_error() {
         let state = state_from_port_and_pull_requests(
-            FakePort { remotes: vec![sample_remote("origin")], ..FakePort::default() },
+            FakePort {
+                remotes: vec![sample_remote("origin")],
+                ..FakePort::default()
+            },
             gitsail_forge::FakePullRequestQueryPort::default(),
         );
         open_repository_impl(&state, "/repo").unwrap();
@@ -3275,7 +3458,10 @@ mod tests {
     #[test]
     fn fetch_with_no_remote_configured_fails_before_ever_reaching_the_write_port() {
         let state = state_from_port_and_write_port(
-            FakePort { branches: vec![branch_with_upstream("main", None)], ..FakePort::default() },
+            FakePort {
+                branches: vec![branch_with_upstream("main", None)],
+                ..FakePort::default()
+            },
             FakeWritePort::new(),
         );
         open_repository_impl(&state, "/repo").unwrap();
@@ -3306,7 +3492,9 @@ mod tests {
         assert_eq!(result.branch, "main");
         assert_eq!(
             result.outcome,
-            PullOutcomeDto::FastForwarded { new_head: hash.as_str().to_string() }
+            PullOutcomeDto::FastForwarded {
+                new_head: hash.as_str().to_string()
+            }
         );
     }
 
@@ -3375,50 +3563,96 @@ mod tests {
             inner: FakeWritePort,
         }
         impl gitsail_application::RepositoryWritePort for SwitchingWritePort {
-            fn stage_files(&self, repo: &Repository, paths: &[PathBuf]) -> Result<(), GitSailError> {
+            fn stage_files(
+                &self,
+                repo: &Repository,
+                paths: &[PathBuf],
+            ) -> Result<(), GitSailError> {
                 self.inner.stage_files(repo, paths)
             }
-            fn unstage_files(&self, repo: &Repository, paths: &[PathBuf]) -> Result<(), GitSailError> {
+            fn unstage_files(
+                &self,
+                repo: &Repository,
+                paths: &[PathBuf],
+            ) -> Result<(), GitSailError> {
                 self.inner.unstage_files(repo, paths)
             }
-            fn create_commit(&self, repo: &Repository, message: &str) -> Result<CommitHash, GitSailError> {
+            fn create_commit(
+                &self,
+                repo: &Repository,
+                message: &str,
+            ) -> Result<CommitHash, GitSailError> {
                 self.inner.create_commit(repo, message)
             }
-            fn stage_hunks(&self, repo: &Repository, selection: &[gitsail_domain::FileDiff]) -> Result<(), GitSailError> {
+            fn stage_hunks(
+                &self,
+                repo: &Repository,
+                selection: &[gitsail_domain::FileDiff],
+            ) -> Result<(), GitSailError> {
                 self.inner.stage_hunks(repo, selection)
             }
-            fn unstage_hunks(&self, repo: &Repository, selection: &[gitsail_domain::FileDiff]) -> Result<(), GitSailError> {
+            fn unstage_hunks(
+                &self,
+                repo: &Repository,
+                selection: &[gitsail_domain::FileDiff],
+            ) -> Result<(), GitSailError> {
                 self.inner.unstage_hunks(repo, selection)
             }
-            fn switch_branch(&self, repo: &Repository, target: &BranchName) -> Result<(), GitSailError> {
+            fn switch_branch(
+                &self,
+                repo: &Repository,
+                target: &BranchName,
+            ) -> Result<(), GitSailError> {
                 self.inner.switch_branch(repo, target)
             }
-            fn create_branch(&self, repo: &Repository, name: &BranchName, start_point: Option<&CommitHash>) -> Result<(), GitSailError> {
+            fn create_branch(
+                &self,
+                repo: &Repository,
+                name: &BranchName,
+                start_point: Option<&CommitHash>,
+            ) -> Result<(), GitSailError> {
                 self.inner.create_branch(repo, name, start_point)
             }
-            fn delete_branch(&self, repo: &Repository, name: &BranchName, force: bool) -> Result<(), GitSailError> {
+            fn delete_branch(
+                &self,
+                repo: &Repository,
+                name: &BranchName,
+                force: bool,
+            ) -> Result<(), GitSailError> {
                 self.inner.delete_branch(repo, name, force)
             }
-            fn rename_branch(&self, repo: &Repository, old_name: &BranchName, new_name: &BranchName) -> Result<(), GitSailError> {
+            fn rename_branch(
+                &self,
+                repo: &Repository,
+                old_name: &BranchName,
+                new_name: &BranchName,
+            ) -> Result<(), GitSailError> {
                 self.inner.rename_branch(repo, old_name, new_name)
             }
-            fn amend_commit(&self, repo: &Repository, message: &str, expected_head: &CommitHash) -> Result<CommitHash, GitSailError> {
+            fn amend_commit(
+                &self,
+                repo: &Repository,
+                message: &str,
+                expected_head: &CommitHash,
+            ) -> Result<CommitHash, GitSailError> {
                 self.inner.amend_commit(repo, message, expected_head)
             }
         }
 
         let port: Arc<dyn gitsail_application::RepositoryReadPort> = Arc::new(FakePort::default());
         let write_port: Arc<dyn gitsail_application::RepositoryWritePort> =
-            Arc::new(SwitchingWritePort { inner: FakeWritePort::new() });
+            Arc::new(SwitchingWritePort {
+                inner: FakeWritePort::new(),
+            });
         let state = AppState::new(
-                port,
-                write_port,
-                InMemoryRecents::shared(),
-                test_forge_credentials(),
-                Arc::new(gitsail_forge::FakePullRequestQueryPort::default()),
-                test_preferences(),
-                test_keybindings(),
-            );
+            port,
+            write_port,
+            InMemoryRecents::shared(),
+            test_forge_credentials(),
+            Arc::new(gitsail_forge::FakePullRequestQueryPort::default()),
+            test_preferences(),
+            test_keybindings(),
+        );
         state.open_session(sample_repository());
 
         let (repository, epoch) = state.repository_with_epoch().unwrap();
@@ -3466,7 +3700,11 @@ mod tests {
             let _ = self.gate.lock().unwrap().recv();
             let limit = query.limit.unwrap_or(50) as usize;
             let items: Vec<Commit> = self.history.iter().take(limit).cloned().collect();
-            Ok(Page { items, next_cursor: None, has_more: false })
+            Ok(Page {
+                items,
+                next_cursor: None,
+                has_more: false,
+            })
         }
         fn commit(&self, _repo: &Repository, _hash: &CommitHash) -> Result<Commit, GitSailError> {
             unimplemented!("not exercised by this test")
@@ -3516,8 +3754,8 @@ mod tests {
     }
 
     #[test]
-    fn a_repository_switch_while_a_commit_graph_read_is_in_flight_never_contaminates_the_new_repository()
-    {
+    fn a_repository_switch_while_a_commit_graph_read_is_in_flight_never_contaminates_the_new_repository(
+    ) {
         let (started_tx, started_rx) = mpsc::channel();
         let (gate_tx, gate_rx) = mpsc::channel();
         let port: Arc<dyn gitsail_application::RepositoryReadPort> = Arc::new(BlockingPort {
@@ -3525,16 +3763,17 @@ mod tests {
             started: started_tx,
             gate: Mutex::new(gate_rx),
         });
-        let write_port: Arc<dyn gitsail_application::RepositoryWritePort> = Arc::new(FakeWritePort::new());
+        let write_port: Arc<dyn gitsail_application::RepositoryWritePort> =
+            Arc::new(FakeWritePort::new());
         let state = Arc::new(AppState::new(
-                port,
-                write_port,
-                InMemoryRecents::shared(),
-                test_forge_credentials(),
-                Arc::new(gitsail_forge::FakePullRequestQueryPort::default()),
-                test_preferences(),
-                test_keybindings(),
-            ));
+            port,
+            write_port,
+            InMemoryRecents::shared(),
+            test_forge_credentials(),
+            Arc::new(gitsail_forge::FakePullRequestQueryPort::default()),
+            test_preferences(),
+            test_keybindings(),
+        ));
         state.open_session(sample_repository());
 
         let state_for_thread = Arc::clone(&state);
@@ -3546,14 +3785,18 @@ mod tests {
         // epoch and reached the (blocked) "git log" call — guaranteed to
         // happen only after `repository_with_epoch()` has already run, by
         // program order inside that thread.
-        started_rx.recv().expect("the background read must reach the port call");
+        started_rx
+            .recv()
+            .expect("the background read must reach the port call");
 
         // The repository switch — and its epoch bump — happens while the
         // background read is still blocked "in flight".
         state.open_session(sample_repository());
 
         // Only now let the stale read finish.
-        gate_tx.send(()).expect("the background read must still be waiting on the gate");
+        gate_tx
+            .send(())
+            .expect("the background read must still be waiting on the gate");
 
         let result = handle.join().expect("the background thread must not panic");
 
@@ -3593,9 +3836,13 @@ mod tests {
         impl TempDir {
             fn new(label: &str) -> Self {
                 static COUNTER: AtomicU32 = AtomicU32::new(0);
-                let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+                let nanos = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos();
                 let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-                let path = std::env::temp_dir().join(format!("gitsail-desktop-{label}-{nanos}-{n}"));
+                let path =
+                    std::env::temp_dir().join(format!("gitsail-desktop-{label}-{nanos}-{n}"));
                 std::fs::create_dir_all(&path).expect("create temp dir");
                 Self(path)
             }
@@ -3627,7 +3874,10 @@ mod tests {
         /// EPIC-19/T-182 integration tests.
         fn init_bare_remote(label: &str) -> TempDir {
             let dir = TempDir::new(label);
-            git(dir.path(), &["init", "--quiet", "--bare", "--initial-branch=main"]);
+            git(
+                dir.path(),
+                &["init", "--quiet", "--bare", "--initial-branch=main"],
+            );
             dir
         }
 
@@ -3635,7 +3885,13 @@ mod tests {
             let dir = TempDir::new(label);
             git(
                 dir.path().parent().unwrap(),
-                &["clone", "--quiet", "--", remote.to_str().unwrap(), dir.path().to_str().unwrap()],
+                &[
+                    "clone",
+                    "--quiet",
+                    "--",
+                    remote.to_str().unwrap(),
+                    dir.path().to_str().unwrap(),
+                ],
             );
             git(dir.path(), &["config", "user.name", "Test User"]);
             git(dir.path(), &["config", "user.email", "test@example.com"]);
@@ -3736,7 +3992,10 @@ mod tests {
             let other_dir = clone_repo(remote_dir.path(), "fetch-other");
             std::fs::write(other_dir.path().join("new.txt"), "content\n").unwrap();
             git(other_dir.path(), &["add", "new.txt"]);
-            git(other_dir.path(), &["commit", "--quiet", "-m", "advance remote"]);
+            git(
+                other_dir.path(),
+                &["commit", "--quiet", "-m", "advance remote"],
+            );
             git(other_dir.path(), &["push", "--quiet", "origin", "main"]);
             let advanced_head = head(other_dir.path());
 
@@ -3752,7 +4011,11 @@ mod tests {
                 advanced_head,
                 "fetch must update the remote-tracking ref to the new commit"
             );
-            assert_eq!(head(local_dir.path()), before, "fetch must never touch the working tree/HEAD");
+            assert_eq!(
+                head(local_dir.path()),
+                before,
+                "fetch must never touch the working tree/HEAD"
+            );
         }
 
         #[test]
@@ -3795,7 +4058,9 @@ mod tests {
             assert_eq!(result.branch, "main");
             assert_eq!(
                 result.outcome,
-                PullOutcomeDto::FastForwarded { new_head: advanced_head.clone() }
+                PullOutcomeDto::FastForwarded {
+                    new_head: advanced_head.clone()
+                }
             );
             assert_eq!(
                 head(behind_dir.path()),
@@ -3854,7 +4119,10 @@ mod tests {
             let other_dir = clone_repo(remote_dir.path(), "push-reject-other");
             std::fs::write(other_dir.path().join("other.txt"), "content\n").unwrap();
             git(other_dir.path(), &["add", "other.txt"]);
-            git(other_dir.path(), &["commit", "--quiet", "-m", "other's commit"]);
+            git(
+                other_dir.path(),
+                &["commit", "--quiet", "-m", "other's commit"],
+            );
             git(other_dir.path(), &["push", "--quiet", "origin", "main"]);
             let remote_head_before = remote_branch_head(remote_dir.path(), "main");
 
@@ -3862,7 +4130,10 @@ mod tests {
             // base — pushing now would be a non-fast-forward.
             std::fs::write(seed_dir.path().join("mine.txt"), "content\n").unwrap();
             git(seed_dir.path(), &["add", "mine.txt"]);
-            git(seed_dir.path(), &["commit", "--quiet", "-m", "my divergent commit"]);
+            git(
+                seed_dir.path(),
+                &["commit", "--quiet", "-m", "my divergent commit"],
+            );
 
             let state = real_app_state();
             open_repository_impl(&state, seed_dir.path().to_str().unwrap()).unwrap();
@@ -3894,9 +4165,13 @@ mod tests {
         impl TempDir {
             fn new(label: &str) -> Self {
                 static COUNTER: AtomicU32 = AtomicU32::new(0);
-                let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+                let nanos = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos();
                 let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-                let path = std::env::temp_dir().join(format!("gitsail-desktop-merge-{label}-{nanos}-{n}"));
+                let path =
+                    std::env::temp_dir().join(format!("gitsail-desktop-merge-{label}-{nanos}-{n}"));
                 std::fs::create_dir_all(&path).expect("create temp dir");
                 Self(path)
             }
@@ -4023,8 +4298,14 @@ mod tests {
 
             // T-232 criterion 2: the base/ours/theirs sides can be inspected.
             let sides = get_conflict_sides_impl(&state, "f.txt").unwrap();
-            assert!(matches!(sides.ours, gitsail_protocol::ConflictSideContentDto::Text { .. }));
-            assert!(matches!(sides.theirs, gitsail_protocol::ConflictSideContentDto::Text { .. }));
+            assert!(matches!(
+                sides.ours,
+                gitsail_protocol::ConflictSideContentDto::Text { .. }
+            ));
+            assert!(matches!(
+                sides.theirs,
+                gitsail_protocol::ConflictSideContentDto::Text { .. }
+            ));
 
             // T-232 criterion 3: resolving is only ever this explicit call —
             // simulates resolving the conflict outside GitSail, then marking
@@ -4041,11 +4322,18 @@ mod tests {
             );
             let merged_head = head(dir.path());
             let parents = ProcessCommand::new("git")
-                .args(["rev-parse", &format!("{merged_head}^1"), &format!("{merged_head}^2")])
+                .args([
+                    "rev-parse",
+                    &format!("{merged_head}^1"),
+                    &format!("{merged_head}^2"),
+                ])
                 .current_dir(dir.path())
                 .output()
                 .unwrap();
-            assert!(parents.status.success(), "HEAD must be a two-parent merge commit");
+            assert!(
+                parents.status.success(),
+                "HEAD must be a two-parent merge commit"
+            );
             assert_eq!(
                 std::fs::read_to_string(dir.path().join("f.txt")).unwrap(),
                 "line1\nRESOLVED\nline3\n"
@@ -4061,11 +4349,17 @@ mod tests {
             git(dir.path(), &["checkout", "-q", "-b", "feature"]);
             std::fs::write(dir.path().join("img.bin"), [0u8, 9, 9, 9]).unwrap();
             git(dir.path(), &["add", "-A"]);
-            git(dir.path(), &["commit", "--quiet", "-m", "feature binary change"]);
+            git(
+                dir.path(),
+                &["commit", "--quiet", "-m", "feature binary change"],
+            );
             git(dir.path(), &["checkout", "-q", "main"]);
             std::fs::write(dir.path().join("img.bin"), [0u8, 5, 5, 5]).unwrap();
             git(dir.path(), &["add", "-A"]);
-            git(dir.path(), &["commit", "--quiet", "-m", "main binary change"]);
+            git(
+                dir.path(),
+                &["commit", "--quiet", "-m", "main binary change"],
+            );
 
             let state = real_app_state();
             open_repository_impl(&state, dir.path().to_str().unwrap()).unwrap();

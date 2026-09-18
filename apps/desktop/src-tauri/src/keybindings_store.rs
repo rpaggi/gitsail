@@ -58,7 +58,10 @@ pub struct JsonFileKeybindingsStore {
 
 impl JsonFileKeybindingsStore {
     pub fn new(file_path: PathBuf) -> Self {
-        Self { file_path, lock: Mutex::new(()) }
+        Self {
+            file_path,
+            lock: Mutex::new(()),
+        }
     }
 
     /// The default file location for this platform (see the module
@@ -70,7 +73,10 @@ impl JsonFileKeybindingsStore {
                 "could not resolve the OS configuration directory",
             )
         })?;
-        Ok(config_dir.join("gitsail").join("desktop").join("keybindings.json"))
+        Ok(config_dir
+            .join("gitsail")
+            .join("desktop")
+            .join("keybindings.json"))
     }
 
     fn read_locked(&self) -> Result<HashMap<String, String>, GitSailError> {
@@ -88,7 +94,9 @@ impl JsonFileKeybindingsStore {
         // than failing the caller (see module doc) — every action simply
         // reverts to its frontend-defined default, recoverable exactly like
         // a corrupted `preferences.json` falls back to `Preferences::default`.
-        Ok(serde_json::from_str::<StoredKeybindings>(&contents).unwrap_or_default().overrides)
+        Ok(serde_json::from_str::<StoredKeybindings>(&contents)
+            .unwrap_or_default()
+            .overrides)
     }
 
     fn write_locked(&self, overrides: &HashMap<String, String>) -> Result<(), GitSailError> {
@@ -98,9 +106,12 @@ impl JsonFileKeybindingsStore {
                     .with_source(err)
             })?;
         }
-        let stored = StoredKeybindings { overrides: overrides.clone() };
+        let stored = StoredKeybindings {
+            overrides: overrides.clone(),
+        };
         let json = serde_json::to_string_pretty(&stored).map_err(|err| {
-            GitSailError::new(ErrorCode::Internal, "failed to serialize keybindings").with_source(err)
+            GitSailError::new(ErrorCode::Internal, "failed to serialize keybindings")
+                .with_source(err)
         })?;
         fs::write(&self.file_path, json).map_err(|err| {
             GitSailError::new(ErrorCode::Internal, "failed to write the keybindings file")
@@ -157,8 +168,10 @@ mod tests {
 
     fn temp_file_path() -> PathBuf {
         let id = COUNTER.fetch_add(1, Ordering::SeqCst);
-        std::env::temp_dir()
-            .join(format!("gitsail-keybindings-test-{}-{id}.json", std::process::id()))
+        std::env::temp_dir().join(format!(
+            "gitsail-keybindings-test-{}-{id}.json",
+            std::process::id()
+        ))
     }
 
     #[test]
@@ -173,10 +186,15 @@ mod tests {
         let path = temp_file_path();
         let store = JsonFileKeybindingsStore::new(path.clone());
 
-        store.set_override("focus-search", Some("Mod+Shift+K")).unwrap();
+        store
+            .set_override("focus-search", Some("Mod+Shift+K"))
+            .unwrap();
         let overrides = store.load().unwrap();
 
-        assert_eq!(overrides.get("focus-search").map(String::as_str), Some("Mod+Shift+K"));
+        assert_eq!(
+            overrides.get("focus-search").map(String::as_str),
+            Some("Mod+Shift+K")
+        );
         let _ = fs::remove_file(&path);
     }
 
@@ -184,7 +202,9 @@ mod tests {
     fn set_override_with_none_clears_a_previously_set_binding() {
         let path = temp_file_path();
         let store = JsonFileKeybindingsStore::new(path.clone());
-        store.set_override("focus-search", Some("Mod+Shift+K")).unwrap();
+        store
+            .set_override("focus-search", Some("Mod+Shift+K"))
+            .unwrap();
 
         store.set_override("focus-search", None).unwrap();
 

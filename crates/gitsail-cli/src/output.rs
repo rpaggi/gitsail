@@ -54,7 +54,9 @@ impl Output {
 fn render_head_state(state: &HeadStateDto) -> String {
     match state {
         HeadStateDto::Attached { branch } => format!("attached to {branch}"),
-        HeadStateDto::Detached { commit } => format!("detached at {}", &commit[..commit.len().min(12)]),
+        HeadStateDto::Detached { commit } => {
+            format!("detached at {}", &commit[..commit.len().min(12)])
+        }
         HeadStateDto::Unborn => "unborn (no commits yet)".to_string(),
     }
 }
@@ -117,7 +119,11 @@ fn status_letter(code: gitsail_protocol::FileStatusCodeDto) -> char {
 /// commit) both build on.
 fn render_commit_block(out: &mut String, commit: &CommitDto) {
     let _ = writeln!(out, "commit {}", commit.hash);
-    let _ = writeln!(out, "Author: {} <{}>", commit.author.name, commit.author.email);
+    let _ = writeln!(
+        out,
+        "Author: {} <{}>",
+        commit.author.name, commit.author.email
+    );
     let _ = writeln!(out, "Date:   {}", commit.author_date.seconds_since_epoch);
     let _ = writeln!(out);
     for line in commit.subject.lines() {

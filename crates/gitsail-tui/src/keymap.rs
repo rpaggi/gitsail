@@ -237,7 +237,11 @@ pub fn action_for(key: KeyEvent, ctx: InputContext) -> Option<Action> {
 /// `Activate`/`Dismiss`), and
 /// `crate::app::tests::a_destructive_reset_still_requires_two_explicit_confirmations`
 /// for the end-to-end proof.
-pub fn resolve_action(key: KeyEvent, ctx: InputContext, bindings: &HashMap<char, Action>) -> Option<Action> {
+pub fn resolve_action(
+    key: KeyEvent,
+    ctx: InputContext,
+    bindings: &HashMap<char, Action>,
+) -> Option<Action> {
     if key.kind != KeyEventKind::Press {
         return None;
     }
@@ -703,6 +707,9 @@ mod tests {
     fn only_key_press_events_produce_actions_through_resolve_action() {
         let mut key = press(KeyCode::Char('q'));
         key.kind = KeyEventKind::Release;
-        assert_eq!(resolve_action(key, InputContext::Normal, &HashMap::new()), None);
+        assert_eq!(
+            resolve_action(key, InputContext::Normal, &HashMap::new()),
+            None
+        );
     }
 }

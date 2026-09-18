@@ -36,8 +36,7 @@ impl TempDir {
             .expect("system clock is after the Unix epoch")
             .as_nanos();
         let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-        let path =
-            std::env::temp_dir().join(format!("gitsail-test-support-{label}-{nanos}-{n}"));
+        let path = std::env::temp_dir().join(format!("gitsail-test-support-{label}-{nanos}-{n}"));
         std::fs::create_dir_all(&path).expect("create temp dir");
         Self(path)
     }
@@ -74,6 +73,9 @@ mod tests {
             assert!(path.is_dir());
             path
         };
-        assert!(!path.exists(), "directory must not survive the TempDir being dropped");
+        assert!(
+            !path.exists(),
+            "directory must not survive the TempDir being dropped"
+        );
     }
 }

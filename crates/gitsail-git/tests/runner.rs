@@ -205,10 +205,7 @@ fn a_preconfigured_credential_helper_supplies_credentials_through_gitsail_proces
     let repo = init_repo_with_credential_helper("credential-helper-success", &helper_path);
 
     let request = ProcessRequest::new(
-        vec![
-            "credential".to_string(),
-            "fill".to_string(),
-        ],
+        vec!["credential".to_string(), "fill".to_string()],
         repo.path().to_path_buf(),
     )
     .with_stdin(b"protocol=https\nhost=example.com\n\n".to_vec());

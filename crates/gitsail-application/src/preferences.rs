@@ -89,14 +89,20 @@ pub struct PreferencesLoadOutcome {
 impl PreferencesLoadOutcome {
     /// The persisted value was read and honored as-is; nothing to report.
     pub fn clean(preferences: Preferences) -> Self {
-        Self { preferences, diagnostic: None }
+        Self {
+            preferences,
+            diagnostic: None,
+        }
     }
 
     /// The persisted value could not be honored (missing/corrupted/
     /// unreadable content); falls back to [`Preferences::default`] and
     /// carries `diagnostic` along for the caller to surface.
     pub fn recovered(diagnostic: GitSailError) -> Self {
-        Self { preferences: Preferences::default(), diagnostic: Some(diagnostic) }
+        Self {
+            preferences: Preferences::default(),
+            diagnostic: Some(diagnostic),
+        }
     }
 }
 
@@ -217,7 +223,9 @@ mod tests {
     #[test]
     fn save_then_load_round_trips_the_preferences() {
         let port: Arc<dyn PreferencesPort> = Arc::new(InMemoryPreferences::new());
-        let saved = Preferences { theme: ThemePreference::Dark };
+        let saved = Preferences {
+            theme: ThemePreference::Dark,
+        };
 
         SavePreferences::new(port.clone()).execute(&saved).unwrap();
         let loaded = LoadPreferences::new(port).execute().unwrap();
@@ -230,10 +238,19 @@ mod tests {
     fn set_theme_preference_persists_only_the_theme_field() {
         let port: Arc<dyn PreferencesPort> = Arc::new(InMemoryPreferences::new());
 
-        let updated = SetThemePreference::new(port.clone()).execute(ThemePreference::Light).unwrap();
+        let updated = SetThemePreference::new(port.clone())
+            .execute(ThemePreference::Light)
+            .unwrap();
 
         assert_eq!(updated.theme, ThemePreference::Light);
-        assert_eq!(LoadPreferences::new(port).execute().unwrap().preferences.theme, ThemePreference::Light);
+        assert_eq!(
+            LoadPreferences::new(port)
+                .execute()
+                .unwrap()
+                .preferences
+                .theme,
+            ThemePreference::Light
+        );
     }
 
     #[test]
@@ -244,6 +261,9 @@ mod tests {
 
         assert_eq!(outcome.preferences, Preferences::default());
         assert!(outcome.diagnostic.is_some());
-        assert_eq!(outcome.diagnostic.unwrap().code(), gitsail_domain::ErrorCode::ParseFailure);
+        assert_eq!(
+            outcome.diagnostic.unwrap().code(),
+            gitsail_domain::ErrorCode::ParseFailure
+        );
     }
 }

@@ -21,7 +21,10 @@ use crate::http::HttpResponse;
 /// the Unix epoch) — passed in, rather than read here, purely so this
 /// function stays a pure, directly testable calculation.
 pub fn retry_after_seconds(response: &HttpResponse, now_unix: u64) -> Option<u64> {
-    if let Some(seconds) = response.header("retry-after").and_then(|v| v.trim().parse::<u64>().ok()) {
+    if let Some(seconds) = response
+        .header("retry-after")
+        .and_then(|v| v.trim().parse::<u64>().ok())
+    {
         return Some(seconds);
     }
     // GitHub-only fallback: primary rate limit reports only a reset
@@ -47,7 +50,11 @@ mod tests {
 
     #[test]
     fn prefers_the_retry_after_header_when_present() {
-        let response = json_response(429, &[("Retry-After", "42"), ("X-RateLimit-Reset", "999999")], "{}");
+        let response = json_response(
+            429,
+            &[("Retry-After", "42"), ("X-RateLimit-Reset", "999999")],
+            "{}",
+        );
         assert_eq!(retry_after_seconds(&response, 1_000_000), Some(42));
     }
 

@@ -130,7 +130,12 @@ impl DeleteBranch {
         Self { port }
     }
 
-    pub fn execute(&self, repo: &Repository, name: &BranchName, force: bool) -> Result<(), GitSailError> {
+    pub fn execute(
+        &self,
+        repo: &Repository,
+        name: &BranchName,
+        force: bool,
+    ) -> Result<(), GitSailError> {
         self.port.delete_branch(repo, name, force)
     }
 }
@@ -431,7 +436,11 @@ impl PreviewPatchApplication {
         Self { port }
     }
 
-    pub fn execute(&self, repo: &Repository, patch_text: &str) -> Result<PatchPreview, GitSailError> {
+    pub fn execute(
+        &self,
+        repo: &Repository,
+        patch_text: &str,
+    ) -> Result<PatchPreview, GitSailError> {
         self.port.preview_patch_application(repo, patch_text)
     }
 }
@@ -447,7 +456,11 @@ impl ApplyPatch {
         Self { port }
     }
 
-    pub fn execute(&self, repo: &Repository, patch_text: &str) -> Result<ApplyPatchResult, GitSailError> {
+    pub fn execute(
+        &self,
+        repo: &Repository,
+        patch_text: &str,
+    ) -> Result<ApplyPatchResult, GitSailError> {
         self.port.apply_patch(repo, patch_text)
     }
 }
@@ -464,7 +477,11 @@ impl Merge {
         Self { port }
     }
 
-    pub fn execute(&self, repo: &Repository, target_revision: &str) -> Result<MergeResult, GitSailError> {
+    pub fn execute(
+        &self,
+        repo: &Repository,
+        target_revision: &str,
+    ) -> Result<MergeResult, GitSailError> {
         self.port.merge(repo, target_revision)
     }
 }
@@ -498,7 +515,12 @@ impl TakeConflictSide {
         Self { port }
     }
 
-    pub fn execute(&self, repo: &Repository, path: &Path, side: ConflictSide) -> Result<(), GitSailError> {
+    pub fn execute(
+        &self,
+        repo: &Repository,
+        path: &Path,
+        side: ConflictSide,
+    ) -> Result<(), GitSailError> {
         self.port.take_conflict_side(repo, path, side)
     }
 }
@@ -547,7 +569,11 @@ impl Rebase {
         Self { port }
     }
 
-    pub fn execute(&self, repo: &Repository, onto_revision: &str) -> Result<RebaseResult, GitSailError> {
+    pub fn execute(
+        &self,
+        repo: &Repository,
+        onto_revision: &str,
+    ) -> Result<RebaseResult, GitSailError> {
         self.port.rebase(repo, onto_revision)
     }
 }
@@ -579,7 +605,11 @@ impl PlanRebase {
         Self { port }
     }
 
-    pub fn execute(&self, repo: &Repository, onto_revision: &str) -> Result<RebasePlan, GitSailError> {
+    pub fn execute(
+        &self,
+        repo: &Repository,
+        onto_revision: &str,
+    ) -> Result<RebasePlan, GitSailError> {
         self.port.plan_rebase(repo, onto_revision)
     }
 }
@@ -595,7 +625,11 @@ impl ExecuteRebasePlan {
         Self { port }
     }
 
-    pub fn execute(&self, repo: &Repository, plan: &RebasePlan) -> Result<RebaseResult, GitSailError> {
+    pub fn execute(
+        &self,
+        repo: &Repository,
+        plan: &RebasePlan,
+    ) -> Result<RebaseResult, GitSailError> {
         self.port.execute_rebase_plan(repo, plan)
     }
 }
@@ -814,7 +848,10 @@ mod tests {
         fn stage_files(&self, _repo: &Repository, paths: &[PathBuf]) -> Result<(), GitSailError> {
             *self.received_stage.lock().unwrap() = Some(paths.to_vec());
             if self.fail {
-                return Err(GitSailError::new(ErrorCode::OperationConflict, "stale status"));
+                return Err(GitSailError::new(
+                    ErrorCode::OperationConflict,
+                    "stale status",
+                ));
             }
             Ok(())
         }
@@ -822,7 +859,10 @@ mod tests {
         fn unstage_files(&self, _repo: &Repository, paths: &[PathBuf]) -> Result<(), GitSailError> {
             *self.received_unstage.lock().unwrap() = Some(paths.to_vec());
             if self.fail {
-                return Err(GitSailError::new(ErrorCode::OperationConflict, "stale status"));
+                return Err(GitSailError::new(
+                    ErrorCode::OperationConflict,
+                    "stale status",
+                ));
             }
             Ok(())
         }
@@ -849,7 +889,10 @@ mod tests {
         ) -> Result<(), GitSailError> {
             *self.received_stage_hunks.lock().unwrap() = Some(selection.to_vec());
             if self.fail {
-                return Err(GitSailError::new(ErrorCode::OperationConflict, "stale diff"));
+                return Err(GitSailError::new(
+                    ErrorCode::OperationConflict,
+                    "stale diff",
+                ));
             }
             Ok(())
         }
@@ -861,12 +904,19 @@ mod tests {
         ) -> Result<(), GitSailError> {
             *self.received_unstage_hunks.lock().unwrap() = Some(selection.to_vec());
             if self.fail {
-                return Err(GitSailError::new(ErrorCode::OperationConflict, "stale diff"));
+                return Err(GitSailError::new(
+                    ErrorCode::OperationConflict,
+                    "stale diff",
+                ));
             }
             Ok(())
         }
 
-        fn switch_branch(&self, _repo: &Repository, target: &BranchName) -> Result<(), GitSailError> {
+        fn switch_branch(
+            &self,
+            _repo: &Repository,
+            target: &BranchName,
+        ) -> Result<(), GitSailError> {
             *self.received_switch_target.lock().unwrap() = Some(target.clone());
             if self.fail {
                 return Err(GitSailError::new(
@@ -916,7 +966,8 @@ mod tests {
             old_name: &BranchName,
             new_name: &BranchName,
         ) -> Result<(), GitSailError> {
-            *self.received_rename_branch.lock().unwrap() = Some((old_name.clone(), new_name.clone()));
+            *self.received_rename_branch.lock().unwrap() =
+                Some((old_name.clone(), new_name.clone()));
             if self.fail {
                 return Err(GitSailError::new(
                     ErrorCode::InvalidRepositoryState,
@@ -949,7 +1000,8 @@ mod tests {
             message: Option<&str>,
             scope: StashScope,
         ) -> Result<Stash, GitSailError> {
-            *self.received_create_stash.lock().unwrap() = Some((message.map(str::to_string), scope));
+            *self.received_create_stash.lock().unwrap() =
+                Some((message.map(str::to_string), scope));
             if self.fail {
                 return Err(GitSailError::new(
                     ErrorCode::InvalidRepositoryState,
@@ -1021,7 +1073,10 @@ mod tests {
         fn delete_tag(&self, _repo: &Repository, name: &str) -> Result<(), GitSailError> {
             *self.received_delete_tag.lock().unwrap() = Some(name.to_string());
             if self.fail {
-                return Err(GitSailError::new(ErrorCode::RepositoryNotFound, "no such tag"));
+                return Err(GitSailError::new(
+                    ErrorCode::RepositoryNotFound,
+                    "no such tag",
+                ));
             }
             Ok(())
         }
@@ -1160,7 +1215,11 @@ mod tests {
             Ok(self.apply_patch_result.clone())
         }
 
-        fn merge(&self, _repo: &Repository, target_revision: &str) -> Result<MergeResult, GitSailError> {
+        fn merge(
+            &self,
+            _repo: &Repository,
+            target_revision: &str,
+        ) -> Result<MergeResult, GitSailError> {
             *self.received_merge.lock().unwrap() = Some(target_revision.to_string());
             if self.fail {
                 return Err(GitSailError::new(
@@ -1171,7 +1230,11 @@ mod tests {
             Ok(self.merge_result.clone())
         }
 
-        fn mark_conflict_resolved(&self, _repo: &Repository, path: &Path) -> Result<(), GitSailError> {
+        fn mark_conflict_resolved(
+            &self,
+            _repo: &Repository,
+            path: &Path,
+        ) -> Result<(), GitSailError> {
             *self.received_mark_conflict_resolved.lock().unwrap() = Some(path.to_path_buf());
             if self.fail {
                 return Err(GitSailError::new(
@@ -1322,9 +1385,7 @@ mod tests {
         let use_case = UnstageHunks::new(port.clone());
         let selection = vec![sample_file_diff()];
 
-        use_case
-            .execute(&sample_repository(), &selection)
-            .unwrap();
+        use_case.execute(&sample_repository(), &selection).unwrap();
 
         assert_eq!(
             *port.received_unstage_hunks.lock().unwrap(),
@@ -1378,7 +1439,11 @@ mod tests {
         let use_case = CreateBranch::new(port);
 
         let err = use_case
-            .execute(&sample_repository(), &BranchName::new("main").unwrap(), None)
+            .execute(
+                &sample_repository(),
+                &BranchName::new("main").unwrap(),
+                None,
+            )
             .unwrap_err();
 
         assert_eq!(err.code(), ErrorCode::InvalidRepositoryState);
@@ -1404,7 +1469,11 @@ mod tests {
         let use_case = DeleteBranch::new(port);
 
         let err = use_case
-            .execute(&sample_repository(), &BranchName::new("feature").unwrap(), false)
+            .execute(
+                &sample_repository(),
+                &BranchName::new("feature").unwrap(),
+                false,
+            )
             .unwrap_err();
 
         assert_eq!(err.code(), ErrorCode::OperationConflict);
@@ -1447,8 +1516,7 @@ mod tests {
     fn amend_commit_delegates_to_port_with_message_and_expected_head() {
         let port = Arc::new(FakeWritePort::new());
         let use_case = AmendCommit::new(port.clone());
-        let expected_head =
-            CommitHash::new("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef").unwrap();
+        let expected_head = CommitHash::new("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef").unwrap();
 
         let hash = use_case
             .execute(&sample_repository(), "amended message", &expected_head)
@@ -1465,8 +1533,7 @@ mod tests {
     fn amend_commit_propagates_a_conflict_when_head_moved_without_a_false_success() {
         let port = Arc::new(FakeWritePort::failing());
         let use_case = AmendCommit::new(port);
-        let expected_head =
-            CommitHash::new("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef").unwrap();
+        let expected_head = CommitHash::new("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef").unwrap();
 
         let err = use_case
             .execute(&sample_repository(), "amended message", &expected_head)
@@ -1539,7 +1606,9 @@ mod tests {
     #[test]
     fn pop_stash_delegates_to_port_and_reports_conflicts_distinctly() {
         let mut port = FakeWritePort::new();
-        port.apply_outcome = StashApplyOutcome { had_conflicts: true };
+        port.apply_outcome = StashApplyOutcome {
+            had_conflicts: true,
+        };
         let port = Arc::new(port);
         let use_case = PopStash::new(port.clone());
         let expected = sample_stash();
@@ -1586,7 +1655,12 @@ mod tests {
         };
 
         use_case
-            .execute(&sample_repository(), "v1.0", Some(&target), annotation.clone())
+            .execute(
+                &sample_repository(),
+                "v1.0",
+                Some(&target),
+                annotation.clone(),
+            )
             .unwrap();
 
         assert_eq!(
@@ -1601,7 +1675,12 @@ mod tests {
         let use_case = CreateTag::new(port);
 
         let err = use_case
-            .execute(&sample_repository(), "v1.0", None, TagAnnotation::Lightweight)
+            .execute(
+                &sample_repository(),
+                "v1.0",
+                None,
+                TagAnnotation::Lightweight,
+            )
             .unwrap_err();
 
         assert_eq!(err.code(), ErrorCode::InvalidRepositoryState);
@@ -1706,7 +1785,10 @@ mod tests {
             .execute(&sample_repository(), "origin", &CancellationToken::new())
             .unwrap();
 
-        assert_eq!(*port.received_fetch.lock().unwrap(), Some("origin".to_string()));
+        assert_eq!(
+            *port.received_fetch.lock().unwrap(),
+            Some("origin".to_string())
+        );
     }
 
     #[test]
@@ -1926,7 +2008,10 @@ mod tests {
         };
         let use_case = Merge::new(Arc::new(fake));
         let commit_result = use_case.execute(&sample_repository(), "feature/x").unwrap();
-        assert!(matches!(commit_result, MergeResult::MergeCommitCreated { .. }));
+        assert!(matches!(
+            commit_result,
+            MergeResult::MergeCommitCreated { .. }
+        ));
 
         let mut fake = FakeWritePort::new();
         fake.merge_result = MergeResult::Conflict {
@@ -2028,7 +2113,11 @@ mod tests {
         let use_case = TakeConflictSide::new(port.clone());
 
         use_case
-            .execute(&sample_repository(), Path::new("image.png"), ConflictSide::Theirs)
+            .execute(
+                &sample_repository(),
+                Path::new("image.png"),
+                ConflictSide::Theirs,
+            )
             .unwrap();
 
         assert_eq!(
@@ -2043,7 +2132,11 @@ mod tests {
         let use_case = TakeConflictSide::new(port);
 
         let err = use_case
-            .execute(&sample_repository(), Path::new("image.png"), ConflictSide::Ours)
+            .execute(
+                &sample_repository(),
+                Path::new("image.png"),
+                ConflictSide::Ours,
+            )
             .unwrap_err();
 
         assert_eq!(err.code(), ErrorCode::InvalidRepositoryState);
@@ -2107,19 +2200,39 @@ mod tests {
         fn stage_files(&self, _repo: &Repository, _paths: &[PathBuf]) -> Result<(), GitSailError> {
             unimplemented!("not exercised by these tests")
         }
-        fn unstage_files(&self, _repo: &Repository, _paths: &[PathBuf]) -> Result<(), GitSailError> {
+        fn unstage_files(
+            &self,
+            _repo: &Repository,
+            _paths: &[PathBuf],
+        ) -> Result<(), GitSailError> {
             unimplemented!("not exercised by these tests")
         }
-        fn create_commit(&self, _repo: &Repository, _message: &str) -> Result<CommitHash, GitSailError> {
+        fn create_commit(
+            &self,
+            _repo: &Repository,
+            _message: &str,
+        ) -> Result<CommitHash, GitSailError> {
             unimplemented!("not exercised by these tests")
         }
-        fn stage_hunks(&self, _repo: &Repository, _selection: &[FileDiff]) -> Result<(), GitSailError> {
+        fn stage_hunks(
+            &self,
+            _repo: &Repository,
+            _selection: &[FileDiff],
+        ) -> Result<(), GitSailError> {
             unimplemented!("not exercised by these tests")
         }
-        fn unstage_hunks(&self, _repo: &Repository, _selection: &[FileDiff]) -> Result<(), GitSailError> {
+        fn unstage_hunks(
+            &self,
+            _repo: &Repository,
+            _selection: &[FileDiff],
+        ) -> Result<(), GitSailError> {
             unimplemented!("not exercised by these tests")
         }
-        fn switch_branch(&self, _repo: &Repository, _target: &BranchName) -> Result<(), GitSailError> {
+        fn switch_branch(
+            &self,
+            _repo: &Repository,
+            _target: &BranchName,
+        ) -> Result<(), GitSailError> {
             unimplemented!("not exercised by these tests")
         }
         fn create_branch(
@@ -2155,10 +2268,17 @@ mod tests {
             unimplemented!("not exercised by these tests")
         }
 
-        fn rebase(&self, _repo: &Repository, onto_revision: &str) -> Result<RebaseResult, GitSailError> {
+        fn rebase(
+            &self,
+            _repo: &Repository,
+            onto_revision: &str,
+        ) -> Result<RebaseResult, GitSailError> {
             *self.received_rebase_onto.lock().unwrap() = Some(onto_revision.to_string());
             if self.fail {
-                return Err(GitSailError::new(ErrorCode::OperationConflict, "dirty working tree"));
+                return Err(GitSailError::new(
+                    ErrorCode::OperationConflict,
+                    "dirty working tree",
+                ));
             }
             Ok(self.rebase_result.clone())
         }
@@ -2174,10 +2294,17 @@ mod tests {
             Ok(())
         }
 
-        fn plan_rebase(&self, _repo: &Repository, onto_revision: &str) -> Result<RebasePlan, GitSailError> {
+        fn plan_rebase(
+            &self,
+            _repo: &Repository,
+            onto_revision: &str,
+        ) -> Result<RebasePlan, GitSailError> {
             *self.received_plan_onto.lock().unwrap() = Some(onto_revision.to_string());
             if self.fail {
-                return Err(GitSailError::new(ErrorCode::RepositoryNotFound, "bad revision"));
+                return Err(GitSailError::new(
+                    ErrorCode::RepositoryNotFound,
+                    "bad revision",
+                ));
             }
             Ok(self.plan.clone())
         }
@@ -2189,7 +2316,10 @@ mod tests {
         ) -> Result<RebaseResult, GitSailError> {
             *self.received_execute_plan.lock().unwrap() = Some(plan.clone());
             if self.fail {
-                return Err(GitSailError::new(ErrorCode::OperationConflict, "plan is stale"));
+                return Err(GitSailError::new(
+                    ErrorCode::OperationConflict,
+                    "plan is stale",
+                ));
             }
             Ok(self.execute_result.clone())
         }
@@ -2202,7 +2332,10 @@ mod tests {
 
         let result = use_case.execute(&sample_repository(), "main").unwrap();
 
-        assert_eq!(*port.received_rebase_onto.lock().unwrap(), Some("main".to_string()));
+        assert_eq!(
+            *port.received_rebase_onto.lock().unwrap(),
+            Some("main".to_string())
+        );
         assert_eq!(result, port.rebase_result);
     }
 

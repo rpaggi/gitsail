@@ -38,8 +38,7 @@ impl KeyringForgeCredentialStore {
     }
 
     fn entry(&self, account: &ForgeAccountId) -> Result<Entry, GitSailError> {
-        Entry::new(SERVICE, &account.storage_key())
-            .map_err(|err| store_error(account, "open", err))
+        Entry::new(SERVICE, &account.storage_key()).map_err(|err| store_error(account, "open", err))
     }
 }
 
@@ -119,7 +118,11 @@ mod tests {
         // actually happens by checking a sentinel `key=value` fragment
         // smuggled in through the one caller-adjacent string this
         // function does format in (the action label) is scrubbed.
-        let err = store_error(&account, "connect token=sentinel-fake-abc123", keyring::Error::NoEntry);
+        let err = store_error(
+            &account,
+            "connect token=sentinel-fake-abc123",
+            keyring::Error::NoEntry,
+        );
         assert!(!err.message().contains("sentinel-fake-abc123"));
     }
 }

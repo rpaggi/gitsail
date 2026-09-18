@@ -78,7 +78,12 @@ impl BlameCache {
     /// since started — in which case it is discarded rather than applied
     /// (US-034 criterion 2: "resposta atrasada não decora outro arquivo").
     /// Returns whether it was stored.
-    pub fn complete_query(&self, ticket: BlameQueryTicket, key: BlameCacheKey, blame: Blame) -> bool {
+    pub fn complete_query(
+        &self,
+        ticket: BlameQueryTicket,
+        key: BlameCacheKey,
+        blame: Blame,
+    ) -> bool {
         if ticket.generation != *self.generation.lock().unwrap() {
             return false;
         }
@@ -169,7 +174,8 @@ mod tests {
         let fresh_ticket = cache.begin_query();
         cache.complete_query(fresh_ticket, fresh_key.clone(), sample_blame("b-content"));
 
-        let stored = cache.complete_query(stale_ticket, stale_key.clone(), sample_blame("a-content"));
+        let stored =
+            cache.complete_query(stale_ticket, stale_key.clone(), sample_blame("a-content"));
 
         assert!(!stored, "a stale ticket must not populate the cache");
         assert!(cache.get(&stale_key).is_none());

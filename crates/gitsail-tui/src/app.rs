@@ -2081,13 +2081,17 @@ impl App {
                 "no repository is open yet",
             ));
         };
-        let current_branch = session.repository().current_branch.as_ref().ok_or_else(|| {
-            GitSailError::new(
-                ErrorCode::InvalidRepositoryState,
-                "no branch is currently checked out",
-            )
-            .with_remediation("check out a branch before syncing with a remote")
-        })?;
+        let current_branch = session
+            .repository()
+            .current_branch
+            .as_ref()
+            .ok_or_else(|| {
+                GitSailError::new(
+                    ErrorCode::InvalidRepositoryState,
+                    "no branch is currently checked out",
+                )
+                .with_remediation("check out a branch before syncing with a remote")
+            })?;
 
         if let Some(branch) = self
             .branches
@@ -3088,7 +3092,11 @@ impl App {
 
     /// Handles [`crate::message::Message::RemotesLoaded`] (US-050), matching
     /// [`Self::on_tags_loaded`].
-    pub fn on_remotes_loaded(&mut self, generation: u64, result: Result<Vec<Remote>, GitSailError>) {
+    pub fn on_remotes_loaded(
+        &mut self,
+        generation: u64,
+        result: Result<Vec<Remote>, GitSailError>,
+    ) {
         let Some(session) = self.session.as_ref() else {
             return;
         };
@@ -3122,7 +3130,11 @@ impl App {
 
     /// Handles [`crate::message::Message::ReflogLoaded`] (T-241/US-089),
     /// matching [`Self::on_tags_loaded`]'s staleness/failure discipline.
-    pub fn on_reflog_loaded(&mut self, generation: u64, result: Result<Vec<ReflogEntry>, GitSailError>) {
+    pub fn on_reflog_loaded(
+        &mut self,
+        generation: u64,
+        result: Result<Vec<ReflogEntry>, GitSailError>,
+    ) {
         let Some(session) = self.session.as_ref() else {
             return;
         };
@@ -3139,7 +3151,11 @@ impl App {
     /// criterion 2), discarding a result for an entry no longer under the
     /// cursor — mirrors [`Self::on_conflict_sides_loaded`]'s own hash/path
     /// tagged staleness discipline.
-    pub fn on_reflog_commit_loaded(&mut self, hash: CommitHash, result: Result<Commit, GitSailError>) {
+    pub fn on_reflog_commit_loaded(
+        &mut self,
+        hash: CommitHash,
+        result: Result<Commit, GitSailError>,
+    ) {
         if !self.reflog_details_open {
             return;
         }
@@ -3207,7 +3223,8 @@ impl App {
                 self.amend_message = None;
                 self.amend_error = None;
                 let mut commands = self.refresh_commands_for(RefreshReason::AfterMutation);
-                let filter = parse_commit_search(self.active_commit_filter.as_deref().unwrap_or(""));
+                let filter =
+                    parse_commit_search(self.active_commit_filter.as_deref().unwrap_or(""));
                 commands.extend(self.restart_commit_graph(filter));
                 commands
             }
@@ -3291,7 +3308,10 @@ impl App {
     /// [`RebaseResult::Conflict`]. A refused rebase (e.g. another operation
     /// already in progress, or a dirty working tree) moves to `Failed` with
     /// its message, exactly like [`Self::on_merge_finished`].
-    pub fn on_rebase_finished(&mut self, result: Result<RebaseResult, GitSailError>) -> Vec<Command> {
+    pub fn on_rebase_finished(
+        &mut self,
+        result: Result<RebaseResult, GitSailError>,
+    ) -> Vec<Command> {
         match result {
             Ok(outcome) => {
                 self.operation.succeed();
@@ -3332,7 +3352,10 @@ impl App {
 
     /// Handles [`crate::message::Message::RevertFinished`] (T-239/US-087),
     /// mirroring [`Self::on_cherry_pick_finished`] exactly.
-    pub fn on_revert_finished(&mut self, result: Result<RevertResult, GitSailError>) -> Vec<Command> {
+    pub fn on_revert_finished(
+        &mut self,
+        result: Result<RevertResult, GitSailError>,
+    ) -> Vec<Command> {
         match result {
             Ok(outcome) => {
                 self.operation.succeed();
@@ -3567,12 +3590,18 @@ impl App {
     /// criterion 2: malformed, out-of-repository path, or stale context) —
     /// or a hard failure building it at all — is reported as a clear
     /// banner and never reaches confirmation.
-    pub fn on_patch_previewed(&mut self, result: Result<PatchPreview, GitSailError>, patch_text: String) {
+    pub fn on_patch_previewed(
+        &mut self,
+        result: Result<PatchPreview, GitSailError>,
+        patch_text: String,
+    ) {
         match result {
             Ok(preview) if preview.supported => {
                 let affected_file_count = preview.affected_files.len();
                 self.pending_patch_text = Some(patch_text);
-                self.operation.begin(OperationKind::ApplyPatch { affected_file_count });
+                self.operation.begin(OperationKind::ApplyPatch {
+                    affected_file_count,
+                });
             }
             Ok(preview) => {
                 self.patch_apply_outcome = Some(PatchApplyOutcome::Rejected {
@@ -3594,7 +3623,10 @@ impl App {
     /// refreshes; failure — e.g. the file changed again between preview and
     /// confirmation — moves to [`OperationState::Failed`] and reports a
     /// banner, never claiming a rollback Git does not actually guarantee.
-    pub fn on_patch_applied(&mut self, result: Result<ApplyPatchResult, GitSailError>) -> Vec<Command> {
+    pub fn on_patch_applied(
+        &mut self,
+        result: Result<ApplyPatchResult, GitSailError>,
+    ) -> Vec<Command> {
         match result {
             Ok(applied) => {
                 self.operation.succeed();
@@ -4704,7 +4736,10 @@ mod tests {
 
         let saved = std::fs::read_to_string(&path)
             .unwrap_or_else(|e| panic!("expected the fallback file to exist at {path:?}: {e}"));
-        assert_eq!(saved, "--- a/a.txt\n+++ b/a.txt\n@@ -1,1 +1,1 @@\n-old\n+new\n");
+        assert_eq!(
+            saved,
+            "--- a/a.txt\n+++ b/a.txt\n@@ -1,1 +1,1 @@\n-old\n+new\n"
+        );
         std::fs::remove_file(&path).expect("clean up the fallback file created by this test");
     }
 
@@ -4884,7 +4919,10 @@ mod tests {
         let (mut app, _port) = new_app_with_clipboard(clipboard);
         app_with_diff_focused(&mut app, modified_a_txt_diff());
 
-        app.on_patch_previewed(Ok(sample_patch_preview(false)), "the patch text".to_string());
+        app.on_patch_previewed(
+            Ok(sample_patch_preview(false)),
+            "the patch text".to_string(),
+        );
 
         assert!(
             app.operation().is_idle(),
@@ -5015,7 +5053,10 @@ mod tests {
         );
 
         let commands = app.update(Action::RequestFetch);
-        assert!(commands.is_empty(), "an ambiguous remote must never be guessed");
+        assert!(
+            commands.is_empty(),
+            "an ambiguous remote must never be guessed"
+        );
         assert!(app.sync_error().is_some());
     }
 
@@ -5314,7 +5355,9 @@ mod tests {
     // EPIC-16/T-231..T-233: merge, conflicts, continue/abort.
     // -----------------------------------------------------------------
 
-    fn sample_merge_operation(conflicted: Vec<gitsail_domain::ConflictedFile>) -> InProgressOperation {
+    fn sample_merge_operation(
+        conflicted: Vec<gitsail_domain::ConflictedFile>,
+    ) -> InProgressOperation {
         InProgressOperation::Merge(gitsail_domain::MergeOperation {
             heads: vec![CommitHash::new("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef").unwrap()],
             conflicted_files: conflicted,
@@ -5460,7 +5503,10 @@ mod tests {
         app.on_repository_opened(Ok(sample_repository()));
         let generation = app.session().unwrap().generation();
 
-        let files = vec![sample_conflicted_file("a.txt"), sample_conflicted_file("b.txt")];
+        let files = vec![
+            sample_conflicted_file("a.txt"),
+            sample_conflicted_file("b.txt"),
+        ];
         app.on_in_progress_operation_loaded(generation, Ok(sample_merge_operation(files)));
         app.toggle_conflicts_panel();
         app.move_cursor(1); // cursor at index 1 ("b.txt")
@@ -5498,7 +5544,9 @@ mod tests {
         let generation = app.session().unwrap().generation();
         app.on_in_progress_operation_loaded(
             generation,
-            Ok(sample_merge_operation(vec![sample_conflicted_file("a.txt")])),
+            Ok(sample_merge_operation(vec![sample_conflicted_file(
+                "a.txt",
+            )])),
         );
 
         app.toggle_conflicts_panel();
@@ -5538,7 +5586,9 @@ mod tests {
         let generation = app.session().unwrap().generation();
         app.on_in_progress_operation_loaded(
             generation,
-            Ok(sample_merge_operation(vec![sample_conflicted_file("img.bin")])),
+            Ok(sample_merge_operation(vec![sample_conflicted_file(
+                "img.bin",
+            )])),
         );
         app.toggle_conflicts_panel();
 
@@ -5560,7 +5610,9 @@ mod tests {
         let generation = app.session().unwrap().generation();
         app.on_in_progress_operation_loaded(
             generation,
-            Ok(sample_merge_operation(vec![sample_conflicted_file("a.txt")])),
+            Ok(sample_merge_operation(vec![sample_conflicted_file(
+                "a.txt",
+            )])),
         );
         app.on_conflict_sides_loaded(
             PathBuf::from("a.txt"),
@@ -5604,10 +5656,12 @@ mod tests {
         // `gitsail-git`'s own real detection).
         app.on_in_progress_operation_loaded(
             generation,
-            Ok(InProgressOperation::BisectRun(gitsail_domain::BisectOperation {
-                conflicted_files: vec![],
-                capabilities: vec![OperationCapability::Skip, OperationCapability::Abort],
-            })),
+            Ok(InProgressOperation::BisectRun(
+                gitsail_domain::BisectOperation {
+                    conflicted_files: vec![],
+                    capabilities: vec![OperationCapability::Skip, OperationCapability::Abort],
+                },
+            )),
         );
 
         app.request_continue_operation();
@@ -5623,10 +5677,7 @@ mod tests {
         let (mut app, _port) = new_app();
         app.on_repository_opened(Ok(sample_repository()));
         let generation = app.session().unwrap().generation();
-        app.on_in_progress_operation_loaded(
-            generation,
-            Ok(sample_merge_operation(vec![])),
-        );
+        app.on_in_progress_operation_loaded(generation, Ok(sample_merge_operation(vec![])));
 
         app.request_continue_operation();
         assert!(matches!(
@@ -5634,7 +5685,10 @@ mod tests {
             OperationState::Confirming(OperationKind::ContinueOperation)
         ));
         let commands = app.update(Action::Activate);
-        assert!(matches!(commands.as_slice(), [Command::ContinueOperation(_)]));
+        assert!(matches!(
+            commands.as_slice(),
+            [Command::ContinueOperation(_)]
+        ));
 
         app.operation.cancel();
         app.request_abort_operation();
@@ -5804,7 +5858,10 @@ mod tests {
             "the chooser hands off to the generic confirmation prompt"
         );
         match app.operation() {
-            OperationState::Confirming(OperationKind::Reset { mode: ResetMode::Hard, .. }) => {}
+            OperationState::Confirming(OperationKind::Reset {
+                mode: ResetMode::Hard,
+                ..
+            }) => {}
             other => panic!("expected Confirming(Reset {{ Hard }}), got {other:?}"),
         }
 
@@ -5836,7 +5893,10 @@ mod tests {
         app.update(Action::Activate);
         assert!(matches!(
             app.operation(),
-            OperationState::Confirming(OperationKind::Reset { mode: ResetMode::Hard, .. })
+            OperationState::Confirming(OperationKind::Reset {
+                mode: ResetMode::Hard,
+                ..
+            })
         ));
 
         app.update(Action::Dismiss);
@@ -5978,8 +6038,7 @@ mod tests {
         open_references_on_reflog(&mut app);
         app.update(Action::Activate);
 
-        let abandoned_hash =
-            CommitHash::new("cafecafecafecafecafecafecafecafecafecafe").unwrap();
+        let abandoned_hash = CommitHash::new("cafecafecafecafecafecafecafecafecafecafe").unwrap();
         app.on_reflog_commit_loaded(abandoned_hash, Ok(sample_commit_for_details()));
 
         assert!(

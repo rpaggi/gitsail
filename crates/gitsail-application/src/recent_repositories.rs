@@ -225,7 +225,11 @@ mod tests {
             "re-touching a path must move it to the front rather than duplicating it"
         );
         assert_eq!(recents.entries()[0].last_opened_unix_seconds, 300);
-        assert_eq!(recents.entries().len(), 2, "no duplicate entry for the same path");
+        assert_eq!(
+            recents.entries().len(),
+            2,
+            "no duplicate entry for the same path"
+        );
     }
 
     #[test]
@@ -238,9 +242,16 @@ mod tests {
 
         recents.touch(PathBuf::from("/repo-new"), 1_000);
 
-        assert_eq!(recents.entries().len(), MAX_RECENT_REPOSITORIES, "the list must never grow past the cap");
+        assert_eq!(
+            recents.entries().len(),
+            MAX_RECENT_REPOSITORIES,
+            "the list must never grow past the cap"
+        );
         assert!(
-            recents.entries().iter().all(|e| e.path != Path::new("/repo-0")),
+            recents
+                .entries()
+                .iter()
+                .all(|e| e.path != Path::new("/repo-0")),
             "the least-recently-opened entry must be the one evicted"
         );
         assert_eq!(recents.entries()[0].path, Path::new("/repo-new"));
@@ -267,9 +278,18 @@ mod tests {
         // Given out of (recency) order and with a duplicate path, as a
         // hand-edited or older-schema file might contain.
         let stored = vec![
-            RecentRepositoryEntry { path: PathBuf::from("/repo-a"), last_opened_unix_seconds: 100 },
-            RecentRepositoryEntry { path: PathBuf::from("/repo-b"), last_opened_unix_seconds: 300 },
-            RecentRepositoryEntry { path: PathBuf::from("/repo-a"), last_opened_unix_seconds: 200 },
+            RecentRepositoryEntry {
+                path: PathBuf::from("/repo-a"),
+                last_opened_unix_seconds: 100,
+            },
+            RecentRepositoryEntry {
+                path: PathBuf::from("/repo-b"),
+                last_opened_unix_seconds: 300,
+            },
+            RecentRepositoryEntry {
+                path: PathBuf::from("/repo-a"),
+                last_opened_unix_seconds: 200,
+            },
         ];
 
         let recents = RecentRepositories::from_entries(stored);
@@ -285,11 +305,13 @@ mod tests {
     #[test]
     fn list_use_case_delegates_to_the_port() {
         let store = Arc::new(FakeStore::new());
-        store.save(&{
-            let mut r = RecentRepositories::new();
-            r.touch(PathBuf::from("/repo"), 1);
-            r
-        }).unwrap();
+        store
+            .save(&{
+                let mut r = RecentRepositories::new();
+                r.touch(PathBuf::from("/repo"), 1);
+                r
+            })
+            .unwrap();
 
         let recents = ListRecentRepositories::new(store).execute().unwrap();
 
@@ -300,7 +322,9 @@ mod tests {
     fn list_use_case_propagates_a_load_failure() {
         let mut store = FakeStore::new();
         store.fail_load = true;
-        let err = ListRecentRepositories::new(Arc::new(store)).execute().unwrap_err();
+        let err = ListRecentRepositories::new(Arc::new(store))
+            .execute()
+            .unwrap_err();
         assert_eq!(err.code(), ErrorCode::Internal);
     }
 

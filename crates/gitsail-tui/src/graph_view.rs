@@ -211,10 +211,7 @@ mod tests {
         let backslash = '\\';
         assert_eq!(
             line.text,
-            format!(
-                "◆ {backslash} {} merge branch (continues…)",
-                short(0xAA)
-            )
+            format!("◆ {backslash} {} merge branch (continues…)", short(0xAA))
         );
     }
 
@@ -247,6 +244,9 @@ mod tests {
         assert_eq!(lines.len(), 2);
         assert_eq!(lines[0].commit, c2.hash);
         assert_eq!(lines[1].commit, c1.hash);
-        assert!(!lines[1].text.contains("continues"), "the parent resolved within the same page");
+        assert!(
+            !lines[1].text.contains("continues"),
+            "the parent resolved within the same page"
+        );
     }
 }

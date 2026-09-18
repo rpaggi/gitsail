@@ -487,7 +487,9 @@ impl RebasePlan {
                             ErrorCode::InvalidRepositoryState,
                             "a reword entry requires a non-empty message_override",
                         )
-                        .with_remediation("provide the new commit message before executing this plan"));
+                        .with_remediation(
+                            "provide the new commit message before executing this plan",
+                        ));
                     }
                 }
                 RebaseAction::Pick | RebaseAction::Drop => {
@@ -1053,7 +1055,11 @@ pub trait RepositoryWritePort: Send + Sync {
     /// read: building this never touches the working tree, the index, or
     /// any ref. See [`RebasePlan`] for the exact contract
     /// [`Self::execute_rebase_plan`] revalidates against.
-    fn plan_rebase(&self, repo: &Repository, onto_revision: &str) -> Result<RebasePlan, GitSailError> {
+    fn plan_rebase(
+        &self,
+        repo: &Repository,
+        onto_revision: &str,
+    ) -> Result<RebasePlan, GitSailError> {
         let _ = (repo, onto_revision);
         Err(unsupported("plan_rebase"))
     }
@@ -1272,9 +1278,17 @@ mod tests {
     /// Git's own default combining, never a supplied override.
     #[test]
     fn a_message_override_on_a_non_reword_action_is_rejected() {
-        for action in [RebaseAction::Pick, RebaseAction::Squash, RebaseAction::Fixup] {
+        for action in [
+            RebaseAction::Pick,
+            RebaseAction::Squash,
+            RebaseAction::Fixup,
+        ] {
             let mut entries = vec![pick(1), pick(2)];
-            let index = if matches!(action, RebaseAction::Pick) { 0 } else { 1 };
+            let index = if matches!(action, RebaseAction::Pick) {
+                0
+            } else {
+                1
+            };
             entries[index].action = action;
             entries[index].message_override = Some("should not be here".to_string());
             let plan = sample_plan(entries);

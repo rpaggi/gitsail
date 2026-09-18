@@ -81,7 +81,10 @@ mod tests {
 
     #[test]
     fn no_recognized_remote_yields_none_not_an_error() {
-        let remotes = vec![remote("origin", "https://internal.example.com/team/repo.git")];
+        let remotes = vec![remote(
+            "origin",
+            "https://internal.example.com/team/repo.git",
+        )];
         assert!(pick_forge_remote(&remotes).is_none());
         assert!(GetForgeLink::execute(&remotes, ForgePath::Repository).is_none());
     }

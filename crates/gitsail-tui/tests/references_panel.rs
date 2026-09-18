@@ -29,7 +29,9 @@ fn open_and_load(app: &mut App, dir: &std::path::Path) {
             _ => None,
         })
         .expect("RefreshStatus command");
-    let status = GetRepositoryStatus::new(read.clone()).execute(&repo).unwrap();
+    let status = GetRepositoryStatus::new(read.clone())
+        .execute(&repo)
+        .unwrap();
     app.on_status_refreshed(ticket, Ok(status));
 
     for command in commands {
@@ -80,7 +82,10 @@ fn a_repository_with_no_tags_remotes_or_stash_shows_an_explicit_empty_state_for_
 
     assert_eq!(app.reference_view(), ReferenceView::Tags);
     let text = render(&app);
-    assert!(text.contains("No tags."), "missing empty tags state:\n{text}");
+    assert!(
+        text.contains("No tags."),
+        "missing empty tags state:\n{text}"
+    );
 
     app.update(Action::CycleReferenceView);
     assert_eq!(app.reference_view(), ReferenceView::Remotes);
@@ -136,14 +141,18 @@ fn a_repository_with_tags_remotes_and_stash_lists_and_navigates_all_three() {
     // -- Tags --------------------------------------------------------
     assert_eq!(app.tags().len(), 2);
     let text = render(&app);
-    assert!(text.contains("v1.0") && text.contains("v2.0"), "tags not listed:\n{text}");
+    assert!(
+        text.contains("v1.0") && text.contains("v2.0"),
+        "tags not listed:\n{text}"
+    );
 
     app.update(Action::MoveDown); // v1.0 -> v2.0 (order not asserted; just move once)
     app.update(Action::Activate);
     assert!(app.reference_details_open());
     let details = render(&app);
     assert!(
-        details.contains("tag") && (details.contains("lightweight") || details.contains("annotated")),
+        details.contains("tag")
+            && (details.contains("lightweight") || details.contains("annotated")),
         "tag details must show its kind:\n{details}"
     );
     app.update(Action::Dismiss);
@@ -202,7 +211,10 @@ fn a_repository_with_tags_remotes_and_stash_lists_and_navigates_all_three() {
     // (a real layout constraint, not a bug); "stash@{0}" itself must still
     // be visible in the list regardless.
     let text = render(&app);
-    assert!(text.contains("stash@{0}"), "stash entry not listed:\n{text}");
+    assert!(
+        text.contains("stash@{0}"),
+        "stash entry not listed:\n{text}"
+    );
 
     app.update(Action::Activate);
     assert!(app.reference_details_open());
@@ -226,7 +238,10 @@ fn a_repository_with_tags_remotes_and_stash_lists_and_navigates_all_three() {
     assert_eq!(app.reflog().len(), 2);
     assert!(app.reflog().iter().all(|entry| entry.is_available()));
     let text = render(&app);
-    assert!(text.contains("HEAD@{0}"), "reflog entry not listed:\n{text}");
+    assert!(
+        text.contains("HEAD@{0}"),
+        "reflog entry not listed:\n{text}"
+    );
 
     // Selecting it dispatches a real `GetCommit` read (US-089 criterion 2:
     // reuses the existing use case, never a parallel implementation) —
@@ -234,7 +249,11 @@ fn a_repository_with_tags_remotes_and_stash_lists_and_navigates_all_three() {
     // `Command`, unlike Tags/Remotes/Stash above.
     let commands = app.update(Action::Activate);
     assert!(app.reflog_details_open());
-    assert_eq!(commands.len(), 1, "activating a reflog entry issues exactly one read");
+    assert_eq!(
+        commands.len(),
+        1,
+        "activating a reflog entry issues exactly one read"
+    );
     for command in commands {
         if let Command::LoadReflogCommit(repo, hash) = command {
             let result = GetCommit::new(read.clone()).execute(&repo, &hash);

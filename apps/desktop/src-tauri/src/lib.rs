@@ -50,7 +50,10 @@ fn parse_startup_args(args: impl Iterator<Item = String>) -> StartupIntent {
             _ => {}
         }
     }
-    StartupIntent { repo_path, commit_hash }
+    StartupIntent {
+        repo_path,
+        commit_hash,
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -72,8 +75,9 @@ pub fn run() {
 
     let recent_repositories_path = JsonFileRecentRepositoriesStore::default_location()
         .expect("could not resolve the recent repositories file location");
-    let recent_repositories: Arc<dyn RecentRepositoriesPort> =
-        Arc::new(JsonFileRecentRepositoriesStore::new(recent_repositories_path));
+    let recent_repositories: Arc<dyn RecentRepositoriesPort> = Arc::new(
+        JsonFileRecentRepositoriesStore::new(recent_repositories_path),
+    );
 
     // T-244/US-102: OS-secure-storage-backed forge (GitHub/GitLab) token
     // store — see `gitsail-forge`'s crate docs for the backend chosen per
@@ -100,7 +104,9 @@ pub fn run() {
     // module doc for why).
     let keybindings_path = keybindings_store::JsonFileKeybindingsStore::default_location()
         .expect("could not resolve the keybindings file location");
-    let keybindings = Arc::new(keybindings_store::JsonFileKeybindingsStore::new(keybindings_path));
+    let keybindings = Arc::new(keybindings_store::JsonFileKeybindingsStore::new(
+        keybindings_path,
+    ));
 
     let app_state = AppState::new(
         port,

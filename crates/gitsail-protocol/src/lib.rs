@@ -19,15 +19,14 @@ pub use dto::{
     BranchKindDto, ChangeTypeDto, CherryPickResultDto, CommitDiffDto, CommitDto,
     CommitGraphPageDto, CommitGraphRowDto, CommitResultDto, ConflictSideContentDto,
     ConflictSidesDto, ConflictStageDto, ConflictedFileDto, DecorationDto, DiffDto, DiffHunkDto,
-    DiffLineDto, DiffLineOriginDto, FileChangeDto, FileContentDto, FileDiffDto,
-    FileStatusCodeDto, ForgeAccountDto, ForgeConnectionStatusDto, ForgeKindDto,
-    ForgeLinkTargetDto, GitTimestampDto, GraphEdgeDto, HeadStateDto, InProgressOperationDto,
-    LineHistoryDto, LineHistoryEntryDto, LineRangeDto, ListPullRequestsOutcomeDto, MergeResultDto,
-    OperationCapabilityDto, PatchExportDto, PatchPreviewDto, PreferencesDto, PullOutcomeDto,
-    PullRequestPageDto, PullRequestStateDto, PullRequestSummaryDto, PullResultDto,
-    RebaseActionDto, RebasePlanDto, RebasePlanEntryDto, RebaseResultDto, RecentRepositoryDto,
-    RemoteDto, RepositoryDto, RepositoryStatusDto, RevertResultDto, SignatureDto, SyncTargetDto,
-    ThemePreferenceDto,
+    DiffLineDto, DiffLineOriginDto, FileChangeDto, FileContentDto, FileDiffDto, FileStatusCodeDto,
+    ForgeAccountDto, ForgeConnectionStatusDto, ForgeKindDto, ForgeLinkTargetDto, GitTimestampDto,
+    GraphEdgeDto, HeadStateDto, InProgressOperationDto, LineHistoryDto, LineHistoryEntryDto,
+    LineRangeDto, ListPullRequestsOutcomeDto, MergeResultDto, OperationCapabilityDto,
+    PatchExportDto, PatchPreviewDto, PreferencesDto, PullOutcomeDto, PullRequestPageDto,
+    PullRequestStateDto, PullRequestSummaryDto, PullResultDto, RebaseActionDto, RebasePlanDto,
+    RebasePlanEntryDto, RebaseResultDto, RecentRepositoryDto, RemoteDto, RepositoryDto,
+    RepositoryStatusDto, RevertResultDto, SignatureDto, SyncTargetDto, ThemePreferenceDto,
 };
 pub use envelope::{Envelope, Page, SCHEMA_VERSION};
 pub use error::ErrorPayload;

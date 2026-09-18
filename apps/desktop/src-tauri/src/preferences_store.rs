@@ -91,7 +91,10 @@ pub struct JsonFilePreferencesStore {
 
 impl JsonFilePreferencesStore {
     pub fn new(file_path: PathBuf) -> Self {
-        Self { file_path, lock: Mutex::new(()) }
+        Self {
+            file_path,
+            lock: Mutex::new(()),
+        }
     }
 
     /// The default file location for this platform (see the module
@@ -103,7 +106,10 @@ impl JsonFilePreferencesStore {
                 "could not resolve the OS configuration directory",
             )
         })?;
-        Ok(config_dir.join("gitsail").join("desktop").join("preferences.json"))
+        Ok(config_dir
+            .join("gitsail")
+            .join("desktop")
+            .join("preferences.json"))
     }
 
     fn read_error(err: std::io::Error) -> GitSailError {
@@ -145,7 +151,9 @@ impl PreferencesPort for JsonFilePreferencesStore {
                 let theme = stored.theme.map(ThemePreference::from).unwrap_or_default();
                 Ok(PreferencesLoadOutcome::clean(Preferences { theme }))
             }
-            Err(err) => Ok(PreferencesLoadOutcome::recovered(Self::corrupted_diagnostic(err))),
+            Err(err) => Ok(PreferencesLoadOutcome::recovered(
+                Self::corrupted_diagnostic(err),
+            )),
         }
     }
 
@@ -155,7 +163,9 @@ impl PreferencesPort for JsonFilePreferencesStore {
         if let Some(parent) = self.file_path.parent() {
             fs::create_dir_all(parent).map_err(Self::write_error)?;
         }
-        let stored = StoredPreferences { theme: Some(StoredTheme::from(preferences.theme)) };
+        let stored = StoredPreferences {
+            theme: Some(StoredTheme::from(preferences.theme)),
+        };
         let json = serde_json::to_string_pretty(&stored).map_err(|err| {
             GitSailError::new(ErrorCode::Internal, "failed to serialize preferences")
                 .with_source(err)
@@ -176,8 +186,10 @@ mod tests {
     /// `recent_repositories_store`'s own test helper.
     fn temp_file_path() -> PathBuf {
         let id = COUNTER.fetch_add(1, Ordering::SeqCst);
-        std::env::temp_dir()
-            .join(format!("gitsail-preferences-test-{}-{id}.json", std::process::id()))
+        std::env::temp_dir().join(format!(
+            "gitsail-preferences-test-{}-{id}.json",
+            std::process::id()
+        ))
     }
 
     #[test]
@@ -194,7 +206,9 @@ mod tests {
     fn save_then_load_round_trips_a_valid_file() {
         let path = temp_file_path();
         let store = JsonFilePreferencesStore::new(path.clone());
-        let preferences = Preferences { theme: ThemePreference::Dark };
+        let preferences = Preferences {
+            theme: ThemePreference::Dark,
+        };
 
         store.save(&preferences).unwrap();
         let outcome = store.load().unwrap();
@@ -209,7 +223,11 @@ mod tests {
         let path = temp_file_path().join("nested").join("preferences.json");
         let store = JsonFilePreferencesStore::new(path.clone());
 
-        store.save(&Preferences { theme: ThemePreference::Light }).unwrap();
+        store
+            .save(&Preferences {
+                theme: ThemePreference::Light,
+            })
+            .unwrap();
 
         assert!(path.exists());
         let _ = fs::remove_dir_all(path.parent().unwrap().parent().unwrap());
@@ -224,7 +242,9 @@ mod tests {
         let outcome = store.load().unwrap();
 
         assert_eq!(outcome.preferences, Preferences::default());
-        let diagnostic = outcome.diagnostic.expect("a corrupted file must report a diagnostic");
+        let diagnostic = outcome
+            .diagnostic
+            .expect("a corrupted file must report a diagnostic");
         assert_eq!(diagnostic.code(), ErrorCode::ParseFailure);
         let _ = fs::remove_file(&path);
     }

@@ -135,7 +135,10 @@ impl AppState {
         Self {
             port,
             write_port,
-            session: Mutex::new(SessionSlot { session: None, epoch: 0 }),
+            session: Mutex::new(SessionSlot {
+                session: None,
+                epoch: 0,
+            }),
             commit_graph: Mutex::new(CommitGraph::new()),
             recent_repositories,
             forge_credentials,
@@ -177,7 +180,10 @@ impl AppState {
     /// Records the startup intent parsed from argv (`lib.rs::run`, once,
     /// before the Tauri event loop starts).
     pub fn set_startup_intent(&self, intent: StartupIntent) {
-        *self.startup_intent.lock().expect("startup intent mutex poisoned") = Some(intent);
+        *self
+            .startup_intent
+            .lock()
+            .expect("startup intent mutex poisoned") = Some(intent);
     }
 
     /// Consumes and returns the startup intent, leaving `None` behind for
@@ -259,7 +265,10 @@ impl AppState {
     /// 3: a filter change gets a fresh layout rather than one mixing rows
     /// from two different queries).
     pub fn reset_commit_graph(&self) {
-        *self.commit_graph.lock().expect("commit graph mutex poisoned") = CommitGraph::new();
+        *self
+            .commit_graph
+            .lock()
+            .expect("commit graph mutex poisoned") = CommitGraph::new();
     }
 
     /// Runs `f` against the accumulated commit graph. Test-only:
@@ -268,7 +277,10 @@ impl AppState {
     /// epoch check into the same access.
     #[cfg(test)]
     pub fn with_commit_graph_mut<T>(&self, f: impl FnOnce(&mut CommitGraph) -> T) -> T {
-        let mut guard = self.commit_graph.lock().expect("commit graph mutex poisoned");
+        let mut guard = self
+            .commit_graph
+            .lock()
+            .expect("commit graph mutex poisoned");
         f(&mut guard)
     }
 
@@ -292,7 +304,10 @@ impl AppState {
         if session_guard.epoch != epoch {
             return None;
         }
-        let mut graph_guard = self.commit_graph.lock().expect("commit graph mutex poisoned");
+        let mut graph_guard = self
+            .commit_graph
+            .lock()
+            .expect("commit graph mutex poisoned");
         let rows = graph_guard.append_page(commits).to_vec();
         let lane_count = graph_guard.lane_count();
         Some((rows, lane_count))
@@ -311,7 +326,10 @@ mod tests {
         fn discover(&self, _path: &Path) -> Result<Repository, GitSailError> {
             unimplemented!()
         }
-        fn status(&self, _repo: &Repository) -> Result<gitsail_domain::RepositoryStatus, GitSailError> {
+        fn status(
+            &self,
+            _repo: &Repository,
+        ) -> Result<gitsail_domain::RepositoryStatus, GitSailError> {
             unimplemented!()
         }
         fn commits(
@@ -321,10 +339,17 @@ mod tests {
         ) -> Result<gitsail_application::Page<gitsail_domain::Commit>, GitSailError> {
             unimplemented!()
         }
-        fn commit(&self, _repo: &Repository, _hash: &CommitHash) -> Result<gitsail_domain::Commit, GitSailError> {
+        fn commit(
+            &self,
+            _repo: &Repository,
+            _hash: &CommitHash,
+        ) -> Result<gitsail_domain::Commit, GitSailError> {
             unimplemented!()
         }
-        fn branches(&self, _repo: &Repository) -> Result<Vec<gitsail_domain::Branch>, GitSailError> {
+        fn branches(
+            &self,
+            _repo: &Repository,
+        ) -> Result<Vec<gitsail_domain::Branch>, GitSailError> {
             unimplemented!()
         }
         fn diff(
@@ -335,7 +360,11 @@ mod tests {
         ) -> Result<gitsail_domain::Diff, GitSailError> {
             unimplemented!()
         }
-        fn resolve_revision(&self, _repo: &Repository, _revision: &str) -> Result<CommitHash, GitSailError> {
+        fn resolve_revision(
+            &self,
+            _repo: &Repository,
+            _revision: &str,
+        ) -> Result<CommitHash, GitSailError> {
             unimplemented!()
         }
         fn blame(
@@ -369,10 +398,18 @@ mod tests {
         fn stage_files(&self, _repo: &Repository, _paths: &[PathBuf]) -> Result<(), GitSailError> {
             unimplemented!()
         }
-        fn unstage_files(&self, _repo: &Repository, _paths: &[PathBuf]) -> Result<(), GitSailError> {
+        fn unstage_files(
+            &self,
+            _repo: &Repository,
+            _paths: &[PathBuf],
+        ) -> Result<(), GitSailError> {
             unimplemented!()
         }
-        fn create_commit(&self, _repo: &Repository, _message: &str) -> Result<CommitHash, GitSailError> {
+        fn create_commit(
+            &self,
+            _repo: &Repository,
+            _message: &str,
+        ) -> Result<CommitHash, GitSailError> {
             unimplemented!()
         }
         fn stage_hunks(
@@ -389,7 +426,11 @@ mod tests {
         ) -> Result<(), GitSailError> {
             unimplemented!()
         }
-        fn switch_branch(&self, _repo: &Repository, _target: &BranchName) -> Result<(), GitSailError> {
+        fn switch_branch(
+            &self,
+            _repo: &Repository,
+            _target: &BranchName,
+        ) -> Result<(), GitSailError> {
             unimplemented!()
         }
         fn create_branch(
@@ -400,7 +441,12 @@ mod tests {
         ) -> Result<(), GitSailError> {
             unimplemented!()
         }
-        fn delete_branch(&self, _repo: &Repository, _name: &BranchName, _force: bool) -> Result<(), GitSailError> {
+        fn delete_branch(
+            &self,
+            _repo: &Repository,
+            _name: &BranchName,
+            _force: bool,
+        ) -> Result<(), GitSailError> {
             unimplemented!()
         }
         fn rename_branch(
@@ -470,11 +516,13 @@ mod tests {
             Arc::new(gitsail_forge::InMemoryForgeCredentialStore::new()),
             Arc::new(gitsail_forge::FakePullRequestQueryPort::default()),
             Arc::new(InMemoryPreferences::new()),
-            Arc::new(JsonFileKeybindingsStore::new(std::env::temp_dir().join(format!(
-                "gitsail-state-test-keybindings-{}-{:?}.json",
-                std::process::id(),
-                std::thread::current().id()
-            )))),
+            Arc::new(JsonFileKeybindingsStore::new(std::env::temp_dir().join(
+                format!(
+                    "gitsail-state-test-keybindings-{}-{:?}.json",
+                    std::process::id(),
+                    std::thread::current().id()
+                ),
+            ))),
         )
     }
 
@@ -484,7 +532,9 @@ mod tests {
             root_path: PathBuf::from(root),
             worktree_path: Some(PathBuf::from(root)),
             is_bare: false,
-            head_state: HeadState::Attached { branch: BranchName::new("main").unwrap() },
+            head_state: HeadState::Attached {
+                branch: BranchName::new("main").unwrap(),
+            },
             current_branch: Some(BranchName::new("main").unwrap()),
         }
     }
@@ -514,7 +564,10 @@ mod tests {
         let epoch2 = state.open_session(sample_repository("/repo"));
 
         assert_eq!(epoch1, 1);
-        assert_eq!(epoch2, 2, "re-opening the same path must still start a brand new session/epoch");
+        assert_eq!(
+            epoch2, 2,
+            "re-opening the same path must still start a brand new session/epoch"
+        );
         assert_eq!(state.current_epoch(), 2);
     }
 
@@ -557,7 +610,10 @@ mod tests {
             &[sample_graph_commit(&"a".repeat(40))],
         );
 
-        assert!(result.is_none(), "a stale epoch must never be allowed to append");
+        assert!(
+            result.is_none(),
+            "a stale epoch must never be allowed to append"
+        );
         assert_eq!(
             state.with_commit_graph_mut(|g| g.rows().len()),
             0,

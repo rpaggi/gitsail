@@ -364,7 +364,12 @@ pub fn run_process(
                     error_code = ErrorCode::ProcessFailure.as_str(),
                     "git process failed"
                 );
-                Err(process_failure_error(&safe_args, status.code(), &stdout, &stderr))
+                Err(process_failure_error(
+                    &safe_args,
+                    status.code(),
+                    &stdout,
+                    &stderr,
+                ))
             }
         }
         WaitOutcome::TimedOut => {

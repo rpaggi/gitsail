@@ -31,20 +31,27 @@ use serde_json::json;
 
 #[test]
 fn head_state_dto_is_externally_tagged_with_camel_case_variant_fields() {
-    let attached = HeadStateDto::Attached { branch: "main".to_string() };
+    let attached = HeadStateDto::Attached {
+        branch: "main".to_string(),
+    };
     assert_eq!(
         serde_json::to_value(&attached).unwrap(),
         json!({ "state": "attached", "branch": "main" })
     );
 
-    let detached = HeadStateDto::Detached { commit: "deadbeef".to_string() };
+    let detached = HeadStateDto::Detached {
+        commit: "deadbeef".to_string(),
+    };
     assert_eq!(
         serde_json::to_value(&detached).unwrap(),
         json!({ "state": "detached", "commit": "deadbeef" })
     );
 
     let unborn = HeadStateDto::Unborn;
-    assert_eq!(serde_json::to_value(&unborn).unwrap(), json!({ "state": "unborn" }));
+    assert_eq!(
+        serde_json::to_value(&unborn).unwrap(),
+        json!({ "state": "unborn" })
+    );
 }
 
 #[test]
@@ -159,7 +166,10 @@ fn pull_outcome_dto_is_internally_tagged_with_an_explicitly_renamed_struct_varia
 
 #[test]
 fn sync_target_dto_serializes_an_absent_branch_as_null() {
-    let target = SyncTargetDto { remote: "origin".to_string(), branch: None };
+    let target = SyncTargetDto {
+        remote: "origin".to_string(),
+        branch: None,
+    };
 
     assert_eq!(
         serde_json::to_value(&target).unwrap(),
@@ -173,13 +183,30 @@ fn commit_dto_nests_signatures_timestamps_and_tagged_decorations() {
         hash: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef".to_string(),
         short_hash: "deadbeef".to_string(),
         parents: vec!["cafefeed".to_string()],
-        author: SignatureDto { name: "Ada".to_string(), email: "ada@example.com".to_string() },
-        committer: SignatureDto { name: "Ada".to_string(), email: "ada@example.com".to_string() },
-        author_date: GitTimestampDto { seconds_since_epoch: 1_700_000_000, utc_offset_minutes: -180 },
-        commit_date: GitTimestampDto { seconds_since_epoch: 1_700_000_100, utc_offset_minutes: -180 },
+        author: SignatureDto {
+            name: "Ada".to_string(),
+            email: "ada@example.com".to_string(),
+        },
+        committer: SignatureDto {
+            name: "Ada".to_string(),
+            email: "ada@example.com".to_string(),
+        },
+        author_date: GitTimestampDto {
+            seconds_since_epoch: 1_700_000_000,
+            utc_offset_minutes: -180,
+        },
+        commit_date: GitTimestampDto {
+            seconds_since_epoch: 1_700_000_100,
+            utc_offset_minutes: -180,
+        },
         subject: "Add feature".to_string(),
         body: String::new(),
-        decorations: vec![DecorationDto::Head, DecorationDto::Tag { name: "v1.0".to_string() }],
+        decorations: vec![
+            DecorationDto::Head,
+            DecorationDto::Tag {
+                name: "v1.0".to_string(),
+            },
+        ],
         is_merge: false,
         is_root: false,
     };

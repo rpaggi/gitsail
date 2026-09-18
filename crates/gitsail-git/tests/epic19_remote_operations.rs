@@ -145,14 +145,20 @@ fn fetch_updates_remote_tracking_refs_without_touching_the_working_tree() {
     let local_dir = clone_repo(remote_dir.path(), "fetch-local");
     write_file(local_dir.path(), "a.txt", "one\n");
     commit_all(local_dir.path(), "first commit");
-    git(local_dir.path(), &["push", "--quiet", "--", "origin", "main"]);
+    git(
+        local_dir.path(),
+        &["push", "--quiet", "--", "origin", "main"],
+    );
 
     // Someone else pushes a new commit to the remote after this clone was
     // taken.
     let other_dir = clone_repo(remote_dir.path(), "fetch-other");
     write_file(other_dir.path(), "b.txt", "from elsewhere\n");
     commit_all(other_dir.path(), "commit from elsewhere");
-    git(other_dir.path(), &["push", "--quiet", "--", "origin", "main"]);
+    git(
+        other_dir.path(),
+        &["push", "--quiet", "--", "origin", "main"],
+    );
     let remote_head_after = current_head(other_dir.path());
 
     let provider = provider();
@@ -180,7 +186,10 @@ fn fetch_updates_remote_tracking_refs_without_touching_the_working_tree() {
     assert_eq!(current_head(local_dir.path()), local_head_before);
     assert!(!local_dir.path().join("b.txt").exists());
     let status = provider.status(&repo).unwrap();
-    assert!(status.is_clean(), "fetch must never modify the working tree");
+    assert!(
+        status.is_clean(),
+        "fetch must never modify the working tree"
+    );
 }
 
 #[test]
@@ -214,12 +223,18 @@ fn pull_fast_forwards_a_behind_branch_and_reports_the_new_head() {
     let behind_dir = clone_repo(remote_dir.path(), "pull-ff-behind");
     write_file(behind_dir.path(), "a.txt", "one\n");
     commit_all(behind_dir.path(), "first commit");
-    git(behind_dir.path(), &["push", "--quiet", "--", "origin", "main"]);
+    git(
+        behind_dir.path(),
+        &["push", "--quiet", "--", "origin", "main"],
+    );
 
     let ahead_dir = clone_repo(remote_dir.path(), "pull-ff-ahead");
     write_file(ahead_dir.path(), "b.txt", "two\n");
     commit_all(ahead_dir.path(), "second commit");
-    git(ahead_dir.path(), &["push", "--quiet", "--", "origin", "main"]);
+    git(
+        ahead_dir.path(),
+        &["push", "--quiet", "--", "origin", "main"],
+    );
     let new_remote_head = current_head(ahead_dir.path());
 
     let provider = provider();
@@ -245,7 +260,10 @@ fn pull_reports_already_up_to_date_when_there_is_nothing_to_integrate() {
     let local_dir = clone_repo(remote_dir.path(), "pull-uptodate-local");
     write_file(local_dir.path(), "a.txt", "one\n");
     commit_all(local_dir.path(), "first commit");
-    git(local_dir.path(), &["push", "--quiet", "--", "origin", "main"]);
+    git(
+        local_dir.path(),
+        &["push", "--quiet", "--", "origin", "main"],
+    );
 
     let provider = provider();
     let repo = provider.discover(local_dir.path()).unwrap();
@@ -263,7 +281,10 @@ fn pull_refuses_diverged_branches_without_any_side_effect() {
     let base_dir = clone_repo(remote_dir.path(), "pull-diverge-base");
     write_file(base_dir.path(), "a.txt", "one\n");
     commit_all(base_dir.path(), "first commit");
-    git(base_dir.path(), &["push", "--quiet", "--", "origin", "main"]);
+    git(
+        base_dir.path(),
+        &["push", "--quiet", "--", "origin", "main"],
+    );
 
     // The remote advances with a commit the local clone never had...
     let remote_advances_dir = clone_repo(remote_dir.path(), "pull-diverge-remote-advance");
@@ -317,10 +338,7 @@ fn push_publishes_local_commits_to_a_common_bare_remote() {
         .push(&repo, "origin", &main_branch(), &CancellationToken::new())
         .expect("pushing new commits to an empty bare remote must succeed");
 
-    let remote_head = git_output(
-        remote_dir.path(),
-        &["rev-parse", "refs/heads/main"],
-    );
+    let remote_head = git_output(remote_dir.path(), &["rev-parse", "refs/heads/main"]);
     assert_eq!(remote_head, local_head);
 }
 
@@ -330,13 +348,19 @@ fn push_rejects_a_non_fast_forward_and_preserves_the_remotes_state() {
     let seed_dir = clone_repo(remote_dir.path(), "push-reject-seed");
     write_file(seed_dir.path(), "a.txt", "one\n");
     commit_all(seed_dir.path(), "first commit");
-    git(seed_dir.path(), &["push", "--quiet", "--", "origin", "main"]);
+    git(
+        seed_dir.path(),
+        &["push", "--quiet", "--", "origin", "main"],
+    );
 
     // Another clone pushes first, advancing the remote.
     let other_dir = clone_repo(remote_dir.path(), "push-reject-other");
     write_file(other_dir.path(), "b.txt", "from elsewhere\n");
     commit_all(other_dir.path(), "commit from elsewhere");
-    git(other_dir.path(), &["push", "--quiet", "--", "origin", "main"]);
+    git(
+        other_dir.path(),
+        &["push", "--quiet", "--", "origin", "main"],
+    );
     let remote_head_after_other_push = current_head(other_dir.path());
 
     // This clone, unaware of that push, commits on top of the old base and
@@ -352,10 +376,8 @@ fn push_rejects_a_non_fast_forward_and_preserves_the_remotes_state() {
         .expect_err("a non-fast-forward push must never succeed, and never auto-force");
 
     assert_eq!(err.code(), ErrorCode::OperationConflict);
-    let remote_head_after_rejected_push = git_output(
-        remote_dir.path(),
-        &["rev-parse", "refs/heads/main"],
-    );
+    let remote_head_after_rejected_push =
+        git_output(remote_dir.path(), &["rev-parse", "refs/heads/main"]);
     assert_eq!(
         remote_head_after_rejected_push, remote_head_after_other_push,
         "the remote's real state (someone else's work) must be untouched by the rejected push"
@@ -394,16 +416,24 @@ fn force_push_with_lease_is_accepted_when_the_remote_still_matches_the_expected_
     let local_dir = clone_repo(remote_dir.path(), "force-lease-ok-local");
     write_file(local_dir.path(), "a.txt", "one\n");
     commit_all(local_dir.path(), "first commit");
-    git(local_dir.path(), &["push", "--quiet", "--", "origin", "main"]);
-    let expected_remote_head =
-        CommitHash::new(current_head(local_dir.path())).unwrap();
+    git(
+        local_dir.path(),
+        &["push", "--quiet", "--", "origin", "main"],
+    );
+    let expected_remote_head = CommitHash::new(current_head(local_dir.path())).unwrap();
 
     // Rewrite local history (amend), the classic force-push scenario.
     write_file(local_dir.path(), "a.txt", "one, amended\n");
     git(local_dir.path(), &["add", "-A"]);
     git(
         local_dir.path(),
-        &["commit", "--quiet", "--amend", "-m", "first commit (amended)"],
+        &[
+            "commit",
+            "--quiet",
+            "--amend",
+            "-m",
+            "first commit (amended)",
+        ],
     );
     let rewritten_head = current_head(local_dir.path());
 
@@ -434,7 +464,10 @@ fn force_push_with_lease_is_rejected_by_a_concurrent_remote_advance_and_preserve
     let local_dir = clone_repo(remote_dir.path(), "force-lease-race-local");
     write_file(local_dir.path(), "a.txt", "one\n");
     commit_all(local_dir.path(), "first commit");
-    git(local_dir.path(), &["push", "--quiet", "--", "origin", "main"]);
+    git(
+        local_dir.path(),
+        &["push", "--quiet", "--", "origin", "main"],
+    );
 
     // The caller observes the remote's current tip here — this is the value
     // it will build its lease around.
@@ -445,7 +478,11 @@ fn force_push_with_lease_is_rejected_by_a_concurrent_remote_advance_and_preserve
     // concurrent collaborator (or another GitSail session) advancing the
     // remote in the meantime.
     let concurrent_dir = clone_repo(remote_dir.path(), "force-lease-race-concurrent");
-    write_file(concurrent_dir.path(), "concurrent.txt", "someone else's work\n");
+    write_file(
+        concurrent_dir.path(),
+        "concurrent.txt",
+        "someone else's work\n",
+    );
     commit_all(concurrent_dir.path(), "a concurrent, unrelated commit");
     git(
         concurrent_dir.path(),
@@ -460,7 +497,13 @@ fn force_push_with_lease_is_rejected_by_a_concurrent_remote_advance_and_preserve
     git(local_dir.path(), &["add", "-A"]);
     git(
         local_dir.path(),
-        &["commit", "--quiet", "--amend", "-m", "rewritten independently"],
+        &[
+            "commit",
+            "--quiet",
+            "--amend",
+            "-m",
+            "rewritten independently",
+        ],
     );
 
     let provider = provider();
@@ -501,21 +544,31 @@ fn retrying_fetch_after_correcting_a_bad_remote_reconsults_real_state() {
     let seed_dir = clone_repo(remote_dir.path(), "retry-fetch-seed");
     write_file(seed_dir.path(), "a.txt", "one\n");
     commit_all(seed_dir.path(), "first commit");
-    git(seed_dir.path(), &["push", "--quiet", "--", "origin", "main"]);
+    git(
+        seed_dir.path(),
+        &["push", "--quiet", "--", "origin", "main"],
+    );
 
     let local_dir = clone_repo(remote_dir.path(), "retry-fetch-local");
     let provider = provider();
     let repo = provider.discover(local_dir.path()).unwrap();
 
     let missing_path = local_dir.path().join("does-not-exist-anywhere");
-    let first_attempt = provider.fetch(&repo, missing_path.to_str().unwrap(), &CancellationToken::new());
+    let first_attempt = provider.fetch(
+        &repo,
+        missing_path.to_str().unwrap(),
+        &CancellationToken::new(),
+    );
     assert_eq!(first_attempt.unwrap_err().code(), ErrorCode::NetworkFailure);
 
     // The remote advances in the meantime (this is real, current state a
     // blind repeat of the first attempt could never have picked up).
     write_file(seed_dir.path(), "b.txt", "two\n");
     commit_all(seed_dir.path(), "second commit");
-    git(seed_dir.path(), &["push", "--quiet", "--", "origin", "main"]);
+    git(
+        seed_dir.path(),
+        &["push", "--quiet", "--", "origin", "main"],
+    );
     let latest_remote_head = current_head(seed_dir.path());
 
     // Retrying against the real remote (not the broken path) must succeed

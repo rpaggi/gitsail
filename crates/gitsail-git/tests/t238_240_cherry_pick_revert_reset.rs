@@ -16,8 +16,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use gitsail_application::{
-    CherryPickResult, MergeParentPolicy, ResetMode, RevertResult, RepositoryReadPort,
-    RepositoryWritePort,
+    CherryPickResult, MergeParentPolicy, RepositoryReadPort, RepositoryWritePort, ResetMode,
+    RevertResult,
 };
 use gitsail_domain::{CommitHash, ErrorCode, InProgressOperation};
 use gitsail_git::{GitCliProvider, GitProcessRunner, GitProcessRunnerConfig};
@@ -135,12 +135,14 @@ fn cherry_pick_applies_a_simple_commit_as_a_new_commit_on_the_current_branch() {
     let provider = provider();
     let repo = provider.discover(repo_dir.path()).unwrap();
 
-    let result =
-        RepositoryWritePort::cherry_pick(&provider, &repo, &feature_commit, None).unwrap();
+    let result = RepositoryWritePort::cherry_pick(&provider, &repo, &feature_commit, None).unwrap();
 
     match result {
         CherryPickResult::Applied { hash } => {
-            assert_ne!(hash, feature_commit, "cherry-pick always creates a new commit object");
+            assert_ne!(
+                hash, feature_commit,
+                "cherry-pick always creates a new commit object"
+            );
             assert_eq!(parent_count(repo_dir.path(), hash.as_str()), 1);
             assert_eq!(rev_parse(repo_dir.path(), "HEAD^"), main_tip);
         }
@@ -174,8 +176,7 @@ fn cherry_pick_reports_a_conflict_distinctly_never_as_a_completed_success() {
     let provider = provider();
     let repo = provider.discover(repo_dir.path()).unwrap();
 
-    let result =
-        RepositoryWritePort::cherry_pick(&provider, &repo, &feature_commit, None).unwrap();
+    let result = RepositoryWritePort::cherry_pick(&provider, &repo, &feature_commit, None).unwrap();
 
     match result {
         CherryPickResult::Conflict { files } => {
@@ -214,8 +215,7 @@ fn cherry_pick_reports_empty_when_the_change_is_already_present() {
 
     // The exact same commit's change is now already present on `main`:
     // Git itself reports this distinctly, not as a fresh success/conflict.
-    let second =
-        RepositoryWritePort::cherry_pick(&provider, &repo, &feature_commit, None).unwrap();
+    let second = RepositoryWritePort::cherry_pick(&provider, &repo, &feature_commit, None).unwrap();
     assert_eq!(second, CherryPickResult::Empty);
 
     // An empty cherry-pick still pauses the sequencer exactly like a
@@ -272,7 +272,10 @@ fn cherry_pick_applies_a_merge_commit_using_first_parent_when_policy_is_supplied
     let (base, merge_commit) = setup_merge_commit(repo_dir.path());
 
     // A fresh branch from `base`, before either side's work existed.
-    git_ok(repo_dir.path(), &["checkout", "-q", "-b", "target", base.as_str()]);
+    git_ok(
+        repo_dir.path(),
+        &["checkout", "-q", "-b", "target", base.as_str()],
+    );
 
     let provider = provider();
     let repo = provider.discover(repo_dir.path()).unwrap();
@@ -339,8 +342,8 @@ fn cherry_pick_refuses_to_start_when_another_operation_is_already_pending() {
     let provider = provider();
     let repo = provider.discover(repo_dir.path()).unwrap();
 
-    let err = RepositoryWritePort::cherry_pick(&provider, &repo, &feature_commit, None)
-        .unwrap_err();
+    let err =
+        RepositoryWritePort::cherry_pick(&provider, &repo, &feature_commit, None).unwrap_err();
     assert_eq!(err.code(), ErrorCode::OperationConflict);
 
     git_ok(repo_dir.path(), &["cherry-pick", "--abort"]);
@@ -540,8 +543,7 @@ fn continue_operation_completes_a_pending_cherry_pick_once_resolved() {
     let provider = provider();
     let repo = provider.discover(repo_dir.path()).unwrap();
 
-    let result =
-        RepositoryWritePort::cherry_pick(&provider, &repo, &feature_commit, None).unwrap();
+    let result = RepositoryWritePort::cherry_pick(&provider, &repo, &feature_commit, None).unwrap();
     assert!(matches!(result, CherryPickResult::Conflict { .. }));
 
     write_file(repo_dir.path(), "f.txt", "line1\nRESOLVED\nline3\n");
@@ -622,7 +624,10 @@ fn reset_soft_moves_head_only_leaving_index_and_working_tree_staged() {
     let staged = git(repo_dir.path(), &["diff", "--cached", "--name-only"]);
     assert_eq!(String::from_utf8(staged.stdout).unwrap().trim(), "f.txt");
     let unstaged = git(repo_dir.path(), &["diff", "--name-only"]);
-    assert!(String::from_utf8(unstaged.stdout).unwrap().trim().is_empty());
+    assert!(String::from_utf8(unstaged.stdout)
+        .unwrap()
+        .trim()
+        .is_empty());
 }
 
 #[test]
@@ -682,8 +687,8 @@ fn reset_refuses_a_stale_expected_head_instead_of_resetting_against_it() {
     // real HEAD has since moved on to `c3` (e.g. another terminal committed
     // in between) — this must be refused, never executed against the old
     // expectation.
-    let err =
-        RepositoryWritePort::reset(&provider, &repo, c1.as_str(), ResetMode::Hard, &c2).unwrap_err();
+    let err = RepositoryWritePort::reset(&provider, &repo, c1.as_str(), ResetMode::Hard, &c2)
+        .unwrap_err();
     assert_eq!(err.code(), ErrorCode::OperationConflict);
 
     // Nothing moved: HEAD is still `c3`, untouched.
@@ -710,9 +715,8 @@ fn reset_refuses_to_start_when_another_operation_is_already_pending() {
     let provider = provider();
     let repo = provider.discover(repo_dir.path()).unwrap();
 
-    let err =
-        RepositoryWritePort::reset(&provider, &repo, base.as_str(), ResetMode::Hard, &head)
-            .unwrap_err();
+    let err = RepositoryWritePort::reset(&provider, &repo, base.as_str(), ResetMode::Hard, &head)
+        .unwrap_err();
     assert_eq!(err.code(), ErrorCode::OperationConflict);
 
     git_ok(repo_dir.path(), &["merge", "--abort"]);

@@ -117,7 +117,10 @@ mod tests {
     #[test]
     fn branch_prefix_sets_the_branch_filter() {
         let query = parse_commit_search("branch:feature/x");
-        assert_eq!(query.branch.as_ref().map(BranchName::as_str), Some("feature/x"));
+        assert_eq!(
+            query.branch.as_ref().map(BranchName::as_str),
+            Some("feature/x")
+        );
     }
 
     #[test]

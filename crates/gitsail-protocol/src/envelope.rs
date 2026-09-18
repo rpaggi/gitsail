@@ -100,9 +100,7 @@ impl<T> Envelope<T> {
 
     pub fn schema_version(&self) -> u32 {
         match self {
-            Self::Ok { schema_version, .. } | Self::Error { schema_version, .. } => {
-                *schema_version
-            }
+            Self::Ok { schema_version, .. } | Self::Error { schema_version, .. } => *schema_version,
         }
     }
 

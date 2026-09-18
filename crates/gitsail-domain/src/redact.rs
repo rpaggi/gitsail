@@ -145,7 +145,9 @@ mod tests {
     fn sentinel_secrets_never_survive_redact_secrets() {
         const SENTINEL: &str = "sentinel-fake-token-9f3c7a";
 
-        let url_case = format!("fatal: could not read Username for 'https://user:{SENTINEL}@github.com/org/repo.git'");
+        let url_case = format!(
+            "fatal: could not read Username for 'https://user:{SENTINEL}@github.com/org/repo.git'"
+        );
         assert!(!redact_secrets(&url_case).contains(SENTINEL));
 
         let kv_case = format!("request failed token={SENTINEL} retrying");

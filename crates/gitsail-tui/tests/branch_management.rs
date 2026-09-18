@@ -18,7 +18,9 @@ fn open_and_load(app: &mut App, dir: &std::path::Path) {
             _ => None,
         })
         .expect("RefreshStatus command");
-    let status = GetRepositoryStatus::new(port.clone()).execute(&repo).unwrap();
+    let status = GetRepositoryStatus::new(port.clone())
+        .execute(&repo)
+        .unwrap();
     app.on_status_refreshed(ticket, Ok(status));
 
     let generation = app.session().unwrap().generation();
@@ -37,17 +39,21 @@ fn run_mutation(app: &mut App, commands: Vec<Command>) {
     while let Some(command) = queue.pop() {
         let follow_up = match command {
             Command::SwitchBranch(repo, target) => {
-                let result = gitsail_application::SwitchBranch::new(write.clone()).execute(&repo, &target);
+                let result =
+                    gitsail_application::SwitchBranch::new(write.clone()).execute(&repo, &target);
                 app.on_operation_finished(result)
             }
             Command::CreateBranch(repo, name, start_point) => {
-                let result = gitsail_application::CreateBranch::new(write.clone())
-                    .execute(&repo, &name, start_point.as_ref());
+                let result = gitsail_application::CreateBranch::new(write.clone()).execute(
+                    &repo,
+                    &name,
+                    start_point.as_ref(),
+                );
                 app.on_operation_finished(result)
             }
             Command::DeleteBranch(repo, name, force) => {
-                let result =
-                    gitsail_application::DeleteBranch::new(write.clone()).execute(&repo, &name, force);
+                let result = gitsail_application::DeleteBranch::new(write.clone())
+                    .execute(&repo, &name, force);
                 app.on_operation_finished(result)
             }
             Command::RefreshStatus(ticket, repo) => {
@@ -210,7 +216,10 @@ fn deleting_the_current_branch_fails_without_discarding_state() {
     let repo = app.session().unwrap().repository().clone();
     let name = app.branches()[0].name.clone();
     let result = gitsail_application::DeleteBranch::new(write_port()).execute(&repo, &name, false);
-    assert!(result.is_err(), "Git itself must refuse to delete the current branch");
+    assert!(
+        result.is_err(),
+        "Git itself must refuse to delete the current branch"
+    );
 
     assert!(branch_exists(dir.path(), "main"));
     assert_eq!(current_branch(dir.path()), "main");
@@ -219,7 +228,10 @@ fn deleting_the_current_branch_fails_without_discarding_state() {
 #[test]
 fn sidebar_distinguishes_local_and_remote_branches() {
     let origin_dir = TempDir::new("branch-remote-origin");
-    git(origin_dir.path(), &["init", "--quiet", "--bare", "--initial-branch=main"]);
+    git(
+        origin_dir.path(),
+        &["init", "--quiet", "--bare", "--initial-branch=main"],
+    );
 
     let dir = TempDir::new("branch-remote-clone");
     git(

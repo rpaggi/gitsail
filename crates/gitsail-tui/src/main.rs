@@ -57,7 +57,9 @@ struct Cli {
 /// defaults, mirroring `gitsail_application::preferences`'s "invalid input
 /// degrades to safe defaults, never a crash" convention.
 fn load_bindings(path: Option<&Path>) -> HashMap<char, Action> {
-    let resolved_path = path.map(Path::to_path_buf).or_else(keybindings::default_config_path);
+    let resolved_path = path
+        .map(Path::to_path_buf)
+        .or_else(keybindings::default_config_path);
     let contents = resolved_path.and_then(|p| std::fs::read_to_string(p).ok());
     let overrides = match contents {
         Some(contents) => {
@@ -103,7 +105,9 @@ fn main() {
         }
     };
 
-    let result = run(&mut tui, cli.repo, read_port, write_port, low_color, &bindings);
+    let result = run(
+        &mut tui, cli.repo, read_port, write_port, low_color, &bindings,
+    );
 
     // Always restore the terminal on the way out, whether `run` returned
     // `Ok` or `Err` (US-043 criterion 1). A panic is covered separately by

@@ -16,13 +16,15 @@ fn fixture(name: &str) -> String {
     let path: PathBuf = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../docs/architecture/fixtures/protocol-compatibility")
         .join(name);
-    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("failed to read fixture {path:?}: {e}"))
+    std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("failed to read fixture {path:?}: {e}"))
 }
 
 #[test]
 fn accepts_the_supported_schema_version_ok_fixture_and_decodes_its_data() {
     let raw = fixture("ok-v1.json");
-    let envelope = parse_envelope::<RepositoryStatusDto>(&raw).expect("ok-v1.json must be accepted");
+    let envelope =
+        parse_envelope::<RepositoryStatusDto>(&raw).expect("ok-v1.json must be accepted");
 
     assert!(envelope.is_ok());
     let data = envelope.data().expect("ok envelope must carry data");
@@ -34,7 +36,8 @@ fn accepts_the_supported_schema_version_ok_fixture_and_decodes_its_data() {
 #[test]
 fn accepts_the_supported_schema_version_error_fixture() {
     let raw = fixture("error-v1.json");
-    let envelope = parse_envelope::<RepositoryStatusDto>(&raw).expect("error-v1.json must be accepted");
+    let envelope =
+        parse_envelope::<RepositoryStatusDto>(&raw).expect("error-v1.json must be accepted");
 
     assert!(!envelope.is_ok());
     assert!(envelope.data().is_none());
@@ -49,7 +52,8 @@ fn rejects_the_hypothetical_unsupported_schema_version_before_touching_its_paylo
     // at all under the hypothetical v2 shape) — so a Malformed error here
     // instead of UnsupportedSchemaVersion would mean the schema check was
     // skipped and decoding was attempted anyway.
-    let err = parse_envelope::<RepositoryStatusDto>(&raw).expect_err("schemaVersion 2 must be rejected");
+    let err =
+        parse_envelope::<RepositoryStatusDto>(&raw).expect_err("schemaVersion 2 must be rejected");
 
     match err {
         EnvelopeDecodeError::UnsupportedSchemaVersion(version) => assert_eq!(version, 2),

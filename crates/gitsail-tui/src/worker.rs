@@ -257,17 +257,26 @@ fn spawn_one(
                 Message::StashEntriesLoaded(generation, result)
             }
             Command::Fetch(repo, remote) => {
-                let result = Fetch::new(write_port).execute(&repo, &remote, &CancellationToken::new());
+                let result =
+                    Fetch::new(write_port).execute(&repo, &remote, &CancellationToken::new());
                 Message::OperationFinished(result)
             }
             Command::Pull(repo, remote, branch) => {
-                let result =
-                    Pull::new(write_port).execute(&repo, &remote, &branch, &CancellationToken::new());
+                let result = Pull::new(write_port).execute(
+                    &repo,
+                    &remote,
+                    &branch,
+                    &CancellationToken::new(),
+                );
                 Message::PullFinished(result)
             }
             Command::Push(repo, remote, branch) => {
-                let result =
-                    Push::new(write_port).execute(&repo, &remote, &branch, &CancellationToken::new());
+                let result = Push::new(write_port).execute(
+                    &repo,
+                    &remote,
+                    &branch,
+                    &CancellationToken::new(),
+                );
                 Message::OperationFinished(result)
             }
             Command::PreviewPatchApplication(repo, patch_text) => {
@@ -331,7 +340,8 @@ fn spawn_one(
                 Message::RevertFinished(result)
             }
             Command::Reset(repo, target_revision, mode, expected_head) => {
-                let result = Reset::new(write_port).execute(&repo, &target_revision, mode, &expected_head);
+                let result =
+                    Reset::new(write_port).execute(&repo, &target_revision, mode, &expected_head);
                 Message::OperationFinished(result)
             }
             Command::LoadReflog(generation, repo) => {

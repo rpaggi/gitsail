@@ -93,7 +93,8 @@ impl std::error::Error for EnvelopeDecodeError {
 /// unrelated shape; step 1 guarantees this function never reaches step 2
 /// for such a payload, so it can never coerce or misinterpret it.
 pub fn parse_envelope<T: DeserializeOwned>(raw: &str) -> Result<Envelope<T>, EnvelopeDecodeError> {
-    let value: serde_json::Value = serde_json::from_str(raw).map_err(EnvelopeDecodeError::Malformed)?;
+    let value: serde_json::Value =
+        serde_json::from_str(raw).map_err(EnvelopeDecodeError::Malformed)?;
 
     let schema_version = value
         .get("schemaVersion")
@@ -136,7 +137,10 @@ mod tests {
         // the rejection happens strictly before that attempt.
         let raw = r#"{"status":"ok","schemaVersion":999,"requestId":"req-1","data":{"unexpected":"shape"}}"#;
         let err = parse_envelope::<String>(raw).unwrap_err();
-        assert!(matches!(err, EnvelopeDecodeError::UnsupportedSchemaVersion(999)));
+        assert!(matches!(
+            err,
+            EnvelopeDecodeError::UnsupportedSchemaVersion(999)
+        ));
     }
 
     #[test]

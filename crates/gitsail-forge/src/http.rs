@@ -53,7 +53,9 @@ pub struct HttpResponse {
 impl HttpResponse {
     /// Case-insensitive header lookup (see the field's own doc comment).
     pub fn header(&self, name: &str) -> Option<&str> {
-        self.headers.get(&name.to_ascii_lowercase()).map(String::as_str)
+        self.headers
+            .get(&name.to_ascii_lowercase())
+            .map(String::as_str)
     }
 }
 
@@ -82,7 +84,9 @@ impl UreqHttpClient {
     /// criterion 2) instead of an indefinitely "loading" UI.
     pub fn new() -> Self {
         Self {
-            agent: ureq::AgentBuilder::new().timeout(Duration::from_secs(10)).build(),
+            agent: ureq::AgentBuilder::new()
+                .timeout(Duration::from_secs(10))
+                .build(),
         }
     }
 }
@@ -118,7 +122,11 @@ fn to_http_response(response: ureq::Response) -> HttpResponse {
         })
         .collect();
     let body = response.into_string().unwrap_or_default();
-    HttpResponse { status, headers, body }
+    HttpResponse {
+        status,
+        headers,
+        body,
+    }
 }
 
 /// One recorded call a [`FakeHttpClient`] received: the URL, and the
@@ -157,7 +165,10 @@ impl HttpClient for FakeHttpClient {
     fn get(&self, url: &str, headers: &[(&str, &str)]) -> Result<HttpResponse, HttpTransportError> {
         self.calls.lock().unwrap().push((
             url.to_string(),
-            headers.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
+            headers
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
         ));
         // Queued in call order, so pop from the front (a `Vec` used as a
         // FIFO queue here, not a stack).
@@ -174,7 +185,10 @@ impl HttpClient for FakeHttpClient {
 pub(crate) fn json_response(status: u16, headers: &[(&str, &str)], body: &str) -> HttpResponse {
     HttpResponse {
         status,
-        headers: headers.iter().map(|(k, v)| (k.to_ascii_lowercase(), v.to_string())).collect(),
+        headers: headers
+            .iter()
+            .map(|(k, v)| (k.to_ascii_lowercase(), v.to_string()))
+            .collect(),
         body: body.to_string(),
     }
 }
@@ -196,13 +210,18 @@ mod tests {
         let client = FakeHttpClient::default();
         client.queue(Ok(json_response(200, &[], "{}")));
 
-        let response = client.get("https://example.test/x", &[("Accept", "application/json")]).unwrap();
+        let response = client
+            .get("https://example.test/x", &[("Accept", "application/json")])
+            .unwrap();
         assert_eq!(response.status, 200);
 
         let calls = client.calls();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].0, "https://example.test/x");
-        assert_eq!(calls[0].1, vec![("Accept".to_string(), "application/json".to_string())]);
+        assert_eq!(
+            calls[0].1,
+            vec![("Accept".to_string(), "application/json".to_string())]
+        );
     }
 
     #[test]

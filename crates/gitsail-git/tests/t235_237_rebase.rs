@@ -450,7 +450,10 @@ fn execute_rebase_plan_applies_a_reword_via_amend_never_opening_an_editor() {
     let result = RepositoryWritePort::execute_rebase_plan(&provider, &repo, &plan).unwrap();
     assert!(matches!(result, RebaseResult::Completed { .. }));
 
-    assert_eq!(commit_subject(repo_dir.path(), "HEAD"), "a much better message");
+    assert_eq!(
+        commit_subject(repo_dir.path(), "HEAD"),
+        "a much better message"
+    );
     assert!(provider
         .detect_in_progress_operation(&repo)
         .unwrap()
@@ -491,7 +494,10 @@ fn execute_rebase_plan_squash_combines_both_messages_and_fixup_discards_the_fold
     assert!(!final_message.contains("fixup-me"));
 
     for file in ["a.txt", "b.txt", "c.txt"] {
-        assert!(repo_dir.path().join(file).exists(), "{file} must survive the fold");
+        assert!(
+            repo_dir.path().join(file).exists(),
+            "{file} must survive the fold"
+        );
     }
 }
 
@@ -648,7 +654,8 @@ fn execute_rebase_plan_never_executes_malicious_commit_text_as_a_shell_command()
     // Also reword the second commit with a message crafted the same way —
     // exercised through the `git commit --amend -m <text>` path.
     plan.entries[1].action = RebaseAction::Reword;
-    let evil_message = format!("reword; rm -rf {marker_display}; touch {marker_display}-via-reword #");
+    let evil_message =
+        format!("reword; rm -rf {marker_display}; touch {marker_display}-via-reword #");
     plan.entries[1].message_override = Some(evil_message.clone());
 
     let result = RepositoryWritePort::execute_rebase_plan(&provider, &repo, &plan).unwrap();

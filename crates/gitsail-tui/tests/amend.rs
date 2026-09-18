@@ -48,8 +48,11 @@ fn run_mutation(app: &mut App, commands: Vec<Command>) {
                 Vec::new()
             }
             Command::AmendCommit(repo, message, expected_head) => {
-                let result = gitsail_application::AmendCommit::new(write.clone())
-                    .execute(&repo, &message, &expected_head);
+                let result = gitsail_application::AmendCommit::new(write.clone()).execute(
+                    &repo,
+                    &message,
+                    &expected_head,
+                );
                 app.on_amend_finished(result)
             }
             Command::RefreshStatus(ticket, repo) => {
@@ -171,7 +174,10 @@ fn amending_head_replaces_it_with_the_edited_message_and_folds_in_staged_changes
     );
 
     let commands = app.update(Action::Activate); // confirming -> dispatch
-    assert!(matches!(commands.as_slice(), [Command::AmendCommit(_, _, _)]));
+    assert!(matches!(
+        commands.as_slice(),
+        [Command::AmendCommit(_, _, _)]
+    ));
     run_mutation(&mut app, commands);
 
     assert!(matches!(app.operation(), OperationState::Succeeded(_)));
@@ -214,12 +220,18 @@ fn a_head_that_moved_since_the_preview_is_refused_and_the_message_is_preserved()
 
     // Another process commits in the meantime — HEAD moves out from under
     // the already-loaded preview.
-    git(dir.path(), &["commit", "--allow-empty", "-q", "-m", "concurrent commit"]);
+    git(
+        dir.path(),
+        &["commit", "--allow-empty", "-q", "-m", "concurrent commit"],
+    );
     let head_after_concurrent_commit = current_head(dir.path());
 
     app.update(Action::Activate); // idle -> confirming
     let commands = app.update(Action::Activate); // confirming -> dispatch
-    assert!(matches!(commands.as_slice(), [Command::AmendCommit(_, _, _)]));
+    assert!(matches!(
+        commands.as_slice(),
+        [Command::AmendCommit(_, _, _)]
+    ));
     run_mutation(&mut app, commands);
 
     assert!(

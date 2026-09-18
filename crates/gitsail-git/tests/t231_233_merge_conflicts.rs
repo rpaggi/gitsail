@@ -301,9 +301,7 @@ fn conflict_sides_reads_base_ours_and_theirs_for_a_textual_conflict() {
     let provider = provider();
     let repo = provider.discover(repo_dir.path()).unwrap();
 
-    let sides = provider
-        .conflict_sides(&repo, Path::new("f.txt"))
-        .unwrap();
+    let sides = provider.conflict_sides(&repo, Path::new("f.txt")).unwrap();
 
     assert_eq!(sides.path, PathBuf::from("f.txt"));
     assert_eq!(
@@ -446,7 +444,11 @@ fn take_conflict_side_resolves_a_binary_conflict_by_choosing_one_side_wholesale(
     .unwrap();
 
     let on_disk = std::fs::read(repo_dir.path().join("img.bin")).unwrap();
-    assert_eq!(on_disk, vec![0, 9, 9, 9], "working tree must hold theirs' content");
+    assert_eq!(
+        on_disk,
+        vec![0, 9, 9, 9],
+        "working tree must hold theirs' content"
+    );
 
     let status = provider.status(&repo).unwrap();
     let entry = status
@@ -454,7 +456,10 @@ fn take_conflict_side_resolves_a_binary_conflict_by_choosing_one_side_wholesale(
         .iter()
         .find(|f| f.path == Path::new("img.bin"))
         .expect("img.bin must still be reported");
-    assert_ne!(entry.index_status, gitsail_domain::FileStatusCode::Unmodified);
+    assert_ne!(
+        entry.index_status,
+        gitsail_domain::FileStatusCode::Unmodified
+    );
 
     RepositoryWritePort::continue_operation(&provider, &repo).unwrap();
     assert!(provider

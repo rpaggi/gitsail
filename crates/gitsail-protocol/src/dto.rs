@@ -16,7 +16,8 @@ use gitsail_application::{
     AmendPreview, ApplyPatchResult, CherryPickResult, CommitDiff, ForgeAccountId,
     ForgeConnectionStatus, ListPullRequestsOutcome, MergeResult, PatchExport, PatchPreview,
     Preferences, PullOutcome, PullRequestPage, PullRequestState, PullRequestSummary, RebaseAction,
-    RebasePlan, RebasePlanEntry, RebaseResult, RecentRepositoryEntry, RevertResult, ThemePreference,
+    RebasePlan, RebasePlanEntry, RebaseResult, RecentRepositoryEntry, RevertResult,
+    ThemePreference,
 };
 use gitsail_domain::{
     Blame, BlameLine, BlameOrigin, Branch, BranchKind, BranchName, ChangeType, Commit, CommitHash,
@@ -287,7 +288,11 @@ impl From<&Commit> for CommitDto {
         Self {
             hash: commit.hash.as_str().to_string(),
             short_hash: commit.short_hash.as_str().to_string(),
-            parents: commit.parents.iter().map(|p| p.as_str().to_string()).collect(),
+            parents: commit
+                .parents
+                .iter()
+                .map(|p| p.as_str().to_string())
+                .collect(),
             author: SignatureDto::from(&commit.author),
             committer: SignatureDto::from(&commit.committer),
             author_date: commit.author_date.into(),
@@ -604,7 +609,10 @@ fn conflicted_files_dto(files: &[ConflictedFile]) -> Vec<ConflictedFileDto> {
 }
 
 fn capabilities_dto(capabilities: &[OperationCapability]) -> Vec<OperationCapabilityDto> {
-    capabilities.iter().map(|c| OperationCapabilityDto::from(*c)).collect()
+    capabilities
+        .iter()
+        .map(|c| OperationCapabilityDto::from(*c))
+        .collect()
 }
 
 /// Which multi-step Git operation, if any, is currently in progress
@@ -1179,7 +1187,11 @@ impl From<&PatchExport> for PatchExportDto {
     fn from(export: &PatchExport) -> Self {
         Self {
             patch: export.patch.clone(),
-            included_files: export.included_files.iter().map(|p| path_to_string(p)).collect(),
+            included_files: export
+                .included_files
+                .iter()
+                .map(|p| path_to_string(p))
+                .collect(),
             skipped_binary_files: export
                 .skipped_binary_files
                 .iter()
@@ -1212,7 +1224,11 @@ pub struct PatchPreviewDto {
 impl From<&PatchPreview> for PatchPreviewDto {
     fn from(preview: &PatchPreview) -> Self {
         Self {
-            affected_files: preview.affected_files.iter().map(|p| path_to_string(p)).collect(),
+            affected_files: preview
+                .affected_files
+                .iter()
+                .map(|p| path_to_string(p))
+                .collect(),
             supported: preview.supported,
             rejection_reason: preview.rejection_reason.clone(),
         }
@@ -1228,7 +1244,11 @@ pub struct ApplyPatchResultDto {
 impl From<&ApplyPatchResult> for ApplyPatchResultDto {
     fn from(result: &ApplyPatchResult) -> Self {
         Self {
-            applied_files: result.applied_files.iter().map(|p| path_to_string(p)).collect(),
+            applied_files: result
+                .applied_files
+                .iter()
+                .map(|p| path_to_string(p))
+                .collect(),
         }
     }
 }
@@ -1372,7 +1392,11 @@ impl From<&LineHistory> for LineHistoryDto {
             file: path_to_string(&history.file),
             revision: history.revision.as_str().to_string(),
             range: LineRangeDto::from(history.range),
-            entries: history.entries.iter().map(LineHistoryEntryDto::from).collect(),
+            entries: history
+                .entries
+                .iter()
+                .map(LineHistoryEntryDto::from)
+                .collect(),
         }
     }
 }
@@ -1656,7 +1680,11 @@ pub enum ListPullRequestsOutcomeDto {
     // exact serde limitation) — spelled out explicitly so the wire field is
     // `retryAfterSeconds`, matching every other DTO's camelCase convention.
     RateLimited {
-        #[serde(rename = "retryAfterSeconds", skip_serializing_if = "Option::is_none", default)]
+        #[serde(
+            rename = "retryAfterSeconds",
+            skip_serializing_if = "Option::is_none",
+            default
+        )]
         retry_after_seconds: Option<u64>,
     },
     Offline {
@@ -1671,16 +1699,20 @@ impl From<ListPullRequestsOutcome> for ListPullRequestsOutcomeDto {
     fn from(outcome: ListPullRequestsOutcome) -> Self {
         match outcome {
             ListPullRequestsOutcome::NoForgeDetected => Self::NoForgeDetected,
-            ListPullRequestsOutcome::Page(page) => Self::Page { page: PullRequestPageDto::from(&page) },
+            ListPullRequestsOutcome::Page(page) => Self::Page {
+                page: PullRequestPageDto::from(&page),
+            },
             ListPullRequestsOutcome::AuthenticationRequired => Self::AuthenticationRequired,
             ListPullRequestsOutcome::PermissionDenied => Self::PermissionDenied,
-            ListPullRequestsOutcome::RateLimited { retry_after_seconds } => {
-                Self::RateLimited { retry_after_seconds }
-            }
+            ListPullRequestsOutcome::RateLimited {
+                retry_after_seconds,
+            } => Self::RateLimited {
+                retry_after_seconds,
+            },
             ListPullRequestsOutcome::Offline { message } => Self::Offline { message },
-            ListPullRequestsOutcome::Error(err) => {
-                Self::Error { error: crate::error::ErrorPayload::from(&err) }
-            }
+            ListPullRequestsOutcome::Error(err) => Self::Error {
+                error: crate::error::ErrorPayload::from(&err),
+            },
         }
     }
 }
@@ -1739,16 +1771,17 @@ pub struct PreferencesDto {
 
 impl From<&Preferences> for PreferencesDto {
     fn from(preferences: &Preferences) -> Self {
-        Self { theme: preferences.theme.into(), diagnostic: None }
+        Self {
+            theme: preferences.theme.into(),
+            diagnostic: None,
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gitsail_domain::{
-        BranchName, CommitHash, GitTimestamp, RepositoryId, ShortHash,
-    };
+    use gitsail_domain::{BranchName, CommitHash, GitTimestamp, RepositoryId, ShortHash};
     use std::path::PathBuf;
 
     #[test]
@@ -1774,11 +1807,17 @@ mod tests {
         // accidental extra (internal) field would fail this comparison.
         let keys: std::collections::HashSet<String> =
             json.as_object().unwrap().keys().cloned().collect();
-        let expected: std::collections::HashSet<String> =
-            ["id", "rootPath", "worktreePath", "isBare", "headState", "currentBranch"]
-                .iter()
-                .map(|s| s.to_string())
-                .collect();
+        let expected: std::collections::HashSet<String> = [
+            "id",
+            "rootPath",
+            "worktreePath",
+            "isBare",
+            "headState",
+            "currentBranch",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
         assert_eq!(keys, expected);
     }
 
@@ -1789,7 +1828,10 @@ mod tests {
         });
         let unborn = HeadStateDto::from(&HeadState::Unborn);
 
-        assert_eq!(serde_json::to_value(&detached).unwrap()["state"], "detached");
+        assert_eq!(
+            serde_json::to_value(&detached).unwrap()["state"],
+            "detached"
+        );
         assert_eq!(serde_json::to_value(&unborn).unwrap()["state"], "unborn");
     }
 
@@ -1887,7 +1929,10 @@ mod tests {
         assert_eq!(dto.patch, export.patch);
         assert_eq!(json["includedFiles"], serde_json::json!(["a.txt"]));
         assert_eq!(json["skippedBinaryFiles"], serde_json::json!(["image.png"]));
-        assert_eq!(json["skippedTruncatedFiles"], serde_json::json!(["huge.txt"]));
+        assert_eq!(
+            json["skippedTruncatedFiles"],
+            serde_json::json!(["huge.txt"])
+        );
     }
 
     #[test]
@@ -2084,7 +2129,9 @@ mod tests {
     fn pull_outcome_dto_tags_already_up_to_date_and_fast_forwarded_distinctly() {
         let up_to_date = PullOutcomeDto::from(&PullOutcome::AlreadyUpToDate);
         let hash = CommitHash::new("a".repeat(40)).unwrap();
-        let fast_forwarded = PullOutcomeDto::from(&PullOutcome::FastForwarded { new_head: hash.clone() });
+        let fast_forwarded = PullOutcomeDto::from(&PullOutcome::FastForwarded {
+            new_head: hash.clone(),
+        });
 
         let up_to_date_json = serde_json::to_value(&up_to_date).unwrap();
         let fast_forwarded_json = serde_json::to_value(&fast_forwarded).unwrap();
@@ -2158,7 +2205,10 @@ mod tests {
         let dto = FileDiffDto::from(&original);
         let round_tripped = FileDiff::from(&dto);
 
-        assert_eq!(round_tripped, original, "a hunk-selection DTO must survive the trip back into domain shape unchanged");
+        assert_eq!(
+            round_tripped, original,
+            "a hunk-selection DTO must survive the trip back into domain shape unchanged"
+        );
     }
 
     // -----------------------------------------------------------------
@@ -2190,7 +2240,10 @@ mod tests {
         assert_eq!(json["heads"][0], "a".repeat(40));
         assert_eq!(json["conflictedFiles"][0]["path"], "f.txt");
         assert_eq!(json["conflictedFiles"][0]["stage"], "bothModified");
-        assert_eq!(json["capabilities"], serde_json::json!(["continue", "abort"]));
+        assert_eq!(
+            json["capabilities"],
+            serde_json::json!(["continue", "abort"])
+        );
         // A merge never offers `skip` — there is no further step to skip
         // past (mirrors `gitsail_domain::operation`'s own doc/tests).
         assert!(!json["capabilities"]
@@ -2299,7 +2352,11 @@ mod tests {
 
     // -- T-236/US-084: interactive rebase plan --------------------------
 
-    fn sample_entry(n: u8, action: RebaseAction, message_override: Option<&str>) -> RebasePlanEntry {
+    fn sample_entry(
+        n: u8,
+        action: RebaseAction,
+        message_override: Option<&str>,
+    ) -> RebasePlanEntry {
         RebasePlanEntry {
             commit: CommitHash::new(format!("{n:0>40}")).unwrap(),
             short_hash: ShortHash::new(format!("{n:0>7}")).unwrap(),
@@ -2363,7 +2420,11 @@ mod tests {
     /// hash-carrying command argument's own parsing in this workspace.
     #[test]
     fn a_rebase_plan_dto_with_a_malformed_hash_is_rejected() {
-        let mut dto = RebasePlanDto::from(&sample_plan(vec![sample_entry(1, RebaseAction::Pick, None)]));
+        let mut dto = RebasePlanDto::from(&sample_plan(vec![sample_entry(
+            1,
+            RebaseAction::Pick,
+            None,
+        )]));
         dto.onto = "not-a-hash".to_string();
 
         assert!(RebasePlan::try_from(&dto).is_err());
@@ -2400,7 +2461,10 @@ mod tests {
             ForgePath::Repository
         );
         assert_eq!(
-            ForgePath::try_from(&ForgeLinkTargetDto::Branch { name: "main".to_string() }).unwrap(),
+            ForgePath::try_from(&ForgeLinkTargetDto::Branch {
+                name: "main".to_string()
+            })
+            .unwrap(),
             ForgePath::Branch(BranchName::new("main").unwrap())
         );
         assert_eq!(
@@ -2425,7 +2489,9 @@ mod tests {
 
     #[test]
     fn forge_link_target_dto_serializes_with_a_kind_tag() {
-        let dto = ForgeLinkTargetDto::Branch { name: "main".to_string() };
+        let dto = ForgeLinkTargetDto::Branch {
+            name: "main".to_string(),
+        };
         let json = serde_json::to_value(&dto).unwrap();
         assert_eq!(json["kind"], "branch");
         assert_eq!(json["name"], "main");
@@ -2486,7 +2552,11 @@ mod tests {
 
     #[test]
     fn pull_request_state_dto_round_trips_every_variant() {
-        for state in [PullRequestState::Open, PullRequestState::Closed, PullRequestState::Merged] {
+        for state in [
+            PullRequestState::Open,
+            PullRequestState::Closed,
+            PullRequestState::Merged,
+        ] {
             let dto = PullRequestStateDto::from(state);
             let json = serde_json::to_value(dto).unwrap();
             match state {
@@ -2539,7 +2609,10 @@ mod tests {
 
     #[test]
     fn pull_request_page_dto_maps_items_and_has_next_page() {
-        let page = PullRequestPage { items: vec![sample_pull_request()], has_next_page: true };
+        let page = PullRequestPage {
+            items: vec![sample_pull_request()],
+            has_next_page: true,
+        };
         let dto = PullRequestPageDto::from(&page);
         assert_eq!(dto.items.len(), 1);
         assert!(dto.has_next_page);
@@ -2556,14 +2629,24 @@ mod tests {
                 ListPullRequestsOutcome::Page(PullRequestPage::default()),
                 "page",
             ),
-            (ListPullRequestsOutcome::AuthenticationRequired, "authenticationRequired"),
-            (ListPullRequestsOutcome::PermissionDenied, "permissionDenied"),
             (
-                ListPullRequestsOutcome::RateLimited { retry_after_seconds: Some(30) },
+                ListPullRequestsOutcome::AuthenticationRequired,
+                "authenticationRequired",
+            ),
+            (
+                ListPullRequestsOutcome::PermissionDenied,
+                "permissionDenied",
+            ),
+            (
+                ListPullRequestsOutcome::RateLimited {
+                    retry_after_seconds: Some(30),
+                },
                 "rateLimited",
             ),
             (
-                ListPullRequestsOutcome::Offline { message: "connection refused".to_string() },
+                ListPullRequestsOutcome::Offline {
+                    message: "connection refused".to_string(),
+                },
                 "offline",
             ),
             (
@@ -2611,8 +2694,11 @@ mod tests {
         }
         impl std::error::Error for Secret {}
 
-        let err = gitsail_domain::GitSailError::new(gitsail_domain::ErrorCode::NetworkFailure, "request failed")
-            .with_source(Secret);
+        let err = gitsail_domain::GitSailError::new(
+            gitsail_domain::ErrorCode::NetworkFailure,
+            "request failed",
+        )
+        .with_source(Secret);
         let dto = ListPullRequestsOutcomeDto::from(ListPullRequestsOutcome::Error(err));
         let json = serde_json::to_string(&dto).unwrap();
         assert!(!json.contains("super-secret-stderr-contents"));
@@ -2629,23 +2715,31 @@ mod tests {
             let dto = ThemePreferenceDto::from(theme);
             let json = serde_json::to_value(dto).unwrap();
             assert_eq!(json, expected);
-            assert_eq!(ThemePreference::from(dto), theme, "round trip must be lossless");
+            assert_eq!(
+                ThemePreference::from(dto),
+                theme,
+                "round trip must be lossless"
+            );
         }
     }
 
     #[test]
     fn preferences_dto_omits_a_none_diagnostic_and_carries_a_some_one() {
-        let clean = PreferencesDto::from(&Preferences { theme: ThemePreference::Dark });
+        let clean = PreferencesDto::from(&Preferences {
+            theme: ThemePreference::Dark,
+        });
         let json = serde_json::to_value(&clean).unwrap();
         assert_eq!(json["theme"], "dark");
         assert!(json.get("diagnostic").is_none());
 
         let with_diagnostic = PreferencesDto {
             theme: ThemePreferenceDto::Dark,
-            diagnostic: Some(crate::error::ErrorPayload::from(&gitsail_domain::GitSailError::new(
-                gitsail_domain::ErrorCode::ParseFailure,
-                "corrupted",
-            ))),
+            diagnostic: Some(crate::error::ErrorPayload::from(
+                &gitsail_domain::GitSailError::new(
+                    gitsail_domain::ErrorCode::ParseFailure,
+                    "corrupted",
+                ),
+            )),
         };
         let json = serde_json::to_value(&with_diagnostic).unwrap();
         assert!(json.get("diagnostic").is_some());

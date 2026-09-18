@@ -82,7 +82,12 @@ impl GraphCache {
 
     /// Stores `rows` under `key` for `ticket`, unless a newer query has
     /// since started. Returns whether it was stored.
-    pub fn complete_query(&self, ticket: GenerationTicket, key: GraphPageKey, rows: Vec<GraphRow>) -> bool {
+    pub fn complete_query(
+        &self,
+        ticket: GenerationTicket,
+        key: GraphPageKey,
+        rows: Vec<GraphRow>,
+    ) -> bool {
         self.inner.complete_query(ticket, key, rows)
     }
 
@@ -191,9 +196,17 @@ mod tests {
     fn keys_differing_only_by_page_cursor_do_not_collide() {
         let cache = GraphCache::default();
         let ticket = cache.begin_query();
-        cache.complete_query(ticket, key("0"), vec![sample_row("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef")]);
+        cache.complete_query(
+            ticket,
+            key("0"),
+            vec![sample_row("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef")],
+        );
         let ticket = cache.begin_query();
-        cache.complete_query(ticket, key("50"), vec![sample_row("cafef00dcafef00dcafef00dcafef00dcafef00")]);
+        cache.complete_query(
+            ticket,
+            key("50"),
+            vec![sample_row("cafef00dcafef00dcafef00dcafef00dcafef00")],
+        );
 
         assert_ne!(cache.get(&key("0")), cache.get(&key("50")));
     }
@@ -203,7 +216,11 @@ mod tests {
         let cache = GraphCache::new(2);
         for n in 0..5 {
             let ticket = cache.begin_query();
-            cache.complete_query(ticket, key(&n.to_string()), vec![sample_row("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef")]);
+            cache.complete_query(
+                ticket,
+                key(&n.to_string()),
+                vec![sample_row("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef")],
+            );
         }
         assert!(cache.get(&key("4")).is_some());
         assert!(cache.get(&key("0")).is_none());
@@ -213,7 +230,11 @@ mod tests {
     fn invalidatable_trait_object_drives_the_same_invalidation() {
         let cache = GraphCache::default();
         let ticket = cache.begin_query();
-        cache.complete_query(ticket, key("0"), vec![sample_row("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef")]);
+        cache.complete_query(
+            ticket,
+            key("0"),
+            vec![sample_row("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef")],
+        );
 
         let as_trait_object: &dyn Invalidatable = &cache;
         as_trait_object.invalidate_all();

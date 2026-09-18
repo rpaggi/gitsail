@@ -19,7 +19,10 @@ struct TempDir(PathBuf);
 impl TempDir {
     fn new(label: &str) -> Self {
         static COUNTER: AtomicU32 = AtomicU32::new(0);
-        let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
         let n = COUNTER.fetch_add(1, Ordering::SeqCst);
         let path = std::env::temp_dir().join(format!("gitsail-cli-test-{label}-{nanos}-{n}"));
         std::fs::create_dir_all(&path).expect("create temp dir");
@@ -101,14 +104,17 @@ fn rev_parse(dir: &Path, revision: &str) -> String {
         .env("LC_ALL", "C")
         .output()
         .expect("git rev-parse should run");
-    assert!(output.status.success(), "git rev-parse {revision} failed in {dir:?}");
+    assert!(
+        output.status.success(),
+        "git rev-parse {revision} failed in {dir:?}"
+    );
     String::from_utf8_lossy(&output.stdout).trim().to_string()
 }
 
 fn json_data(output: &Output) -> serde_json::Value {
     let stdout = stdout_of(output);
-    let json: serde_json::Value =
-        serde_json::from_str(stdout.trim()).unwrap_or_else(|e| panic!("stdout was not valid JSON: {e}\n{stdout}"));
+    let json: serde_json::Value = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|e| panic!("stdout was not valid JSON: {e}\n{stdout}"));
     assert_eq!(json["status"], "ok", "command did not succeed: {json}");
     json["data"].clone()
 }
@@ -159,7 +165,10 @@ fn all_six_commands_succeed_in_human_mode_without_mutating_the_repository() {
     }
 
     let after = porcelain_status(repo.path());
-    assert_eq!(before, after, "read-only commands must never change repository state");
+    assert_eq!(
+        before, after,
+        "read-only commands must never change repository state"
+    );
 }
 
 #[test]
@@ -169,7 +178,10 @@ fn open_reports_the_discovered_repository() {
 
     assert!(output.status.success());
     let stdout = stdout_of(&output);
-    assert!(stdout.contains("main"), "expected the current branch in output: {stdout}");
+    assert!(
+        stdout.contains("main"),
+        "expected the current branch in output: {stdout}"
+    );
 }
 
 #[test]
@@ -205,9 +217,14 @@ fn json_mode_prints_exactly_one_valid_versioned_envelope_on_stdout() {
     assert!(output.status.success());
     let stdout = stdout_of(&output);
     let lines: Vec<&str> = stdout.lines().filter(|l| !l.is_empty()).collect();
-    assert_eq!(lines.len(), 1, "stdout must carry exactly one JSON line, got: {stdout:?}");
+    assert_eq!(
+        lines.len(),
+        1,
+        "stdout must carry exactly one JSON line, got: {stdout:?}"
+    );
 
-    let json: serde_json::Value = serde_json::from_str(lines[0]).expect("stdout must be valid JSON");
+    let json: serde_json::Value =
+        serde_json::from_str(lines[0]).expect("stdout must be valid JSON");
     assert_eq!(json["schemaVersion"], 1);
     assert_eq!(json["status"], "ok");
     assert!(json["requestId"].is_string());
@@ -221,9 +238,14 @@ fn json_mode_error_envelope_is_consistent_for_an_invalid_repository() {
     let output = run(&["status", "--repo", dir.path().to_str().unwrap(), "--json"]);
 
     assert!(!output.status.success());
-    assert_eq!(output.status.code(), Some(3), "RepositoryNotFound must map to a distinct exit code");
+    assert_eq!(
+        output.status.code(),
+        Some(3),
+        "RepositoryNotFound must map to a distinct exit code"
+    );
     let stdout = stdout_of(&output);
-    let json: serde_json::Value = serde_json::from_str(stdout.trim()).expect("stdout must be valid JSON even on error");
+    let json: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("stdout must be valid JSON even on error");
     assert_eq!(json["schemaVersion"], 1);
     assert_eq!(json["status"], "error");
     assert_eq!(json["error"]["code"], "repository_not_found");
@@ -236,7 +258,10 @@ fn human_mode_error_goes_to_stderr_not_stdout() {
     let output = run(&["status", "--repo", dir.path().to_str().unwrap()]);
 
     assert!(!output.status.success());
-    assert!(stdout_of(&output).is_empty(), "an error must never be written to stdout in human mode");
+    assert!(
+        stdout_of(&output).is_empty(),
+        "an error must never be written to stdout in human mode"
+    );
     assert!(stderr_of(&output).contains("not a Git repository"));
 }
 
@@ -287,9 +312,13 @@ fn a_short_timeout_terminates_a_slow_git_invocation_with_a_distinct_exit_code() 
         elapsed < Duration::from_secs(3),
         "a timed-out invocation must not wait for the slow child to finish naturally; elapsed={elapsed:?}"
     );
-    assert_eq!(output.status.code(), Some(8), "Timeout must map to its own exit code");
-    let json: serde_json::Value =
-        serde_json::from_str(stdout_of(&output).trim()).expect("stdout must still be a valid envelope on timeout");
+    assert_eq!(
+        output.status.code(),
+        Some(8),
+        "Timeout must map to its own exit code"
+    );
+    let json: serde_json::Value = serde_json::from_str(stdout_of(&output).trim())
+        .expect("stdout must still be a valid envelope on timeout");
     assert_eq!(json["error"]["code"], "timeout");
 }
 
@@ -329,12 +358,16 @@ fn ctrl_c_cancels_an_in_flight_diff_and_kills_the_child_process() {
         elapsed < Duration::from_secs(3),
         "cancellation must kill the child rather than waiting out its full sleep; elapsed={elapsed:?}"
     );
-    assert_eq!(output.status.code(), Some(130), "Cancelled must exit 130 (128 + SIGINT)");
+    assert_eq!(
+        output.status.code(),
+        Some(130),
+        "Cancelled must exit 130 (128 + SIGINT)"
+    );
 
     let mut stdout = String::new();
     let _ = std::io::Cursor::new(&output.stdout).read_to_string(&mut stdout);
-    let json: serde_json::Value =
-        serde_json::from_str(stdout.trim()).expect("a cancelled command must still print a valid envelope");
+    let json: serde_json::Value = serde_json::from_str(stdout.trim())
+        .expect("a cancelled command must still print a valid envelope");
     assert_eq!(json["error"]["code"], "cancelled");
 }
 
@@ -378,7 +411,10 @@ fn commit_diff_on_a_merge_commit_reports_base_as_the_first_parent() {
     // `feature` branched off.
     let first_parent = rev_parse(repo.path(), "main");
 
-    git(repo.path(), &["merge", "--no-ff", "-m", "merge feature", "feature"]);
+    git(
+        repo.path(),
+        &["merge", "--no-ff", "-m", "merge feature", "feature"],
+    );
     let merge_hash = rev_parse(repo.path(), "HEAD");
 
     let output = run(&["commit-diff", &merge_hash, "--repo", repo_str, "--json"]);

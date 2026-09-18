@@ -36,7 +36,10 @@ struct TempDir(PathBuf);
 impl TempDir {
     fn new(label: &str) -> Self {
         static COUNTER: AtomicU32 = AtomicU32::new(0);
-        let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
         let n = COUNTER.fetch_add(1, Ordering::SeqCst);
         let path = std::env::temp_dir().join(format!("gitsail-git-perf-{label}-{nanos}-{n}"));
         std::fs::create_dir_all(&path).expect("create temp dir");
@@ -286,7 +289,8 @@ fn measure_scale(label: &'static str, commit_count: u32, files_per_commit: u32) 
 #[test]
 #[ignore = "generates multi-thousand-commit fixtures; run explicitly with --ignored --nocapture"]
 fn measures_log_graph_diff_and_blame_across_scales() {
-    let scales: &[(&str, u32, u32)] = &[("small", 100, 3), ("medium", 1_000, 3), ("large", 5_000, 3)];
+    let scales: &[(&str, u32, u32)] =
+        &[("small", 100, 3), ("medium", 1_000, 3), ("large", 5_000, 3)];
 
     println!(
         "\n{:<8} {:>8} {:>6} {:>14} {:>14} {:>16} {:>14} {:>14} {:>14} {:>14}",

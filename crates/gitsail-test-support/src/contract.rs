@@ -43,7 +43,9 @@
 
 use std::path::Path;
 
-use gitsail_application::{BlameRequest, CommitQuery, DiffRequest, LineHistoryRequest, RepositoryReadPort};
+use gitsail_application::{
+    BlameRequest, CommitQuery, DiffRequest, LineHistoryRequest, RepositoryReadPort,
+};
 use gitsail_domain::{
     BlameOrigin, CancellationToken, ChangeType, ErrorCode, FileContentKind, HeadState,
 };
@@ -551,7 +553,10 @@ pub fn file_content_reads_historical_text_content<P: RepositoryReadPort>(
         .file_content(&repo, &first, Path::new("a.txt"))
         .unwrap();
 
-    assert_eq!(content.kind, FileContentKind::Text("first version\n".to_string()));
+    assert_eq!(
+        content.kind,
+        FileContentKind::Text("first version\n".to_string())
+    );
 }
 
 /// A path that did not exist yet at the queried revision reports
@@ -590,7 +595,11 @@ pub fn golden_parsing_preserves_a_file_name_with_special_characters<P: Repositor
     let dir = init_repo("contract-golden-special-name");
     let name = "café notes (draft).txt";
     write_file(dir.path(), name, "hello\n");
-    commit_all(dir.path(), "add file with special characters in its name", 0);
+    commit_all(
+        dir.path(),
+        "add file with special characters in its name",
+        0,
+    );
     write_file(dir.path(), name, "hello\nmodified\n");
 
     let provider = make_provider();
@@ -614,7 +623,8 @@ pub fn golden_parsing_preserves_a_multi_line_commit_message<P: RepositoryReadPor
     let dir = init_repo("contract-golden-multiline-message");
     write_file(dir.path(), "a.txt", "content\n");
     git_ok(dir.path(), &["add", "-A"]);
-    let message = "subject line\n\nfirst body paragraph.\n\nsecond body paragraph, with more detail.";
+    let message =
+        "subject line\n\nfirst body paragraph.\n\nsecond body paragraph, with more detail.";
     crate::git_ops::git_ok_at(dir.path(), &["commit", "--quiet", "-m", message], 0);
 
     let provider = make_provider();
@@ -624,7 +634,9 @@ pub fn golden_parsing_preserves_a_multi_line_commit_message<P: RepositoryReadPor
 
     assert_eq!(commit.subject, "subject line");
     assert!(commit.body.contains("first body paragraph."));
-    assert!(commit.body.contains("second body paragraph, with more detail."));
+    assert!(commit
+        .body
+        .contains("second body paragraph, with more detail."));
 }
 
 /// A commit message containing non-ASCII UTF-8 text (accented characters
@@ -635,12 +647,19 @@ pub fn golden_parsing_preserves_non_ascii_commit_message_content<P: RepositoryRe
 ) {
     let dir = init_repo("contract-golden-non-ascii-message");
     write_file(dir.path(), "a.txt", "content\n");
-    commit_all(dir.path(), "café \u{2615} — fix acentuação e emoji \u{1F680}", 0);
+    commit_all(
+        dir.path(),
+        "café \u{2615} — fix acentuação e emoji \u{1F680}",
+        0,
+    );
 
     let provider = make_provider();
     let repo = provider.discover(dir.path()).unwrap();
     let hash = rev_parse(dir.path(), "HEAD");
     let commit = provider.commit(&repo, &hash).unwrap();
 
-    assert_eq!(commit.subject, "café \u{2615} — fix acentuação e emoji \u{1F680}");
+    assert_eq!(
+        commit.subject,
+        "café \u{2615} — fix acentuação e emoji \u{1F680}"
+    );
 }

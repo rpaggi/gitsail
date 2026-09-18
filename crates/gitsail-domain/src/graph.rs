@@ -318,14 +318,29 @@ mod tests {
     #[test]
     fn a_linear_history_stays_on_a_single_stable_lane() {
         // c3 -> c2 -> c1 -> c0 (root), newest first as `git log` orders it.
-        let commits = vec![commit(3, &[2]), commit(2, &[1]), commit(1, &[0]), commit(0, &[])];
+        let commits = vec![
+            commit(3, &[2]),
+            commit(2, &[1]),
+            commit(1, &[0]),
+            commit(0, &[]),
+        ];
         let mut graph = CommitGraph::new();
         graph.append_page(&commits);
 
         assert_eq!(graph.rows().len(), 4);
-        assert!(graph.rows().iter().all(|row| row.lane == 0), "{:?}", graph.rows());
-        assert!(graph.rows().iter().all(|row| row.edges.iter().all(|e| e.resolved)));
-        assert!(graph.rows().last().unwrap().edges.is_empty(), "a root commit has no edges");
+        assert!(
+            graph.rows().iter().all(|row| row.lane == 0),
+            "{:?}",
+            graph.rows()
+        );
+        assert!(graph
+            .rows()
+            .iter()
+            .all(|row| row.edges.iter().all(|e| e.resolved)));
+        assert!(
+            graph.rows().last().unwrap().edges.is_empty(),
+            "a root commit has no edges"
+        );
         assert!(graph.open_lanes().is_empty());
     }
 
@@ -344,18 +359,28 @@ mod tests {
         let merge = &graph.rows()[0];
         assert_eq!(merge.lane, 0);
         assert_eq!(merge.edges.len(), 2);
-        assert_eq!(merge.edges[0].to_lane, 0, "first parent continues the mainline lane");
+        assert_eq!(
+            merge.edges[0].to_lane, 0,
+            "first parent continues the mainline lane"
+        );
         assert_eq!(merge.edges[1].to_lane, 1, "second parent spawns a new lane");
 
         let row_a = &graph.rows()[1];
         assert_eq!(row_a.lane, 0);
-        assert_eq!(row_a.passthrough_lanes, vec![1], "lane 1 (awaiting b) passes through untouched");
+        assert_eq!(
+            row_a.passthrough_lanes,
+            vec![1],
+            "lane 1 (awaiting b) passes through untouched"
+        );
 
         let row_b = &graph.rows()[2];
         assert_eq!(row_b.lane, 1);
 
         let row_x = &graph.rows()[3];
-        assert_eq!(row_x.lane, 0, "the two converging lanes both awaited the same commit");
+        assert_eq!(
+            row_x.lane, 0,
+            "the two converging lanes both awaited the same commit"
+        );
         assert!(row_x.edges.is_empty());
 
         // Both the merge's edges must now be resolved: the shared ancestor
@@ -376,11 +401,33 @@ mod tests {
         graph.append_page(&commits);
 
         assert_eq!(graph.lane_count(), 2);
-        let lane_of = |seed: u8| graph.rows().iter().find(|r| r.commit == hash(seed)).unwrap().lane;
-        assert_eq!(lane_of(0xD2), lane_of(0xD1), "one branch's lane stays consistent");
-        assert_eq!(lane_of(0xE2), lane_of(0xE1), "the other branch's lane stays consistent");
-        assert_ne!(lane_of(0xD2), lane_of(0xE2), "unrelated branches never share a lane");
-        assert!(graph.rows().iter().all(|r| r.edges.iter().all(|e| e.resolved)));
+        let lane_of = |seed: u8| {
+            graph
+                .rows()
+                .iter()
+                .find(|r| r.commit == hash(seed))
+                .unwrap()
+                .lane
+        };
+        assert_eq!(
+            lane_of(0xD2),
+            lane_of(0xD1),
+            "one branch's lane stays consistent"
+        );
+        assert_eq!(
+            lane_of(0xE2),
+            lane_of(0xE1),
+            "the other branch's lane stays consistent"
+        );
+        assert_ne!(
+            lane_of(0xD2),
+            lane_of(0xE2),
+            "unrelated branches never share a lane"
+        );
+        assert!(graph
+            .rows()
+            .iter()
+            .all(|r| r.edges.iter().all(|e| e.resolved)));
     }
 
     #[test]
@@ -456,8 +503,16 @@ mod tests {
 
         graph.append_page(&[commit(1, &[0])]);
 
-        assert_eq!(graph.rows()[0].lane, lane_before, "an emitted row's lane never changes");
-        assert_eq!(graph.rows()[1].lane, open_lane, "the continuing commit reuses the lane it was awaited on");
+        assert_eq!(
+            graph.rows()[0].lane,
+            lane_before,
+            "an emitted row's lane never changes"
+        );
+        assert_eq!(
+            graph.rows()[1].lane,
+            open_lane,
+            "the continuing commit reuses the lane it was awaited on"
+        );
     }
 
     #[test]
@@ -493,7 +548,10 @@ mod tests {
         // matching an unrelated commit, nor fabricate a row for `hash(0)`.
         graph.append_page(&[commit(9, &[])]);
 
-        assert!(!graph.rows()[0].edges[0].resolved, "an unrelated page must never resolve a dangling edge");
+        assert!(
+            !graph.rows()[0].edges[0].resolved,
+            "an unrelated page must never resolve a dangling edge"
+        );
         assert!(graph.is_open(&hash(0)));
         assert!(graph.rows().iter().all(|r| r.commit != hash(0)));
     }

@@ -312,7 +312,10 @@ pub fn build_web_url(forge: ForgeKind, remote_url: &RemoteUrl, path: ForgePath) 
 /// Returns `None` under the exact same conditions as [`build_web_url`]:
 /// `remote_url` cannot be parsed as a remote at all, or it resolves to a
 /// *different* forge than `forge` asserts.
-pub fn repository_location(forge: ForgeKind, remote_url: &RemoteUrl) -> Option<(String, Vec<String>)> {
+pub fn repository_location(
+    forge: ForgeKind,
+    remote_url: &RemoteUrl,
+) -> Option<(String, Vec<String>)> {
     let location = parse_remote(remote_url)?;
     if forge_for_host(&location.host)? != forge {
         return None;
@@ -514,7 +517,9 @@ mod tests {
         assert_eq!(built.scheme(), "https");
         assert_eq!(built.host_str(), Some("github.com"));
         assert_eq!(built.query(), None, "no query must be introduced");
-        assert!(built.as_str().starts_with("https://github.com/org/repo/tree/"));
+        assert!(built
+            .as_str()
+            .starts_with("https://github.com/org/repo/tree/"));
         // The literal branch text is still present (nothing is silently
         // dropped) but only as inert, percent-encoded path content — never
         // as an actual `?query=value` on the URL.
@@ -530,7 +535,9 @@ mod tests {
         assert_eq!(built.scheme(), "https");
         assert_eq!(built.host_str(), Some("github.com"));
         assert_eq!(built.fragment(), None, "no fragment must be introduced");
-        assert!(built.as_str().starts_with("https://github.com/org/repo/tree/"));
+        assert!(built
+            .as_str()
+            .starts_with("https://github.com/org/repo/tree/"));
     }
 
     #[test]
@@ -545,7 +552,9 @@ mod tests {
         // prefix: the ".." segments must show up as opaque, encoded text
         // *after* it, never having collapsed it away.
         assert!(
-            built.as_str().starts_with("https://github.com/org/repo/tree/"),
+            built
+                .as_str()
+                .starts_with("https://github.com/org/repo/tree/"),
             "got {built}"
         );
         assert!(!built.path().contains("/../"));
@@ -561,7 +570,15 @@ mod tests {
         let segments: Vec<&str> = built.path_segments().unwrap().collect();
         assert_eq!(
             segments,
-            vec!["org", "repo", "tree", "%252E%252E", "%252E%252E", "%252E%252E", "evil"]
+            vec![
+                "org",
+                "repo",
+                "tree",
+                "%252E%252E",
+                "%252E%252E",
+                "%252E%252E",
+                "evil"
+            ]
         );
 
         // Even a strict RFC 3986 dot-segment-removal pass re-parsing this
@@ -625,7 +642,11 @@ mod tests {
         assert_eq!(host, "gitlab.example.com");
         assert_eq!(
             segments,
-            vec!["group".to_string(), "subgroup".to_string(), "repo".to_string()]
+            vec![
+                "group".to_string(),
+                "subgroup".to_string(),
+                "repo".to_string()
+            ]
         );
     }
 

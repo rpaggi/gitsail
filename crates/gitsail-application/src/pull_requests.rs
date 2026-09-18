@@ -194,8 +194,12 @@ pub enum ListPullRequestsOutcome {
     Page(PullRequestPage),
     AuthenticationRequired,
     PermissionDenied,
-    RateLimited { retry_after_seconds: Option<u64> },
-    Offline { message: String },
+    RateLimited {
+        retry_after_seconds: Option<u64>,
+    },
+    Offline {
+        message: String,
+    },
     Error(GitSailError),
 }
 
@@ -212,7 +216,10 @@ impl ListPullRequests {
         query_port: Arc<dyn PullRequestQueryPort>,
         credentials: Arc<dyn ForgeCredentialPort>,
     ) -> Self {
-        Self { query_port, credentials }
+        Self {
+            query_port,
+            credentials,
+        }
     }
 
     /// `page` is 1-based (see [`PullRequestQueryPort`]'s own doc comment).
@@ -223,7 +230,11 @@ impl ListPullRequests {
         let Some((host, path_segments)) = repository_location(kind, &remote.fetch_url) else {
             return ListPullRequestsOutcome::NoForgeDetected;
         };
-        let repository = ForgeRepositoryRef { kind, host: host.clone(), path_segments };
+        let repository = ForgeRepositoryRef {
+            kind,
+            host: host.clone(),
+            path_segments,
+        };
 
         // No stored token is never a hard stop (suggested scope
         // decision: still try to list *public* PRs/MRs unauthenticated —
@@ -235,15 +246,22 @@ impl ListPullRequests {
         let account = ForgeAccountId::new(kind, host);
         let token = self.credentials.token(&account).ok().flatten();
 
-        match self.query_port.list_pull_requests(&repository, page, token.as_ref()) {
+        match self
+            .query_port
+            .list_pull_requests(&repository, page, token.as_ref())
+        {
             Ok(result_page) => ListPullRequestsOutcome::Page(result_page),
             Err(PullRequestQueryError::AuthenticationRequired) => {
                 ListPullRequestsOutcome::AuthenticationRequired
             }
-            Err(PullRequestQueryError::PermissionDenied) => ListPullRequestsOutcome::PermissionDenied,
-            Err(PullRequestQueryError::RateLimited { retry_after_seconds }) => {
-                ListPullRequestsOutcome::RateLimited { retry_after_seconds }
+            Err(PullRequestQueryError::PermissionDenied) => {
+                ListPullRequestsOutcome::PermissionDenied
             }
+            Err(PullRequestQueryError::RateLimited {
+                retry_after_seconds,
+            }) => ListPullRequestsOutcome::RateLimited {
+                retry_after_seconds,
+            },
             Err(PullRequestQueryError::NetworkFailure(message)) => {
                 ListPullRequestsOutcome::Offline { message }
             }
@@ -284,7 +302,10 @@ mod tests {
             self.tokens.lock().unwrap().remove(account);
             Ok(())
         }
-        fn status(&self, account: &ForgeAccountId) -> Result<crate::ForgeConnectionStatus, GitSailError> {
+        fn status(
+            &self,
+            account: &ForgeAccountId,
+        ) -> Result<crate::ForgeConnectionStatus, GitSailError> {
             Ok(if self.tokens.lock().unwrap().contains_key(account) {
                 crate::ForgeConnectionStatus::Connected
             } else {
@@ -313,7 +334,10 @@ mod tests {
     }
     impl ScriptedPort {
         fn new(result: Result<PullRequestPage, PullRequestQueryErrorKind>) -> Self {
-            Self { result: Mutex::new(Some(result)), last_call: Mutex::new(None) }
+            Self {
+                result: Mutex::new(Some(result)),
+                last_call: Mutex::new(None),
+            }
         }
     }
     impl PullRequestQueryPort for ScriptedPort {
@@ -328,7 +352,13 @@ mod tests {
                 page,
                 token.map(|t| t.expose_secret().to_string()),
             ));
-            match self.result.lock().unwrap().take().expect("called more than once") {
+            match self
+                .result
+                .lock()
+                .unwrap()
+                .take()
+                .expect("called more than once")
+            {
                 Ok(page) => Ok(page),
                 Err(PullRequestQueryErrorKind::AuthenticationRequired) => {
                     Err(PullRequestQueryError::AuthenticationRequired)
@@ -337,7 +367,9 @@ mod tests {
                     Err(PullRequestQueryError::PermissionDenied)
                 }
                 Err(PullRequestQueryErrorKind::RateLimited(secs)) => {
-                    Err(PullRequestQueryError::RateLimited { retry_after_seconds: secs })
+                    Err(PullRequestQueryError::RateLimited {
+                        retry_after_seconds: secs,
+                    })
                 }
                 Err(PullRequestQueryErrorKind::NetworkFailure(msg)) => {
                     Err(PullRequestQueryError::NetworkFailure(msg))
@@ -373,8 +405,12 @@ mod tests {
                 panic!("must not be called when no forge remote is detected");
             }
         }
-        let remotes = vec![remote("origin", "https://internal.example.com/team/repo.git")];
-        let use_case = ListPullRequests::new(Arc::new(PanicPort), Arc::new(FakeCredentials::default()));
+        let remotes = vec![remote(
+            "origin",
+            "https://internal.example.com/team/repo.git",
+        )];
+        let use_case =
+            ListPullRequests::new(Arc::new(PanicPort), Arc::new(FakeCredentials::default()));
 
         assert!(matches!(
             use_case.execute(&remotes, 1),
@@ -384,7 +420,10 @@ mod tests {
 
     #[test]
     fn successful_page_is_passed_through_unchanged() {
-        let page = PullRequestPage { items: vec![sample_pr()], has_next_page: true };
+        let page = PullRequestPage {
+            items: vec![sample_pr()],
+            has_next_page: true,
+        };
         let port = Arc::new(ScriptedPort::new(Ok(page.clone())));
         let use_case = ListPullRequests::new(port, Arc::new(FakeCredentials::default()));
 
@@ -396,7 +435,10 @@ mod tests {
 
     #[test]
     fn truly_empty_page_is_distinguishable_from_every_error_state() {
-        let empty = PullRequestPage { items: vec![], has_next_page: false };
+        let empty = PullRequestPage {
+            items: vec![],
+            has_next_page: false,
+        };
         let port = Arc::new(ScriptedPort::new(Ok(empty.clone())));
         let use_case = ListPullRequests::new(port, Arc::new(FakeCredentials::default()));
 
@@ -413,7 +455,9 @@ mod tests {
     fn stored_token_is_passed_through_to_the_port() {
         let credentials = Arc::new(FakeCredentials::default());
         let account = ForgeAccountId::new(ForgeKind::GitHub, "github.com");
-        credentials.connect(&account, ForgeToken::new("sentinel-fake-token")).unwrap();
+        credentials
+            .connect(&account, ForgeToken::new("sentinel-fake-token"))
+            .unwrap();
 
         let empty = PullRequestPage::default();
         let port = Arc::new(ScriptedPort::new(Ok(empty)));
@@ -424,7 +468,10 @@ mod tests {
         let (repository, page, token) = port.last_call.lock().unwrap().clone().unwrap();
         assert_eq!(repository.kind, ForgeKind::GitHub);
         assert_eq!(repository.host, "github.com");
-        assert_eq!(repository.path_segments, vec!["org".to_string(), "repo".to_string()]);
+        assert_eq!(
+            repository.path_segments,
+            vec!["org".to_string(), "repo".to_string()]
+        );
         assert_eq!(page, 1);
         assert_eq!(token.as_deref(), Some("sentinel-fake-token"));
     }
@@ -438,7 +485,10 @@ mod tests {
         use_case.execute(&github_remotes(), 1);
 
         let (_, _, token) = port.last_call.lock().unwrap().clone().unwrap();
-        assert_eq!(token, None, "must still attempt an unauthenticated (public) listing");
+        assert_eq!(
+            token, None,
+            "must still attempt an unauthenticated (public) listing"
+        );
     }
 
     #[test]
@@ -451,11 +501,17 @@ mod tests {
             fn disconnect(&self, _: &ForgeAccountId) -> Result<(), GitSailError> {
                 unimplemented!()
             }
-            fn status(&self, _: &ForgeAccountId) -> Result<crate::ForgeConnectionStatus, GitSailError> {
+            fn status(
+                &self,
+                _: &ForgeAccountId,
+            ) -> Result<crate::ForgeConnectionStatus, GitSailError> {
                 unimplemented!()
             }
             fn token(&self, _: &ForgeAccountId) -> Result<Option<ForgeToken>, GitSailError> {
-                Err(GitSailError::new(gitsail_domain::ErrorCode::Internal, "keyring boom"))
+                Err(GitSailError::new(
+                    gitsail_domain::ErrorCode::Internal,
+                    "keyring boom",
+                ))
             }
         }
         let empty = PullRequestPage::default();
@@ -470,14 +526,18 @@ mod tests {
 
     #[test]
     fn authentication_required_is_distinct_from_permission_denied() {
-        let port = Arc::new(ScriptedPort::new(Err(PullRequestQueryErrorKind::AuthenticationRequired)));
+        let port = Arc::new(ScriptedPort::new(Err(
+            PullRequestQueryErrorKind::AuthenticationRequired,
+        )));
         let use_case = ListPullRequests::new(port, Arc::new(FakeCredentials::default()));
         assert!(matches!(
             use_case.execute(&github_remotes(), 1),
             ListPullRequestsOutcome::AuthenticationRequired
         ));
 
-        let port = Arc::new(ScriptedPort::new(Err(PullRequestQueryErrorKind::PermissionDenied)));
+        let port = Arc::new(ScriptedPort::new(Err(
+            PullRequestQueryErrorKind::PermissionDenied,
+        )));
         let use_case = ListPullRequests::new(port, Arc::new(FakeCredentials::default()));
         assert!(matches!(
             use_case.execute(&github_remotes(), 1),
@@ -487,11 +547,15 @@ mod tests {
 
     #[test]
     fn rate_limited_carries_the_reported_wait_time_through() {
-        let port = Arc::new(ScriptedPort::new(Err(PullRequestQueryErrorKind::RateLimited(Some(42)))));
+        let port = Arc::new(ScriptedPort::new(Err(
+            PullRequestQueryErrorKind::RateLimited(Some(42)),
+        )));
         let use_case = ListPullRequests::new(port, Arc::new(FakeCredentials::default()));
 
         match use_case.execute(&github_remotes(), 1) {
-            ListPullRequestsOutcome::RateLimited { retry_after_seconds } => {
+            ListPullRequestsOutcome::RateLimited {
+                retry_after_seconds,
+            } => {
                 assert_eq!(retry_after_seconds, Some(42));
             }
             other => panic!("expected RateLimited, got {other:?}"),
@@ -500,24 +564,30 @@ mod tests {
 
     #[test]
     fn rate_limited_without_a_reported_wait_time_is_still_distinct_from_offline() {
-        let port = Arc::new(ScriptedPort::new(Err(PullRequestQueryErrorKind::RateLimited(None))));
+        let port = Arc::new(ScriptedPort::new(Err(
+            PullRequestQueryErrorKind::RateLimited(None),
+        )));
         let use_case = ListPullRequests::new(port, Arc::new(FakeCredentials::default()));
 
         assert!(matches!(
             use_case.execute(&github_remotes(), 1),
-            ListPullRequestsOutcome::RateLimited { retry_after_seconds: None }
+            ListPullRequestsOutcome::RateLimited {
+                retry_after_seconds: None
+            }
         ));
     }
 
     #[test]
     fn network_failure_maps_to_the_offline_state() {
-        let port = Arc::new(ScriptedPort::new(Err(PullRequestQueryErrorKind::NetworkFailure(
-            "connection refused".to_string(),
-        ))));
+        let port = Arc::new(ScriptedPort::new(Err(
+            PullRequestQueryErrorKind::NetworkFailure("connection refused".to_string()),
+        )));
         let use_case = ListPullRequests::new(port, Arc::new(FakeCredentials::default()));
 
         match use_case.execute(&github_remotes(), 1) {
-            ListPullRequestsOutcome::Offline { message } => assert_eq!(message, "connection refused"),
+            ListPullRequestsOutcome::Offline { message } => {
+                assert_eq!(message, "connection refused")
+            }
             other => panic!("expected Offline, got {other:?}"),
         }
     }

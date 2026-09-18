@@ -13,7 +13,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use gitsail_application::RepositoryReadPort;
-use gitsail_domain::{CommitHash, ConflictStage, ErrorCode, InProgressOperation, OperationCapability};
+use gitsail_domain::{
+    CommitHash, ConflictStage, ErrorCode, InProgressOperation, OperationCapability,
+};
 // T-252/US-119: this file's own `TempDir`/`git`/`git_ok`/`init_repo`/
 // `commit_all`/`rev_parse`/`provider` helpers used to be duplicated here
 // (and in ~8 other integration test files); they now live in
@@ -23,7 +25,9 @@ use gitsail_domain::{CommitHash, ConflictStage, ErrorCode, InProgressOperation, 
 // about (they only assert conflict detection, never a specific hash), so a
 // monotonically increasing counter is threaded through where the original
 // hard-coded no-argument version was called positionally.
-use gitsail_test_support::{commit_all, git, git_ok, init_repo, provider, rev_parse, write_file, TempDir};
+use gitsail_test_support::{
+    commit_all, git, git_ok, init_repo, provider, rev_parse, write_file, TempDir,
+};
 
 // ---------------------------------------------------------------------
 // Baseline: nothing in progress.
@@ -83,8 +87,8 @@ fn setup_diverging_branches(repo_dir: &Path, other_branch: &str) -> (CommitHash,
 }
 
 #[test]
-fn a_conflicting_merge_started_outside_gitsail_is_detected_with_its_conflicted_file_and_capabilities()
-{
+fn a_conflicting_merge_started_outside_gitsail_is_detected_with_its_conflicted_file_and_capabilities(
+) {
     let repo_dir = init_repo("merge-conflict");
     let (feature_tip, _main_tip) = setup_diverging_branches(repo_dir.path(), "feature");
 
@@ -215,7 +219,10 @@ fn a_conflicting_default_backend_rebase_is_detected_as_rebase_with_an_onto_commi
     assert!(op.supports(OperationCapability::Abort));
 
     git_ok(repo_dir.path(), &["rebase", "--abort"]);
-    assert!(provider.detect_in_progress_operation(&repo).unwrap().is_none());
+    assert!(provider
+        .detect_in_progress_operation(&repo)
+        .unwrap()
+        .is_none());
 }
 
 #[test]
@@ -252,7 +259,10 @@ fn a_conflicting_interactive_rebase_is_detected_as_interactive() {
     }
 
     git_ok(repo_dir.path(), &["rebase", "--abort"]);
-    assert!(provider.detect_in_progress_operation(&repo).unwrap().is_none());
+    assert!(provider
+        .detect_in_progress_operation(&repo)
+        .unwrap()
+        .is_none());
 }
 
 // ---------------------------------------------------------------------
@@ -288,7 +298,10 @@ fn a_conflicting_cherry_pick_is_detected_with_its_target_commit() {
     assert!(op.supports(OperationCapability::Abort));
 
     git_ok(repo_dir.path(), &["cherry-pick", "--abort"]);
-    assert!(provider.detect_in_progress_operation(&repo).unwrap().is_none());
+    assert!(provider
+        .detect_in_progress_operation(&repo)
+        .unwrap()
+        .is_none());
 }
 
 // ---------------------------------------------------------------------
@@ -308,7 +321,10 @@ fn a_conflicting_revert_is_detected_with_its_target_commit() {
     write_file(repo_dir.path(), "f.txt", "line1\nCHANGED-later\nline3\n");
     commit_all(repo_dir.path(), "changes the line later", 1);
 
-    let revert_output = git(repo_dir.path(), &["revert", "--no-edit", adding_commit.as_str()]);
+    let revert_output = git(
+        repo_dir.path(),
+        &["revert", "--no-edit", adding_commit.as_str()],
+    );
     assert!(
         !revert_output.status.success(),
         "the revert must conflict for this test to be meaningful"
@@ -331,7 +347,10 @@ fn a_conflicting_revert_is_detected_with_its_target_commit() {
     assert!(op.supports(OperationCapability::Abort));
 
     git_ok(repo_dir.path(), &["revert", "--abort"]);
-    assert!(provider.detect_in_progress_operation(&repo).unwrap().is_none());
+    assert!(provider
+        .detect_in_progress_operation(&repo)
+        .unwrap()
+        .is_none());
 }
 
 // ---------------------------------------------------------------------
@@ -370,7 +389,10 @@ fn a_bisect_run_in_progress_is_detected_without_continue() {
     );
 
     git_ok(repo_dir.path(), &["bisect", "reset"]);
-    assert!(provider.detect_in_progress_operation(&repo).unwrap().is_none());
+    assert!(provider
+        .detect_in_progress_operation(&repo)
+        .unwrap()
+        .is_none());
 }
 
 // ---------------------------------------------------------------------

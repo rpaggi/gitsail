@@ -27,7 +27,14 @@ fn init_repo_with_a_merge(dir: &std::path::Path) {
     git(dir, &["commit", "--quiet", "-m", "main commit"]);
     git(
         dir,
-        &["merge", "--quiet", "--no-ff", "-m", "merge feature", "feature"],
+        &[
+            "merge",
+            "--quiet",
+            "--no-ff",
+            "-m",
+            "merge feature",
+            "feature",
+        ],
     );
 }
 
@@ -50,7 +57,9 @@ fn open_and_load(app: &mut App, dir: &std::path::Path) {
             _ => None,
         })
         .expect("RefreshStatus command");
-    let status = GetRepositoryStatus::new(port.clone()).execute(&repo).unwrap();
+    let status = GetRepositoryStatus::new(port.clone())
+        .execute(&repo)
+        .unwrap();
     app.on_status_refreshed(ticket, Ok(status));
 
     for command in commands {
@@ -138,7 +147,10 @@ fn the_graph_cursor_keeps_pointing_at_the_same_commit_hash_across_a_page_boundar
     let first_page = GetCommitHistory::new(port.clone())
         .execute(&repo, &first_query)
         .unwrap();
-    assert!(first_page.has_more, "the merge fixture has more than one commit");
+    assert!(
+        first_page.has_more,
+        "the merge fixture has more than one commit"
+    );
     app.on_commit_graph_page_loaded(request_id, Ok(first_page.clone()));
 
     focus_graph(&mut app);
@@ -149,7 +161,9 @@ fn the_graph_cursor_keeps_pointing_at_the_same_commit_hash_across_a_page_boundar
         cursor: first_page.next_cursor.clone(),
         ..CommitQuery::default()
     };
-    let second_page = GetCommitHistory::new(port).execute(&repo, &second_query).unwrap();
+    let second_page = GetCommitHistory::new(port)
+        .execute(&repo, &second_query)
+        .unwrap();
     app.on_commit_graph_page_loaded(request_id, Ok(second_page));
 
     assert_eq!(
@@ -172,7 +186,10 @@ fn a_message_search_narrows_the_graph_to_matching_commits() {
     focus_graph(&mut app);
 
     let full_count = app.commit_graph().rows().len();
-    assert!(full_count >= 4, "the merge fixture has at least four commits");
+    assert!(
+        full_count >= 4,
+        "the merge fixture has at least four commits"
+    );
 
     submit_search(&mut app, dir.path(), "feature commit");
 
@@ -181,7 +198,11 @@ fn a_message_search_narrows_the_graph_to_matching_commits() {
         Some("feature commit"),
         "the submitted text must be shown as the active filter"
     );
-    assert_eq!(app.commit_graph().rows().len(), 1, "only the matching commit must remain");
+    assert_eq!(
+        app.commit_graph().rows().len(),
+        1,
+        "only the matching commit must remain"
+    );
     assert_eq!(app.graph_commits()[0].subject, "feature commit");
     assert_eq!(
         app.graph_cursor(),
@@ -237,7 +258,9 @@ fn a_branch_search_uses_the_branch_prefix() {
         app.graph_commits()
     );
     assert!(
-        !app.graph_commits().iter().any(|c| c.subject == "merge feature"),
+        !app.graph_commits()
+            .iter()
+            .any(|c| c.subject == "merge feature"),
         "branch:feature must not include a commit only reachable from main: {:?}",
         app.graph_commits()
     );
@@ -308,10 +331,16 @@ fn starting_a_commit_search_never_blocks_navigation_of_the_still_loaded_graph() 
     assert!(open_commands.is_empty());
     for c in "abc".chars() {
         let commands = app.update(Action::CommitSearchInput(c));
-        assert!(commands.is_empty(), "typing into the search box must not dispatch anything");
+        assert!(
+            commands.is_empty(),
+            "typing into the search box must not dispatch anything"
+        );
     }
     assert_eq!(app.commit_search(), Some("abc"));
-    assert!(app.commit_graph().rows().len() >= 4, "the graph loaded before search must be untouched");
+    assert!(
+        app.commit_graph().rows().len() >= 4,
+        "the graph loaded before search must be untouched"
+    );
 }
 
 // -- Criterion 3: Enter opens commit details with hash, author, dates, and
@@ -325,7 +354,13 @@ fn enter_on_the_graph_opens_commit_details_with_hash_author_and_message() {
     // the subject line.
     git(
         dir.path(),
-        &["commit", "--quiet", "--allow-empty", "-m", "add feature\n\nDetailed body line."],
+        &[
+            "commit",
+            "--quiet",
+            "--allow-empty",
+            "-m",
+            "add feature\n\nDetailed body line.",
+        ],
     );
 
     let (mut app, _commands) = App::new(dir.path().to_path_buf(), read_port(), false);
@@ -334,7 +369,10 @@ fn enter_on_the_graph_opens_commit_details_with_hash_author_and_message() {
 
     assert!(!app.commit_details_open());
     let commands = app.update(Action::Activate);
-    assert!(commands.is_empty(), "opening details reuses already-loaded data, no Command needed");
+    assert!(
+        commands.is_empty(),
+        "opening details reuses already-loaded data, no Command needed"
+    );
     assert!(app.commit_details_open());
 
     let commit = app.selected_graph_commit().unwrap().clone();
@@ -342,12 +380,30 @@ fn enter_on_the_graph_opens_commit_details_with_hash_author_and_message() {
     assert_eq!(commit.body.trim(), "Detailed body line.");
 
     let text = render(&app);
-    assert!(text.contains("Commit Details"), "the overlay must be visible:\n{text}");
-    assert!(text.contains(commit.hash.as_str()), "the full hash must be shown:\n{text}");
-    assert!(text.contains(&commit.author.name), "the author's name must be shown:\n{text}");
-    assert!(text.contains(&commit.author.email), "the author's email must be shown:\n{text}");
-    assert!(text.contains("add feature"), "the subject must be shown:\n{text}");
-    assert!(text.contains("Detailed body line."), "the full body must be shown:\n{text}");
+    assert!(
+        text.contains("Commit Details"),
+        "the overlay must be visible:\n{text}"
+    );
+    assert!(
+        text.contains(commit.hash.as_str()),
+        "the full hash must be shown:\n{text}"
+    );
+    assert!(
+        text.contains(&commit.author.name),
+        "the author's name must be shown:\n{text}"
+    );
+    assert!(
+        text.contains(&commit.author.email),
+        "the author's email must be shown:\n{text}"
+    );
+    assert!(
+        text.contains("add feature"),
+        "the subject must be shown:\n{text}"
+    );
+    assert!(
+        text.contains("Detailed body line."),
+        "the full body must be shown:\n{text}"
+    );
 
     // Esc closes the overlay again without touching anything else.
     app.update(Action::Dismiss);
@@ -381,8 +437,14 @@ fn commit_details_shows_the_committer_separately_when_it_differs_from_the_author
     app.update(Action::Activate);
 
     let text = render(&app);
-    assert!(text.contains("Ada Lovelace"), "the author must be shown:\n{text}");
-    assert!(text.contains("Grace Hopper"), "a differing committer must be shown:\n{text}");
+    assert!(
+        text.contains("Ada Lovelace"),
+        "the author must be shown:\n{text}"
+    );
+    assert!(
+        text.contains("Grace Hopper"),
+        "a differing committer must be shown:\n{text}"
+    );
 }
 
 #[test]

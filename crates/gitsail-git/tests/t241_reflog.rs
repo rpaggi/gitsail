@@ -216,11 +216,7 @@ fn cat_file_reports_a_never_written_hash_as_missing_confirming_the_batch_check_o
     // `GitCliProvider::reflog`'s existence check relies on to ever produce
     // `ReflogObjectState::Missing` for a real entry.
     let status = Command::new("git")
-        .args([
-            "cat-file",
-            "-e",
-            "cafecafecafecafecafecafecafecafecafecafe",
-        ])
+        .args(["cat-file", "-e", "cafecafecafecafecafecafecafecafecafecafe"])
         .current_dir(repo_dir.path())
         .env("LC_ALL", "C")
         .env("LANG", "C")

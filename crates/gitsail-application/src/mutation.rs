@@ -472,7 +472,9 @@ impl MutationKind {
             MutationKind::ForcePushWithLease { remote, branch } => {
                 format!("branch '{branch}' on remote '{remote}' (force push with lease)")
             }
-            MutationKind::ApplyPatch { affected_file_count } => {
+            MutationKind::ApplyPatch {
+                affected_file_count,
+            } => {
                 format!(
                     "{affected_file_count} file{} affected by the patch",
                     if *affected_file_count == 1 { "" } else { "s" }
@@ -492,7 +494,9 @@ impl MutationKind {
                 format!("'{}' (take {side_label})", path.display())
             }
             MutationKind::Rebase { onto } => format!("rebasing the current branch onto '{onto}'"),
-            MutationKind::SkipOperation => "the current step of the in-progress operation".to_string(),
+            MutationKind::SkipOperation => {
+                "the current step of the in-progress operation".to_string()
+            }
             MutationKind::ExecuteRebasePlan { onto, commit_count } => format!(
                 "rebasing {commit_count} commit{} onto '{onto}'",
                 if *commit_count == 1 { "" } else { "s" }

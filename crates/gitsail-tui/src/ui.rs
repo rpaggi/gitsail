@@ -6,6 +6,7 @@
 //! reaching a widget (SAD §33) — this module is the render boundary that
 //! rule applies at; `App` itself always holds the raw value.
 
+use crate::graph_view;
 use gitsail_application::{
     CherryPickResult, MergeResult, PullOutcome, RebaseAction, RebaseResult, ResetMode, RevertResult,
 };
@@ -13,14 +14,15 @@ use gitsail_domain::{
     BlameOrigin, BranchKind, Commit, ConflictSideContent, ConflictStage, DiffLineOrigin,
     GitTimestamp, TagKind,
 };
-use crate::graph_view;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Line;
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
 use ratatui::Frame;
 
-use crate::app::{App, DiffViewMode, Panel, PatchApplyOutcome, PatchExportOutcome, ReferenceView, ViewPhase};
+use crate::app::{
+    App, DiffViewMode, Panel, PatchApplyOutcome, PatchExportOutcome, ReferenceView, ViewPhase,
+};
 use crate::operation::OperationState;
 use crate::sanitize;
 use crate::status_view::DiffScope;
@@ -634,7 +636,11 @@ fn render_references_panel(frame: &mut Frame, rect: Rect, app: &App) {
                 app.reflog()
                     .iter()
                     .map(|entry| {
-                        let missing = if entry.is_available() { "" } else { " [missing]" };
+                        let missing = if entry.is_available() {
+                            ""
+                        } else {
+                            " [missing]"
+                        };
                         format!(
                             "{} {} {}{missing}",
                             entry.selector("HEAD"),
@@ -652,12 +658,12 @@ fn render_references_panel(frame: &mut Frame, rect: Rect, app: &App) {
         .into_iter()
         .enumerate()
         .map(|(i, text)| {
-            let style = if has_entries && app.focus() == Panel::References && i == app.reference_cursor()
-            {
-                Style::default().add_modifier(Modifier::REVERSED)
-            } else {
-                Style::default()
-            };
+            let style =
+                if has_entries && app.focus() == Panel::References && i == app.reference_cursor() {
+                    Style::default().add_modifier(Modifier::REVERSED)
+                } else {
+                    Style::default()
+                };
             ListItem::new(text).style(style)
         })
         .collect();
@@ -679,7 +685,8 @@ fn render_shortcuts(frame: &mut Frame, rect: Rect, app: &App) {
     } else if app.rebase_plan_reword_input().is_some() {
         "Type the new message · Enter confirms · Esc cancels".to_string()
     } else if app.rebase_plan_open() {
-        "j/k select · J/K move entry · a cycle action · Enter confirms plan · Esc closes".to_string()
+        "j/k select · J/K move entry · a cycle action · Enter confirms plan · Esc closes"
+            .to_string()
     } else if app.in_progress_operation().has_conflicts() {
         format!(
             "{} conflicted file(s) — press 'M' to resolve them",
@@ -757,7 +764,11 @@ fn render_commit_details(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(
         Paragraph::new(commit_details_lines(commit))
             .wrap(Wrap { trim: true })
-            .block(Block::default().title("Commit Details").borders(Borders::ALL)),
+            .block(
+                Block::default()
+                    .title("Commit Details")
+                    .borders(Borders::ALL),
+            ),
         popup,
     );
 }
@@ -841,7 +852,8 @@ fn civil_from_days(days_since_epoch: i64) -> (i64, u32, u32) {
     let z = days_since_epoch + 719_468;
     let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
     let day_of_era = (z - era * 146_097) as u64; // [0, 146096]
-    let year_of_era = (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365; // [0, 399]
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365; // [0, 399]
     let year = year_of_era as i64 + era * 400;
     let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100); // [0, 365]
     let mp = (5 * day_of_year + 2) / 153; // [0, 11]
@@ -869,7 +881,11 @@ fn render_reference_details(frame: &mut Frame, area: Rect, app: &App) {
                 ];
                 match &tag.kind {
                     TagKind::Lightweight => lines.push(Line::from("kind: lightweight")),
-                    TagKind::Annotated { message, tagger, date } => {
+                    TagKind::Annotated {
+                        message,
+                        tagger,
+                        date,
+                    } => {
                         lines.push(Line::from("kind: annotated"));
                         lines.push(Line::from(format!(
                             "tagger: {} <{}>",
@@ -925,9 +941,11 @@ fn render_reference_details(frame: &mut Frame, area: Rect, app: &App) {
     let popup = centered_rect(70, 60, area);
     frame.render_widget(Clear, popup);
     frame.render_widget(
-        Paragraph::new(lines)
-            .wrap(Wrap { trim: true })
-            .block(Block::default().title("Reference Details").borders(Borders::ALL)),
+        Paragraph::new(lines).wrap(Wrap { trim: true }).block(
+            Block::default()
+                .title("Reference Details")
+                .borders(Borders::ALL),
+        ),
         popup,
     );
 }
@@ -991,9 +1009,11 @@ fn render_forge_link_error(frame: &mut Frame, area: Rect, app: &App) {
     let popup = centered_rect(60, 40, area);
     frame.render_widget(Clear, popup);
     frame.render_widget(
-        Paragraph::new(lines)
-            .wrap(Wrap { trim: true })
-            .block(Block::default().title("Open in Browser").borders(Borders::ALL)),
+        Paragraph::new(lines).wrap(Wrap { trim: true }).block(
+            Block::default()
+                .title("Open in Browser")
+                .borders(Borders::ALL),
+        ),
         popup,
     );
 }
@@ -1205,7 +1225,11 @@ fn render_conflicts_overlay(frame: &mut Frame, area: Rect, app: &App) {
         lines.push(Line::from("No conflicted files remain."));
     }
     for (index, file) in files.iter().enumerate() {
-        let marker = if index == app.conflict_cursor() { '>' } else { ' ' };
+        let marker = if index == app.conflict_cursor() {
+            '>'
+        } else {
+            ' '
+        };
         lines.push(Line::from(format!(
             "{marker} {} ({})",
             sanitize::safe_line(&file.path.to_string_lossy()),
@@ -1277,7 +1301,11 @@ fn conflict_side_label(content: &ConflictSideContent) -> String {
     match content {
         ConflictSideContent::Text(text) => {
             let first_line = text.lines().next().unwrap_or("");
-            format!("{} ({} line(s))", sanitize::safe_line(first_line), text.lines().count())
+            format!(
+                "{} ({} line(s))",
+                sanitize::safe_line(first_line),
+                text.lines().count()
+            )
         }
         ConflictSideContent::Binary => "<binary content>".to_string(),
         ConflictSideContent::Absent => "<absent>".to_string(),
@@ -1320,7 +1348,11 @@ fn render_rebase_plan_overlay(frame: &mut Frame, area: Rect, app: &App) {
                 lines.push(Line::from("Nothing to reapply — already up to date."));
             }
             for (index, entry) in plan.entries.iter().enumerate() {
-                let marker = if index == app.rebase_plan_cursor() { '>' } else { ' ' };
+                let marker = if index == app.rebase_plan_cursor() {
+                    '>'
+                } else {
+                    ' '
+                };
                 let mut line = format!(
                     "{marker} {} {} {}",
                     rebase_action_label(entry.action),
@@ -1375,7 +1407,9 @@ fn render_rebase_plan_reword(frame: &mut Frame, area: Rect, app: &App) {
         Line::from(format!("Original: {}", sanitize::safe_line(subject))),
         Line::from(""),
         Line::from("New message:"),
-        Line::from(sanitize::safe_line(app.rebase_plan_reword_input().unwrap_or(""))),
+        Line::from(sanitize::safe_line(
+            app.rebase_plan_reword_input().unwrap_or(""),
+        )),
         Line::from(""),
         Line::from("Enter confirms · Esc cancels"),
     ];
@@ -1418,10 +1452,17 @@ fn render_reset_mode_overlay(frame: &mut Frame, area: Rect, app: &App) {
             ResetMode::Mixed,
             "Mixed — HEAD and index move; working tree preserved (changes become unstaged)",
         ),
-        (ResetMode::Hard, "Hard — HEAD, index and working tree all move"),
+        (
+            ResetMode::Hard,
+            "Hard — HEAD, index and working tree all move",
+        ),
     ];
     for (index, (mode, description)) in modes.iter().enumerate() {
-        let marker = if index == app.reset_mode_cursor() { '>' } else { ' ' };
+        let marker = if index == app.reset_mode_cursor() {
+            '>'
+        } else {
+            ' '
+        };
         let mut line = format!("{marker} {description}");
         if *mode == ResetMode::Hard {
             line.push_str(&format!(
@@ -1533,7 +1574,11 @@ fn render_amend_overlay(frame: &mut Frame, area: Rect, app: &App) {
             lines.push(Line::from(format!(
                 "{} staged file{} will be folded into the amended commit.",
                 preview.staged_diff.files.len(),
-                if preview.staged_diff.files.len() == 1 { "" } else { "s" }
+                if preview.staged_diff.files.len() == 1 {
+                    ""
+                } else {
+                    "s"
+                }
             )));
             lines.push(Line::from(""));
             lines.push(Line::from("Message:"));
@@ -1547,7 +1592,9 @@ fn render_amend_overlay(frame: &mut Frame, area: Rect, app: &App) {
                 lines.push(Line::from(sanitize::safe_line(error.message())));
                 lines.push(Line::from(""));
             } else {
-                lines.push(Line::from("Loading HEAD's current commit and staged changes…"));
+                lines.push(Line::from(
+                    "Loading HEAD's current commit and staged changes…",
+                ));
                 lines.push(Line::from(""));
             }
         }
@@ -1574,9 +1621,11 @@ fn render_amend_overlay(frame: &mut Frame, area: Rect, app: &App) {
     let popup = centered_rect(75, 65, area);
     frame.render_widget(Clear, popup);
     frame.render_widget(
-        Paragraph::new(lines)
-            .wrap(Wrap { trim: true })
-            .block(Block::default().title("Amend Last Commit").borders(Borders::ALL)),
+        Paragraph::new(lines).wrap(Wrap { trim: true }).block(
+            Block::default()
+                .title("Amend Last Commit")
+                .borders(Borders::ALL),
+        ),
         popup,
     );
 }

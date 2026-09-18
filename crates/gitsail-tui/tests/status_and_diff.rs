@@ -42,8 +42,11 @@ fn run_diff_or_blame_command(app: &mut App, commands: Vec<Command>) {
     for command in commands {
         match command {
             Command::LoadDiff(id, repo, request) => {
-                let result = gitsail_application::GetDiff::new(read_port.clone())
-                    .execute(&repo, &request, &gitsail_domain::CancellationToken::new());
+                let result = gitsail_application::GetDiff::new(read_port.clone()).execute(
+                    &repo,
+                    &request,
+                    &gitsail_domain::CancellationToken::new(),
+                );
                 app.on_diff_loaded(id, result);
             }
             Command::LoadBlame(id, repo, request, content_version) => {
@@ -94,7 +97,11 @@ fn selecting_a_modified_file_loads_and_shows_its_unstaged_diff() {
 fn a_binary_file_shows_a_banner_instead_of_fabricated_hunks() {
     let dir = TempDir::new("diff-binary");
     init_repo_with_initial_commit(dir.path());
-    std::fs::write(dir.path().join("image.bin"), [0x89u8, b'P', b'N', b'G', 0x00, 0x01]).unwrap();
+    std::fs::write(
+        dir.path().join("image.bin"),
+        [0x89u8, b'P', b'N', b'G', 0x00, 0x01],
+    )
+    .unwrap();
     git(dir.path(), &["add", "image.bin"]);
 
     let (mut app, _commands) = App::new(dir.path().to_path_buf(), read_port(), false);
@@ -173,7 +180,10 @@ fn blame_shows_author_and_commit_without_terminal_control_codes() {
     run_diff_or_blame_command(&mut app, commands);
 
     let text = render(&app);
-    assert!(text.contains("Test User"), "author must be visible:\n{text}");
+    assert!(
+        text.contains("Test User"),
+        "author must be visible:\n{text}"
+    );
     assert!(!text.contains('\u{1b}'), "no raw control codes:\n{text}");
     assert!(
         text.contains("local"),
@@ -280,4 +290,3 @@ fn exporting_a_patch_falls_back_to_a_file_when_the_clipboard_is_unavailable_and_
 
     std::fs::remove_file(&path).expect("clean up the fallback patch file created by this test");
 }
-

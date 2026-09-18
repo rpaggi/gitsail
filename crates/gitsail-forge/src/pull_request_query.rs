@@ -37,7 +37,10 @@ impl CompositePullRequestQueryPort {
     /// serves both, and neither forge needs a different one).
     pub fn production() -> Self {
         let http: Arc<dyn HttpClient> = Arc::new(UreqHttpClient::new());
-        Self::with_adapters(GitHubPullRequestAdapter::new(http.clone()), GitLabMergeRequestAdapter::new(http))
+        Self::with_adapters(
+            GitHubPullRequestAdapter::new(http.clone()),
+            GitLabMergeRequestAdapter::new(http),
+        )
     }
 
     /// Builds a composite over already-constructed adapters — the seam
@@ -45,7 +48,10 @@ impl CompositePullRequestQueryPort {
     /// adapters (never a real `UreqHttpClient`) so dispatch can be
     /// verified with no real network call, matching this whole feature's
     /// DoD requirement.
-    pub fn with_adapters(github: GitHubPullRequestAdapter, gitlab: GitLabMergeRequestAdapter) -> Self {
+    pub fn with_adapters(
+        github: GitHubPullRequestAdapter,
+        gitlab: GitLabMergeRequestAdapter,
+    ) -> Self {
         Self { github, gitlab }
     }
 }
@@ -80,7 +86,9 @@ pub struct FakePullRequestQueryPort {
 
 impl FakePullRequestQueryPort {
     pub fn new(result: Result<PullRequestPage, PullRequestQueryError>) -> Self {
-        Self { result: Mutex::new(Some(result)) }
+        Self {
+            result: Mutex::new(Some(result)),
+        }
     }
 }
 
@@ -134,11 +142,21 @@ mod tests {
             GitLabMergeRequestAdapter::new(gitlab_http.clone()),
         );
 
-        let github_page = composite.list_pull_requests(&sample_ref(ForgeKind::GitHub), 1, None).unwrap();
-        let gitlab_page = composite.list_pull_requests(&sample_ref(ForgeKind::GitLab), 1, None).unwrap();
+        let github_page = composite
+            .list_pull_requests(&sample_ref(ForgeKind::GitHub), 1, None)
+            .unwrap();
+        let gitlab_page = composite
+            .list_pull_requests(&sample_ref(ForgeKind::GitLab), 1, None)
+            .unwrap();
 
-        assert!(!github_page.has_next_page, "must have been served by the GitHub fake, not GitLab's");
-        assert!(gitlab_page.has_next_page, "must have been served by the GitLab fake, not GitHub's");
+        assert!(
+            !github_page.has_next_page,
+            "must have been served by the GitHub fake, not GitLab's"
+        );
+        assert!(
+            gitlab_page.has_next_page,
+            "must have been served by the GitLab fake, not GitHub's"
+        );
         assert_eq!(github_http.calls().len(), 1);
         assert_eq!(gitlab_http.calls().len(), 1);
     }
@@ -158,14 +176,18 @@ mod tests {
         };
         let fake = FakePullRequestQueryPort::new(Ok(page.clone()));
 
-        let result = fake.list_pull_requests(&sample_ref(ForgeKind::GitHub), 1, None).unwrap();
+        let result = fake
+            .list_pull_requests(&sample_ref(ForgeKind::GitHub), 1, None)
+            .unwrap();
         assert_eq!(result, page);
     }
 
     #[test]
     fn fake_port_defaults_to_an_empty_page_when_unconfigured() {
         let fake = FakePullRequestQueryPort::default();
-        let result = fake.list_pull_requests(&sample_ref(ForgeKind::GitHub), 1, None).unwrap();
+        let result = fake
+            .list_pull_requests(&sample_ref(ForgeKind::GitHub), 1, None)
+            .unwrap();
         assert_eq!(result, PullRequestPage::default());
     }
 }

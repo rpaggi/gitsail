@@ -1,0 +1,200 @@
+name: CI
+
+# T-254/US-121 (EPIC-24 — Testing & Quality): first CI pipeline for this
+# repository. See docs/architecture/ci-policy.md for the full policy —
+# which jobs/checks block a merge vs. are informative, and the design
+# decisions behind this file (job split, matrix scope, non-blocking audit).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch: {}
+
+# Cancel superseded runs on the same ref (e.g. new pushes to a PR branch).
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Kept in sync with `rust-version` in the root Cargo.toml (ADR-021). This
+  # workflow does not read Cargo.toml to derive it — there is no portable,
+  # dependency-free way to do that across ubuntu/windows/macos runners
+  # without adding a tool just for this — so this value is duplicated here
+  # and must be updated by hand alongside Cargo.toml if the MSRV changes.
+  RUST_TOOLCHAIN: "1.97.0"
+
+jobs:
+  # ---------------------------------------------------------------------
+  # Rust workspace: CLI + Core (the mandatory v0.1 baseline per US-121
+  # criterion 1), plus the TUI and Desktop crates, which are also regular
+  # workspace members today (Cargo.toml `[workspace] members`) and so build
+  # in this same job for free — no separate Rust job is needed for them.
+  # Runs on all three OSes: this is the one job the acceptance criteria
+  # require to be genuinely multi-platform.
+  # ---------------------------------------------------------------------
+  rust:
+    name: Rust workspace (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      # Tauri's `apps/desktop/src-tauri` crate is a workspace member, so
+      # `cargo build/test --workspace` needs its Linux system libraries even
+      # though this job never packages a Tauri bundle. GitHub's hosted
+      # ubuntu-latest/windows-latest/macos-latest runners ship a system
+      # `git` already (documented assumption, see ci-policy.md); Windows and
+      # macOS need no extra system packages for Tauri v2 beyond Rust/Node
+      # itself (per Tauri's own prerequisites docs) — only Linux does.
+      - name: Install Linux system dependencies (WebKitGTK, GTK, etc.)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libdbus-1-dev \
+            libssl-dev \
+            libsoup-3.0-dev \
+            pkg-config \
+            patchelf
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: rustfmt, clippy
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: cargo test --workspace
+        run: cargo test --workspace
+
+      - name: cargo build --workspace
+        run: cargo build --workspace
+
+  # ---------------------------------------------------------------------
+  # Desktop frontend (Vue/TS side of apps/desktop). Runs on ubuntu-latest
+  # only: Node/Vue/TS toolchains behave the same across OSes at this stage
+  # and per-OS coverage is already provided by the Rust job's Tauri build
+  # above — see ci-policy.md for the full rationale (this is a documented
+  # time/cost trade-off, revisit once native OS-specific desktop behavior
+  # needs verifying, e.g. windowing/menus).
+  # ---------------------------------------------------------------------
+  desktop:
+    name: Desktop app (apps/desktop)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/desktop
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+
+      - run: npm ci
+      - run: npm run test -- --run
+      - run: npm run build
+
+  # ---------------------------------------------------------------------
+  # VS Code extension (apps/vscode). Node/TS only — no system dependencies,
+  # ubuntu-latest only, same rationale as the desktop job above.
+  # ---------------------------------------------------------------------
+  vscode:
+    name: VS Code extension (apps/vscode)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/vscode
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: apps/vscode/package-lock.json
+
+      - run: npm ci
+      - run: npx vitest run
+      - run: npx tsc -p ./
+
+  # ---------------------------------------------------------------------
+  # Architectural fitness functions (US-121 criterion 2): approximate,
+  # grep/text-based checks, not a full conformance tool. See
+  # scripts/ci/check-architecture.sh for the checks themselves and their
+  # documented exceptions, and ci-policy.md for what this job intentionally
+  # does not attempt to catch.
+  #
+  # The third criterion-2 check — "explicit protocol" (SCHEMA_VERSION /
+  # compatibility tests from T-172) — is not duplicated here: those are
+  # ordinary tests under crates/gitsail-protocol and
+  # crates/gitsail-cli/tests/protocol_compatibility.rs, already exercised by
+  # `cargo test --workspace` in the `rust` job above.
+  # ---------------------------------------------------------------------
+  architecture-fitness:
+    name: Architecture fitness functions
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run architecture fitness checks
+        run: bash scripts/ci/check-architecture.sh
+
+  # ---------------------------------------------------------------------
+  # Dependency audit (US-121 criterion 3). First time this exists in the
+  # project (no CI existed before T-254) — deliberately informative only
+  # for this initial v0.1 pipeline: `continue-on-error: true` on every step
+  # so a newly-disclosed advisory cannot block unrelated merges before
+  # anyone has triaged it. See ci-policy.md for when/how this is expected
+  # to graduate to blocking.
+  # ---------------------------------------------------------------------
+  dependency-audit:
+    name: Dependency audit (informative)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+        continue-on-error: true
+
+      - name: cargo audit (report only)
+        run: cargo audit
+        continue-on-error: true
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: npm audit — apps/desktop (report only)
+        working-directory: apps/desktop
+        run: npm audit
+        continue-on-error: true
+
+      - name: npm audit — apps/vscode (report only)
+        working-directory: apps/vscode
+        run: npm audit
+        continue-on-error: true

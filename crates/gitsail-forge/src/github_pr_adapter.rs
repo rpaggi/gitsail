@@ -105,7 +105,10 @@ impl GitHubPullRequestAdapter {
 }
 
 fn now_unix() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 /// GitHub's own `Link: <...>; rel="next", <...>; rel="last"` pagination
@@ -157,17 +160,23 @@ impl PullRequestQueryPort for GitHubPullRequestAdapter {
             200 => parse_page(&response),
             401 => Err(PullRequestQueryError::AuthenticationRequired),
             403 if github_rate_limit_exhausted(&response) => {
-                Err(PullRequestQueryError::RateLimited { retry_after_seconds: retry_after_seconds(&response, now_unix()) })
+                Err(PullRequestQueryError::RateLimited {
+                    retry_after_seconds: retry_after_seconds(&response, now_unix()),
+                })
             }
             403 => match retry_after_seconds(&response, now_unix()) {
                 // GitHub's secondary rate limit is also a bare 403, often
                 // with only `Retry-After` (no `X-RateLimit-*` headers) —
                 // see this module's own doc comment.
-                Some(seconds) => Err(PullRequestQueryError::RateLimited { retry_after_seconds: Some(seconds) }),
+                Some(seconds) => Err(PullRequestQueryError::RateLimited {
+                    retry_after_seconds: Some(seconds),
+                }),
                 None => Err(PullRequestQueryError::PermissionDenied),
             },
             404 => Err(PullRequestQueryError::PermissionDenied),
-            429 => Err(PullRequestQueryError::RateLimited { retry_after_seconds: retry_after_seconds(&response, now_unix()) }),
+            429 => Err(PullRequestQueryError::RateLimited {
+                retry_after_seconds: retry_after_seconds(&response, now_unix()),
+            }),
             status => Err(PullRequestQueryError::Other(GitSailError::new(
                 ErrorCode::NetworkFailure,
                 redact_secrets(&format!("GitHub API request failed with status {status}")),
@@ -179,8 +188,11 @@ impl PullRequestQueryPort for GitHubPullRequestAdapter {
 fn parse_page(response: &HttpResponse) -> Result<PullRequestPage, PullRequestQueryError> {
     let pulls: Vec<GitHubPull> = serde_json::from_str(&response.body).map_err(|err| {
         PullRequestQueryError::Other(
-            GitSailError::new(ErrorCode::ParseFailure, "could not parse GitHub's pull request response")
-                .with_source(err),
+            GitSailError::new(
+                ErrorCode::ParseFailure,
+                "could not parse GitHub's pull request response",
+            )
+            .with_source(err),
         )
     })?;
     Ok(PullRequestPage {
@@ -251,9 +263,16 @@ mod tests {
         assert_eq!(page.items[0].target_branch.as_deref(), Some("main"));
         assert_eq!(page.items[0].url, "https://github.com/org/repo/pull/1");
 
-        assert_eq!(page.items[1].state, PullRequestState::Merged, "merged_at set wins over state=closed");
+        assert_eq!(
+            page.items[1].state,
+            PullRequestState::Merged,
+            "merged_at set wins over state=closed"
+        );
         assert_eq!(page.items[2].state, PullRequestState::Closed);
-        assert_eq!(page.items[2].author, None, "a null user must never become an empty string");
+        assert_eq!(
+            page.items[2].author, None,
+            "a null user must never become an empty string"
+        );
         assert!(!page.has_next_page);
     }
 
@@ -262,7 +281,10 @@ mod tests {
         let http = Arc::new(FakeHttpClient::default());
         http.queue(Ok(json_response(
             200,
-            &[("Link", "<https://api.github.com/repos/org/repo/pulls?page=2>; rel=\"next\"")],
+            &[(
+                "Link",
+                "<https://api.github.com/repos/org/repo/pulls?page=2>; rel=\"next\"",
+            )],
             "[]",
         )));
         let adapter = GitHubPullRequestAdapter::new(http);
@@ -290,12 +312,19 @@ mod tests {
         let adapter = GitHubPullRequestAdapter::new(http.clone());
 
         adapter
-            .list_pull_requests(&repository(), 1, Some(&ForgeToken::new("sentinel-fake-token")))
+            .list_pull_requests(
+                &repository(),
+                1,
+                Some(&ForgeToken::new("sentinel-fake-token")),
+            )
             .unwrap();
 
         let calls = http.calls();
         let (_, headers) = &calls[0];
-        assert!(headers.contains(&("Authorization".to_string(), "Bearer sentinel-fake-token".to_string())));
+        assert!(headers.contains(&(
+            "Authorization".to_string(),
+            "Bearer sentinel-fake-token".to_string()
+        )));
     }
 
     #[test]
@@ -317,7 +346,9 @@ mod tests {
         let adapter = GitHubPullRequestAdapter::new(http);
 
         assert!(matches!(
-            adapter.list_pull_requests(&repository(), 1, None).unwrap_err(),
+            adapter
+                .list_pull_requests(&repository(), 1, None)
+                .unwrap_err(),
             PullRequestQueryError::AuthenticationRequired
         ));
     }
@@ -329,7 +360,9 @@ mod tests {
         let adapter = GitHubPullRequestAdapter::new(http);
 
         assert!(matches!(
-            adapter.list_pull_requests(&repository(), 1, None).unwrap_err(),
+            adapter
+                .list_pull_requests(&repository(), 1, None)
+                .unwrap_err(),
             PullRequestQueryError::PermissionDenied
         ));
     }
@@ -344,8 +377,13 @@ mod tests {
         )));
         let adapter = GitHubPullRequestAdapter::new(http);
 
-        match adapter.list_pull_requests(&repository(), 1, None).unwrap_err() {
-            PullRequestQueryError::RateLimited { retry_after_seconds } => {
+        match adapter
+            .list_pull_requests(&repository(), 1, None)
+            .unwrap_err()
+        {
+            PullRequestQueryError::RateLimited {
+                retry_after_seconds,
+            } => {
                 assert_eq!(retry_after_seconds, Some(30));
             }
             other => panic!("expected RateLimited, got {other:?}"),
@@ -358,8 +396,13 @@ mod tests {
         http.queue(Ok(json_response(403, &[("Retry-After", "5")], "{}")));
         let adapter = GitHubPullRequestAdapter::new(http);
 
-        match adapter.list_pull_requests(&repository(), 1, None).unwrap_err() {
-            PullRequestQueryError::RateLimited { retry_after_seconds } => {
+        match adapter
+            .list_pull_requests(&repository(), 1, None)
+            .unwrap_err()
+        {
+            PullRequestQueryError::RateLimited {
+                retry_after_seconds,
+            } => {
                 assert_eq!(retry_after_seconds, Some(5));
             }
             other => panic!("expected RateLimited, got {other:?}"),
@@ -373,7 +416,9 @@ mod tests {
         let adapter = GitHubPullRequestAdapter::new(http);
 
         assert!(matches!(
-            adapter.list_pull_requests(&repository(), 1, None).unwrap_err(),
+            adapter
+                .list_pull_requests(&repository(), 1, None)
+                .unwrap_err(),
             PullRequestQueryError::PermissionDenied
         ));
     }
@@ -384,8 +429,13 @@ mod tests {
         http.queue(Ok(json_response(429, &[("Retry-After", "60")], "{}")));
         let adapter = GitHubPullRequestAdapter::new(http);
 
-        match adapter.list_pull_requests(&repository(), 1, None).unwrap_err() {
-            PullRequestQueryError::RateLimited { retry_after_seconds } => {
+        match adapter
+            .list_pull_requests(&repository(), 1, None)
+            .unwrap_err()
+        {
+            PullRequestQueryError::RateLimited {
+                retry_after_seconds,
+            } => {
                 assert_eq!(retry_after_seconds, Some(60));
             }
             other => panic!("expected RateLimited, got {other:?}"),
@@ -396,11 +446,18 @@ mod tests {
     fn a_transport_failure_maps_to_network_failure_offline() {
         use crate::http::HttpTransportError;
         let http = Arc::new(FakeHttpClient::default());
-        http.queue(Err(HttpTransportError { message: "connection refused".to_string() }));
+        http.queue(Err(HttpTransportError {
+            message: "connection refused".to_string(),
+        }));
         let adapter = GitHubPullRequestAdapter::new(http);
 
-        match adapter.list_pull_requests(&repository(), 1, None).unwrap_err() {
-            PullRequestQueryError::NetworkFailure(message) => assert_eq!(message, "connection refused"),
+        match adapter
+            .list_pull_requests(&repository(), 1, None)
+            .unwrap_err()
+        {
+            PullRequestQueryError::NetworkFailure(message) => {
+                assert_eq!(message, "connection refused")
+            }
             other => panic!("expected NetworkFailure, got {other:?}"),
         }
     }
@@ -412,7 +469,9 @@ mod tests {
         let adapter = GitHubPullRequestAdapter::new(http);
 
         assert!(matches!(
-            adapter.list_pull_requests(&repository(), 1, None).unwrap_err(),
+            adapter
+                .list_pull_requests(&repository(), 1, None)
+                .unwrap_err(),
             PullRequestQueryError::Other(_)
         ));
     }
@@ -442,7 +501,10 @@ mod tests {
         let adapter = GitHubPullRequestAdapter::new(http);
 
         let page = adapter.list_pull_requests(&repository(), 1, None).unwrap();
-        assert_eq!(page.items[0].title, malicious_title, "must be preserved verbatim, not interpreted");
+        assert_eq!(
+            page.items[0].title, malicious_title,
+            "must be preserved verbatim, not interpreted"
+        );
         assert_eq!(page.items[0].author.as_deref(), Some(malicious_author));
     }
 
@@ -457,7 +519,9 @@ mod tests {
         let adapter = GitHubPullRequestAdapter::new(http);
 
         assert!(matches!(
-            adapter.list_pull_requests(&repository, 1, None).unwrap_err(),
+            adapter
+                .list_pull_requests(&repository, 1, None)
+                .unwrap_err(),
             PullRequestQueryError::Other(_)
         ));
     }

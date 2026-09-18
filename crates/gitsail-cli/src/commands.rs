@@ -46,12 +46,18 @@ pub fn execute(
             };
             let page = GetCommitHistory::new(port.clone()).execute(&repo, &query)?;
             let items = page.items.iter().map(CommitDto::from).collect();
-            Ok(Output::Commits(Page::new(items, page.next_cursor, page.has_more)))
+            Ok(Output::Commits(Page::new(
+                items,
+                page.next_cursor,
+                page.has_more,
+            )))
         }
 
         Command::Branches => {
             let branches = ListBranches::new(port.clone()).execute(&repo)?;
-            Ok(Output::Branches(branches.iter().map(BranchDto::from).collect()))
+            Ok(Output::Branches(
+                branches.iter().map(BranchDto::from).collect(),
+            ))
         }
 
         Command::Diff(args) => {

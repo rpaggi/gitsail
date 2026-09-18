@@ -47,38 +47,60 @@ pub enum OperationKind {
     StageFiles,
     UnstageFiles,
     CreateCommit,
-    SwitchBranch { target: String },
-    CreateBranch { name: String },
-    DeleteBranch { name: String, force: bool },
+    SwitchBranch {
+        target: String,
+    },
+    CreateBranch {
+        name: String,
+    },
+    DeleteBranch {
+        name: String,
+        force: bool,
+    },
     /// T-157/US-024: `RepositoryWritePort::rename_branch`. Carries both
     /// names so the confirmation prompt (and [`Self::target_label`]) always
     /// names the exact source and destination, never a generic "rename a
     /// branch".
-    RenameBranch { old_name: String, new_name: String },
+    RenameBranch {
+        old_name: String,
+        new_name: String,
+    },
     /// T-182/US-049: `RepositoryWritePort::fetch`. `Safe` per SAD §20's own
     /// named example — see [`Self::risk`].
-    Fetch { remote: String },
+    Fetch {
+        remote: String,
+    },
     /// T-182/US-049: `RepositoryWritePort::pull` — this version's
     /// fast-forward-only policy (see that method's doc); divergence comes
     /// back as an ordinary [`OperationState::Failed`], never an automatic
     /// merge/rebase.
-    Pull { remote: String, branch: String },
+    Pull {
+        remote: String,
+        branch: String,
+    },
     /// T-182/US-049: `RepositoryWritePort::push` — a plain, non-force push.
     /// `RepositoryWritePort::force_push_with_lease` (US-099) is deliberately
     /// out of scope for this operation set; see this crate's module docs
     /// for why.
-    Push { remote: String, branch: String },
+    Push {
+        remote: String,
+        branch: String,
+    },
     /// T-163/US-030: `RepositoryWritePort::apply_patch`. Carries the
     /// affected-file count from the [`gitsail_application::PatchPreview`]
     /// [`crate::app::App`] already computed via
     /// `RepositoryWritePort::preview_patch_application` before ever
     /// reaching this `Confirming` state (US-030 criterion 1: the prompt
     /// always names concrete scope, never a generic "apply a patch").
-    ApplyPatch { affected_file_count: usize },
+    ApplyPatch {
+        affected_file_count: usize,
+    },
     /// T-231/US-079: `RepositoryWritePort::merge`. Carries the target
     /// revision so origin, destination and policy are all shown before
     /// executing (US-079 criterion 1) — never a generic "merge" prompt.
-    Merge { target: String },
+    Merge {
+        target: String,
+    },
     /// T-233/US-081: `RepositoryWritePort::continue_operation`. Generic
     /// across merge/rebase/cherry-pick/revert (the port itself dispatches on
     /// whatever `InProgressOperation` is actually detected), so this carries
@@ -91,7 +113,9 @@ pub enum OperationKind {
     /// T-235/US-083: `RepositoryWritePort::rebase`. Carries the target base
     /// so origin, destination and policy are all shown before executing,
     /// mirroring [`Self::Merge`]'s own rationale.
-    Rebase { onto: String },
+    Rebase {
+        onto: String,
+    },
     /// T-235/US-083: `RepositoryWritePort::skip_operation`. Generic across
     /// whichever sequencer operation is actually detected, mirroring
     /// [`Self::ContinueOperation`]'s own reuse rationale.
@@ -104,17 +128,26 @@ pub enum OperationKind {
     /// actions/reordering/messages) lives in [`crate::app::App`]'s own
     /// `rebase_plan` field, not here, exactly like `ApplyPatch`'s patch text
     /// lives in `pending_patch_text`.
-    ExecuteRebasePlan { onto: String, commit_count: usize },
+    ExecuteRebasePlan {
+        onto: String,
+        commit_count: usize,
+    },
     /// T-238/US-086: `RepositoryWritePort::cherry_pick`. `is_merge` records
     /// whether the target commit is a merge commit — when `true`, this
     /// workspace's fixed first-parent policy applies (see
     /// `gitsail_application::MergeParentPolicy`), and the confirmation
     /// prompt names that explicitly rather than leaving it implicit (US-086
     /// criterion 2: never silently guessed).
-    CherryPick { commit: String, is_merge: bool },
+    CherryPick {
+        commit: String,
+        is_merge: bool,
+    },
     /// T-239/US-087: `RepositoryWritePort::revert`. Mirrors
     /// [`Self::CherryPick`] exactly.
-    Revert { commit: String, is_merge: bool },
+    Revert {
+        commit: String,
+        is_merge: bool,
+    },
     /// T-240/US-088: `RepositoryWritePort::reset`. Carries the target,
     /// exact mode, the `HEAD` this was confirmed against (revalidated
     /// immediately before the reset actually runs — US-088 criterion 3),
@@ -492,8 +525,14 @@ mod tests {
         assert_eq!(merge.risk(), OperationRisk::Moderate);
         assert!(merge.target_label().contains("feature/x"));
 
-        assert_eq!(OperationKind::ContinueOperation.risk(), OperationRisk::Moderate);
-        assert_eq!(OperationKind::AbortOperation.risk(), OperationRisk::Destructive);
+        assert_eq!(
+            OperationKind::ContinueOperation.risk(),
+            OperationRisk::Moderate
+        );
+        assert_eq!(
+            OperationKind::AbortOperation.risk(),
+            OperationRisk::Destructive
+        );
     }
 
     /// T-235/US-083: `Rebase`/`SkipOperation` both classify `Moderate`

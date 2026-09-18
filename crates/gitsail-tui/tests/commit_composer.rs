@@ -41,7 +41,8 @@ fn run_mutation(app: &mut App, commands: Vec<Command>) {
     while let Some(command) = queue.pop() {
         let follow_up = match command {
             Command::StageFiles(repo, paths) => {
-                let result = gitsail_application::StageFiles::new(write.clone()).execute(&repo, &paths);
+                let result =
+                    gitsail_application::StageFiles::new(write.clone()).execute(&repo, &paths);
                 app.on_operation_finished(result)
             }
             Command::UnstageFiles(repo, paths) => {
@@ -143,8 +144,14 @@ fn everyday_scenario_stages_a_file_and_commits_it_successfully() {
         app.update(Action::CommitMessageInput(c));
     }
     let composer_text = render(&app);
-    assert!(composer_text.contains("README.md"), "staged scope must be visible:\n{composer_text}");
-    assert!(composer_text.contains("fix readme"), "typed message must be visible:\n{composer_text}");
+    assert!(
+        composer_text.contains("README.md"),
+        "staged scope must be visible:\n{composer_text}"
+    );
+    assert!(
+        composer_text.contains("fix readme"),
+        "typed message must be visible:\n{composer_text}"
+    );
 
     app.update(Action::Activate); // idle -> confirming
     let commands = app.update(Action::Activate); // confirming -> dispatch
@@ -153,7 +160,11 @@ fn everyday_scenario_stages_a_file_and_commits_it_successfully() {
 
     assert_eq!(last_commit_subject(dir.path()), "fix readme");
     assert!(app.commit_message().is_none());
-    assert_eq!(porcelain_status(dir.path()), "", "the worktree must be clean after the commit");
+    assert_eq!(
+        porcelain_status(dir.path()),
+        "",
+        "the worktree must be clean after the commit"
+    );
 }
 
 #[cfg(unix)]

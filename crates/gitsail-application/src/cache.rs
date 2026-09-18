@@ -94,7 +94,10 @@ where
     /// Starts a new query, bumping the generation so any ticket issued
     /// before this call is now stale (T-228/US-117 criterion 2).
     pub fn begin_query(&self) -> GenerationTicket {
-        let mut generation = self.generation.lock().unwrap_or_else(|poison| poison.into_inner());
+        let mut generation = self
+            .generation
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         *generation += 1;
         GenerationTicket(*generation)
     }
@@ -104,11 +107,22 @@ where
     /// Returns whether it was stored. Evicts the oldest entry first if this
     /// insertion would exceed `capacity`.
     pub fn complete_query(&self, ticket: GenerationTicket, key: K, value: V) -> bool {
-        if ticket.0 != *self.generation.lock().unwrap_or_else(|poison| poison.into_inner()) {
+        if ticket.0
+            != *self
+                .generation
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+        {
             return false;
         }
-        let mut entries = self.entries.lock().unwrap_or_else(|poison| poison.into_inner());
-        let mut order = self.order.lock().unwrap_or_else(|poison| poison.into_inner());
+        let mut entries = self
+            .entries
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let mut order = self
+            .order
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         if !entries.contains_key(&key) {
             order.push_back(key.clone());
         }
