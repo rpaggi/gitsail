@@ -300,6 +300,7 @@ On Linux, building the Rust backend also needs the system WebKitGTK/GTK/D-Bus de
 - [Assets inventory — provenance and usage of the files above](assets/README.md)
 - [CI policy](docs/architecture/ci-policy.md), [performance baseline](docs/architecture/performance-baseline.md), [preferences matrix](docs/architecture/preferences-matrix.md), [protocol compatibility](docs/architecture/protocol-compatibility.md) — operational companions to the ADRs above.
 - [CONTRIBUTING.md](CONTRIBUTING.md) — setup, tests, architecture boundaries, and the review/ADR-update process.
+- User manuals: [TUI](docs/manual/tui.md), [Desktop](docs/manual/desktop.md), [VS Code extension](docs/manual/vscode.md), [troubleshooting (credentials, configuration, updates, privacy, compatibility)](docs/manual/troubleshooting.md), and [roadmap and open decisions](docs/manual/roadmap-and-open-decisions.md) — what each interface actually does today, and what is deliberately deferred or still undecided.
 
 ## Backlog baseline
 
