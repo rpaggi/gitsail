@@ -364,7 +364,7 @@ pub fn run_process(
                     error_code = ErrorCode::ProcessFailure.as_str(),
                     "git process failed"
                 );
-                Err(process_failure_error(&safe_args, status.code(), &stderr))
+                Err(process_failure_error(&safe_args, status.code(), &stdout, &stderr))
             }
         }
         WaitOutcome::TimedOut => {
@@ -481,21 +481,34 @@ fn read_capped<R: Read>(reader: &mut R, cap: usize) -> Vec<u8> {
 struct ProcessDiagnostic {
     args: Vec<String>,
     exit_code: Option<i32>,
+    stdout: String,
     stderr: String,
 }
 
-/// Renders `stderr` as text with any secret-shaped fragment redacted
-/// (EPIC-22/T-224/US-113), for embedding in a [`ProcessDiagnostic`].
+/// Renders `bytes` as text with any secret-shaped fragment redacted
+/// (EPIC-22/T-224/US-113), for embedding in a [`ProcessDiagnostic`]. Used
+/// for both `stdout` and `stderr`: some Git subcommands report their
+/// substantive failure detail on stdout rather than stderr (e.g. `git stash
+/// apply`/`pop`'s "CONFLICT" report, EPIC-18/T-218/US-093), so this
+/// diagnostic's classification callers (`gitsail-git::provider`'s
+/// `classify_*` functions) need both redacted and available, not only
+/// stderr.
+fn redacted_output(bytes: &[u8]) -> String {
+    redact_secrets(&String::from_utf8_lossy(bytes))
+}
+
+/// Retained as the pre-EPIC-18 name for the same redaction, since `stderr`
+/// is what every existing call site actually passes.
 fn redacted_stderr(stderr: &[u8]) -> String {
-    redact_secrets(&String::from_utf8_lossy(stderr))
+    redacted_output(stderr)
 }
 
 impl fmt::Display for ProcessDiagnostic {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "exit_code={:?} args={:?} stderr={}",
-            self.exit_code, self.args, self.stderr
+            "exit_code={:?} args={:?} stdout={} stderr={}",
+            self.exit_code, self.args, self.stdout, self.stderr
         )
     }
 }
@@ -505,6 +518,7 @@ impl std::error::Error for ProcessDiagnostic {}
 fn process_failure_error(
     safe_args: &[String],
     exit_code: Option<i32>,
+    stdout: &[u8],
     stderr: &[u8],
 ) -> GitSailError {
     GitSailError::new(
@@ -514,6 +528,7 @@ fn process_failure_error(
     .with_source(ProcessDiagnostic {
         args: safe_args.to_vec(),
         exit_code,
+        stdout: redacted_output(stdout),
         stderr: redacted_stderr(stderr),
     })
 }
@@ -530,6 +545,7 @@ fn timeout_error(safe_args: &[String], timeout: Option<Duration>, stderr: &[u8])
     .with_source(ProcessDiagnostic {
         args: safe_args.to_vec(),
         exit_code: None,
+        stdout: String::new(),
         stderr: redacted_stderr(stderr),
     })
 }
@@ -539,6 +555,7 @@ fn cancelled_error(safe_args: &[String], stderr: &[u8]) -> GitSailError {
         ProcessDiagnostic {
             args: safe_args.to_vec(),
             exit_code: None,
+            stdout: String::new(),
             stderr: redacted_stderr(stderr),
         },
     )

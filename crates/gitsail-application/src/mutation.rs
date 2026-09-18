@@ -27,6 +27,7 @@
 //! separate, out-of-scope-here migration.
 
 use std::fmt;
+use std::path::PathBuf;
 
 use gitsail_domain::{ErrorCode, GitSailError};
 
@@ -84,12 +85,53 @@ pub enum MutationKind {
     StageHunks,
     UnstageHunks,
     CreateCommit,
-    SwitchBranch { target: String },
-    CreateBranch { name: String },
-    DeleteBranch { name: String, force: bool },
+    SwitchBranch {
+        target: String,
+    },
+    CreateBranch {
+        name: String,
+    },
+    DeleteBranch {
+        name: String,
+        force: bool,
+    },
     /// Rewrites `HEAD` in place (SAD §20's "history rewrite" category of
     /// destructive action, via `RepositoryWritePort::amend_commit`).
     AmendCommit,
+    /// EPIC-18/US-092: `RepositoryWritePort::create_stash`.
+    CreateStash,
+    /// EPIC-18/US-093: `RepositoryWritePort::apply_stash`, identified by the
+    /// stash's index at preview time (`stash@{index}`).
+    ApplyStash {
+        index: u32,
+    },
+    /// EPIC-18/US-093: `RepositoryWritePort::pop_stash`.
+    PopStash {
+        index: u32,
+    },
+    /// EPIC-18/US-093: `RepositoryWritePort::drop_stash`. SAD §20 names
+    /// "stash drop" as its own canonical example of a `Destructive`
+    /// mutation.
+    DropStash {
+        index: u32,
+    },
+    /// EPIC-18/US-094: `RepositoryWritePort::create_tag`.
+    CreateTag {
+        name: String,
+    },
+    /// EPIC-18/US-094: `RepositoryWritePort::delete_tag`.
+    DeleteTag {
+        name: String,
+    },
+    /// EPIC-18/US-095: `RepositoryWritePort::create_worktree`.
+    CreateWorktree {
+        path: PathBuf,
+    },
+    /// EPIC-18/US-095: `RepositoryWritePort::remove_worktree`.
+    RemoveWorktree {
+        path: PathBuf,
+        force: bool,
+    },
 }
 
 impl MutationKind {
@@ -118,6 +160,52 @@ impl MutationKind {
                 }
             }
             MutationKind::AmendCommit => RiskLevel::Destructive,
+            // Creating a stash rewrites the working tree/index back to
+            // `HEAD` (recoverably — the removed content is captured in the
+            // stash itself), the same "mutates the working tree, but not
+            // irreversibly" character `checkout`/`commit` already have —
+            // hence `Moderate`, mirroring `CreateCommit`/`SwitchBranch`
+            // rather than `Destructive`.
+            MutationKind::CreateStash => RiskLevel::Moderate,
+            // Applying/popping a stash mutates the working tree/index and
+            // can produce merge conflicts to resolve, the same character
+            // `SwitchBranch` already has — `Moderate`, not `Destructive`:
+            // Git itself refuses (or, on conflict, preserves the stash
+            // rather than losing it — see `RepositoryWritePort::pop_stash`'s
+            // doc) rather than ever silently discarding work.
+            MutationKind::ApplyStash { .. } => RiskLevel::Moderate,
+            MutationKind::PopStash { .. } => RiskLevel::Moderate,
+            // SAD §20 explicitly lists "stash drop" among its own canonical
+            // `Destructive` examples (see this module's own doc comment):
+            // unlike apply/pop, a drop has no built-in Git recovery path.
+            MutationKind::DropStash { .. } => RiskLevel::Destructive,
+            // A tag is a ref creation/removal with no working-tree effect
+            // and no history rewrite — the same tier `CreateBranch` already
+            // occupies. Unlike `DeleteBranch`, Git has no "unmerged commits"
+            // protection for tags to mirror into a force/no-force split, so
+            // `DeleteTag` gets one fixed tier rather than a conditional one:
+            // `Moderate` (a confirmed, deliberate ref deletion, not the
+            // "hard to reverse, visible consequence" character SAD §20's
+            // `Destructive` examples share — recreating a deleted tag from
+            // its recorded target commit, once known, is straightforward).
+            MutationKind::CreateTag { .. } => RiskLevel::Moderate,
+            MutationKind::DeleteTag { .. } => RiskLevel::Moderate,
+            // Creating a worktree is a ref/checkout-shaped operation with no
+            // destructive potential of its own — mirrors `CreateBranch`.
+            MutationKind::CreateWorktree { .. } => RiskLevel::Moderate,
+            // Mirrors `DeleteBranch { force }` exactly: a plain removal only
+            // succeeds when the worktree is clean (Moderate — a confirmed,
+            // reversible-in-effect cleanup), while `force: true` discards
+            // whatever uncommitted changes are sitting in that worktree,
+            // the same "discard changes" character SAD §20 lists under
+            // `Destructive`.
+            MutationKind::RemoveWorktree { force, .. } => {
+                if *force {
+                    RiskLevel::Destructive
+                } else {
+                    RiskLevel::Moderate
+                }
+            }
         }
     }
 
@@ -134,6 +222,16 @@ impl MutationKind {
             MutationKind::CreateBranch { name } => format!("branch '{name}'"),
             MutationKind::DeleteBranch { name, .. } => format!("branch '{name}'"),
             MutationKind::AmendCommit => "the current HEAD commit".to_string(),
+            MutationKind::CreateStash => "a new stash entry".to_string(),
+            MutationKind::ApplyStash { index } => format!("stash@{{{index}}}"),
+            MutationKind::PopStash { index } => format!("stash@{{{index}}}"),
+            MutationKind::DropStash { index } => format!("stash@{{{index}}}"),
+            MutationKind::CreateTag { name } => format!("tag '{name}'"),
+            MutationKind::DeleteTag { name } => format!("tag '{name}'"),
+            MutationKind::CreateWorktree { path } => format!("worktree at '{}'", path.display()),
+            MutationKind::RemoveWorktree { path, .. } => {
+                format!("worktree at '{}'", path.display())
+            }
         }
     }
 }
@@ -224,6 +322,83 @@ mod tests {
             .requires_reinforced_confirmation());
     }
 
+    /// EPIC-18: the new stash/tag/worktree mutations classify per this
+    /// module's doc rationale — in particular, `DropStash` is `Destructive`
+    /// (SAD §20's own named example), while `ApplyStash`/`PopStash`/
+    /// `CreateStash`/tag/worktree creation are `Moderate`, and
+    /// `RemoveWorktree` only escalates to `Destructive` when `force: true`,
+    /// mirroring `DeleteBranch` exactly.
+    #[test]
+    fn epic_18_stash_tag_worktree_mutations_classify_per_sad_section_20() {
+        assert_eq!(MutationKind::CreateStash.risk(), RiskLevel::Moderate);
+        assert_eq!(
+            MutationKind::ApplyStash { index: 0 }.risk(),
+            RiskLevel::Moderate
+        );
+        assert_eq!(
+            MutationKind::PopStash { index: 0 }.risk(),
+            RiskLevel::Moderate
+        );
+        assert!(MutationKind::DropStash { index: 0 }
+            .risk()
+            .requires_reinforced_confirmation());
+        assert_eq!(
+            MutationKind::CreateTag {
+                name: "v1.0".into()
+            }
+            .risk(),
+            RiskLevel::Moderate
+        );
+        assert_eq!(
+            MutationKind::DeleteTag {
+                name: "v1.0".into()
+            }
+            .risk(),
+            RiskLevel::Moderate
+        );
+        assert_eq!(
+            MutationKind::CreateWorktree {
+                path: "/tmp/wt".into()
+            }
+            .risk(),
+            RiskLevel::Moderate
+        );
+        assert_eq!(
+            MutationKind::RemoveWorktree {
+                path: "/tmp/wt".into(),
+                force: false
+            }
+            .risk(),
+            RiskLevel::Moderate
+        );
+        assert!(MutationKind::RemoveWorktree {
+            path: "/tmp/wt".into(),
+            force: true
+        }
+        .risk()
+        .requires_reinforced_confirmation());
+    }
+
+    #[test]
+    fn epic_18_target_labels_name_the_exact_target() {
+        assert_eq!(
+            MutationKind::ApplyStash { index: 2 }.target_label(),
+            "stash@{2}"
+        );
+        assert_eq!(
+            MutationKind::CreateTag {
+                name: "v2.0".into()
+            }
+            .target_label(),
+            "tag 'v2.0'"
+        );
+        assert!(MutationKind::CreateWorktree {
+            path: "/repos/feature".into()
+        }
+        .target_label()
+        .contains("/repos/feature"));
+    }
+
     #[test]
     fn target_label_is_never_a_generic_placeholder() {
         let kind = MutationKind::DeleteBranch {
@@ -266,19 +441,14 @@ mod tests {
     fn precondition_over_a_commit_hash_mirrors_amend_commits_own_check() {
         use gitsail_domain::CommitHash;
 
-        let original_head =
-            CommitHash::new("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef").unwrap();
-        let advanced_head =
-            CommitHash::new("cafef00dcafef00dcafef00dcafef00dcafef00").unwrap();
+        let original_head = CommitHash::new("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef").unwrap();
+        let advanced_head = CommitHash::new("cafef00dcafef00dcafef00dcafef00dcafef00").unwrap();
 
         let precondition = Precondition::new(original_head.clone());
 
         assert!(precondition.revalidate(&original_head).is_ok());
         assert_eq!(
-            precondition
-                .revalidate(&advanced_head)
-                .unwrap_err()
-                .code(),
+            precondition.revalidate(&advanced_head).unwrap_err().code(),
             ErrorCode::OperationConflict
         );
     }

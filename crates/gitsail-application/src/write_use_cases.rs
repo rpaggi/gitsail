@@ -3,12 +3,14 @@
 //! exercised with a test double (ADR-002, ADR-009), mirroring
 //! `use_cases.rs`'s read-side pattern.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use gitsail_domain::{BranchName, CommitHash, FileDiff, GitSailError, Repository};
+use gitsail_domain::{BranchName, CommitHash, FileDiff, GitSailError, Repository, Stash, Worktree};
 
-use crate::write_ports::RepositoryWritePort;
+use crate::write_ports::{
+    RepositoryWritePort, StashApplyOutcome, StashScope, TagAnnotation, WorktreeBranchSpec,
+};
 
 pub struct StageFiles {
     port: Arc<dyn RepositoryWritePort>,
@@ -148,10 +150,164 @@ impl AmendCommit {
     }
 }
 
+/// Creates a new stash (US-092). See [`RepositoryWritePort::create_stash`]
+/// for the scope/message contract this delegates to unchanged.
+pub struct CreateStash {
+    port: Arc<dyn RepositoryWritePort>,
+}
+
+impl CreateStash {
+    pub fn new(port: Arc<dyn RepositoryWritePort>) -> Self {
+        Self { port }
+    }
+
+    pub fn execute(
+        &self,
+        repo: &Repository,
+        message: Option<&str>,
+        scope: StashScope,
+    ) -> Result<Stash, GitSailError> {
+        self.port.create_stash(repo, message, scope)
+    }
+}
+
+/// Applies a stash without removing it (US-093). See
+/// [`RepositoryWritePort::apply_stash`] for the revalidation/conflict
+/// contract this delegates to unchanged.
+pub struct ApplyStash {
+    port: Arc<dyn RepositoryWritePort>,
+}
+
+impl ApplyStash {
+    pub fn new(port: Arc<dyn RepositoryWritePort>) -> Self {
+        Self { port }
+    }
+
+    pub fn execute(
+        &self,
+        repo: &Repository,
+        expected: &Stash,
+    ) -> Result<StashApplyOutcome, GitSailError> {
+        self.port.apply_stash(repo, expected)
+    }
+}
+
+/// Applies a stash and removes it, unless applying produced conflicts
+/// (US-093). See [`RepositoryWritePort::pop_stash`].
+pub struct PopStash {
+    port: Arc<dyn RepositoryWritePort>,
+}
+
+impl PopStash {
+    pub fn new(port: Arc<dyn RepositoryWritePort>) -> Self {
+        Self { port }
+    }
+
+    pub fn execute(
+        &self,
+        repo: &Repository,
+        expected: &Stash,
+    ) -> Result<StashApplyOutcome, GitSailError> {
+        self.port.pop_stash(repo, expected)
+    }
+}
+
+/// Deletes a stash without applying it (US-093; `Destructive`, see
+/// [`crate::mutation::MutationKind::DropStash`]). See
+/// [`RepositoryWritePort::drop_stash`].
+pub struct DropStash {
+    port: Arc<dyn RepositoryWritePort>,
+}
+
+impl DropStash {
+    pub fn new(port: Arc<dyn RepositoryWritePort>) -> Self {
+        Self { port }
+    }
+
+    pub fn execute(&self, repo: &Repository, expected: &Stash) -> Result<(), GitSailError> {
+        self.port.drop_stash(repo, expected)
+    }
+}
+
+/// Creates a local tag (US-094). See [`RepositoryWritePort::create_tag`].
+pub struct CreateTag {
+    port: Arc<dyn RepositoryWritePort>,
+}
+
+impl CreateTag {
+    pub fn new(port: Arc<dyn RepositoryWritePort>) -> Self {
+        Self { port }
+    }
+
+    pub fn execute(
+        &self,
+        repo: &Repository,
+        name: &str,
+        target: Option<&CommitHash>,
+        annotation: TagAnnotation,
+    ) -> Result<(), GitSailError> {
+        self.port.create_tag(repo, name, target, annotation)
+    }
+}
+
+/// Deletes a local tag (US-094). See [`RepositoryWritePort::delete_tag`].
+pub struct DeleteTag {
+    port: Arc<dyn RepositoryWritePort>,
+}
+
+impl DeleteTag {
+    pub fn new(port: Arc<dyn RepositoryWritePort>) -> Self {
+        Self { port }
+    }
+
+    pub fn execute(&self, repo: &Repository, name: &str) -> Result<(), GitSailError> {
+        self.port.delete_tag(repo, name)
+    }
+}
+
+/// Creates a new worktree (US-095). See
+/// [`RepositoryWritePort::create_worktree`].
+pub struct CreateWorktree {
+    port: Arc<dyn RepositoryWritePort>,
+}
+
+impl CreateWorktree {
+    pub fn new(port: Arc<dyn RepositoryWritePort>) -> Self {
+        Self { port }
+    }
+
+    pub fn execute(
+        &self,
+        repo: &Repository,
+        path: &Path,
+        branch: WorktreeBranchSpec,
+    ) -> Result<Worktree, GitSailError> {
+        self.port.create_worktree(repo, path, branch)
+    }
+}
+
+/// Removes a worktree (US-095). See
+/// [`RepositoryWritePort::remove_worktree`].
+pub struct RemoveWorktree {
+    port: Arc<dyn RepositoryWritePort>,
+}
+
+impl RemoveWorktree {
+    pub fn new(port: Arc<dyn RepositoryWritePort>) -> Self {
+        Self { port }
+    }
+
+    pub fn execute(&self, repo: &Repository, path: &Path, force: bool) -> Result<(), GitSailError> {
+        self.port.remove_worktree(repo, path, force)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gitsail_domain::{BranchName, ErrorCode, HeadState, RepositoryId};
+    use gitsail_domain::{
+        BranchName, ErrorCode, GitTimestamp, HeadState, RepositoryId, WorktreeHead,
+    };
     use std::path::Path;
     use std::sync::Mutex;
 
@@ -172,6 +328,38 @@ mod tests {
         received_delete_branch: Mutex<Option<(BranchName, bool)>>,
         received_amend: Mutex<Option<(String, CommitHash)>>,
         amended_hash: CommitHash,
+        received_create_stash: Mutex<Option<(Option<String>, StashScope)>>,
+        created_stash: Stash,
+        received_apply_stash: Mutex<Option<Stash>>,
+        received_pop_stash: Mutex<Option<Stash>>,
+        received_drop_stash: Mutex<Option<Stash>>,
+        apply_outcome: StashApplyOutcome,
+        received_create_tag: Mutex<Option<(String, Option<CommitHash>, TagAnnotation)>>,
+        received_delete_tag: Mutex<Option<String>>,
+        received_create_worktree: Mutex<Option<(PathBuf, WorktreeBranchSpec)>>,
+        created_worktree: Worktree,
+        received_remove_worktree: Mutex<Option<(PathBuf, bool)>>,
+    }
+
+    fn sample_stash() -> Stash {
+        Stash {
+            index: 0,
+            commit: CommitHash::new("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef").unwrap(),
+            message: "WIP on main: original".to_string(),
+            date: GitTimestamp::new(0, 0),
+        }
+    }
+
+    fn sample_worktree() -> Worktree {
+        Worktree {
+            path: PathBuf::from("/repo-wt"),
+            head: WorktreeHead::Attached {
+                branch: BranchName::new("feature").unwrap(),
+            },
+            is_main: false,
+            is_locked: false,
+            is_prunable: false,
+        }
     }
 
     impl FakeWritePort {
@@ -189,6 +377,19 @@ mod tests {
                 received_delete_branch: Mutex::new(None),
                 received_amend: Mutex::new(None),
                 amended_hash: CommitHash::new("cafef00dcafef00dcafef00dcafef00dcafef00").unwrap(),
+                received_create_stash: Mutex::new(None),
+                created_stash: sample_stash(),
+                received_apply_stash: Mutex::new(None),
+                received_pop_stash: Mutex::new(None),
+                received_drop_stash: Mutex::new(None),
+                apply_outcome: StashApplyOutcome {
+                    had_conflicts: false,
+                },
+                received_create_tag: Mutex::new(None),
+                received_delete_tag: Mutex::new(None),
+                received_create_worktree: Mutex::new(None),
+                created_worktree: sample_worktree(),
+                received_remove_worktree: Mutex::new(None),
             }
         }
 
@@ -315,6 +516,121 @@ mod tests {
                 ));
             }
             Ok(self.amended_hash.clone())
+        }
+
+        fn create_stash(
+            &self,
+            _repo: &Repository,
+            message: Option<&str>,
+            scope: StashScope,
+        ) -> Result<Stash, GitSailError> {
+            *self.received_create_stash.lock().unwrap() = Some((message.map(str::to_string), scope));
+            if self.fail {
+                return Err(GitSailError::new(
+                    ErrorCode::InvalidRepositoryState,
+                    "nothing to stash",
+                ));
+            }
+            Ok(self.created_stash.clone())
+        }
+
+        fn apply_stash(
+            &self,
+            _repo: &Repository,
+            expected: &Stash,
+        ) -> Result<StashApplyOutcome, GitSailError> {
+            *self.received_apply_stash.lock().unwrap() = Some(expected.clone());
+            if self.fail {
+                return Err(GitSailError::new(
+                    ErrorCode::OperationConflict,
+                    "stash list changed since it was previewed",
+                ));
+            }
+            Ok(self.apply_outcome)
+        }
+
+        fn pop_stash(
+            &self,
+            _repo: &Repository,
+            expected: &Stash,
+        ) -> Result<StashApplyOutcome, GitSailError> {
+            *self.received_pop_stash.lock().unwrap() = Some(expected.clone());
+            if self.fail {
+                return Err(GitSailError::new(
+                    ErrorCode::OperationConflict,
+                    "stash list changed since it was previewed",
+                ));
+            }
+            Ok(self.apply_outcome)
+        }
+
+        fn drop_stash(&self, _repo: &Repository, expected: &Stash) -> Result<(), GitSailError> {
+            *self.received_drop_stash.lock().unwrap() = Some(expected.clone());
+            if self.fail {
+                return Err(GitSailError::new(
+                    ErrorCode::OperationConflict,
+                    "stash list changed since it was previewed",
+                ));
+            }
+            Ok(())
+        }
+
+        fn create_tag(
+            &self,
+            _repo: &Repository,
+            name: &str,
+            target: Option<&CommitHash>,
+            annotation: TagAnnotation,
+        ) -> Result<(), GitSailError> {
+            *self.received_create_tag.lock().unwrap() =
+                Some((name.to_string(), target.cloned(), annotation));
+            if self.fail {
+                return Err(GitSailError::new(
+                    ErrorCode::InvalidRepositoryState,
+                    "a tag with that name already exists",
+                ));
+            }
+            Ok(())
+        }
+
+        fn delete_tag(&self, _repo: &Repository, name: &str) -> Result<(), GitSailError> {
+            *self.received_delete_tag.lock().unwrap() = Some(name.to_string());
+            if self.fail {
+                return Err(GitSailError::new(ErrorCode::RepositoryNotFound, "no such tag"));
+            }
+            Ok(())
+        }
+
+        fn create_worktree(
+            &self,
+            _repo: &Repository,
+            path: &Path,
+            branch: WorktreeBranchSpec,
+        ) -> Result<Worktree, GitSailError> {
+            *self.received_create_worktree.lock().unwrap() = Some((path.to_path_buf(), branch));
+            if self.fail {
+                return Err(GitSailError::new(
+                    ErrorCode::InvalidRepositoryState,
+                    "branch already checked out elsewhere",
+                ));
+            }
+            Ok(self.created_worktree.clone())
+        }
+
+        fn remove_worktree(
+            &self,
+            _repo: &Repository,
+            path: &Path,
+            force: bool,
+        ) -> Result<(), GitSailError> {
+            *self.received_remove_worktree.lock().unwrap() = Some((path.to_path_buf(), force));
+            if self.fail {
+                return Err(GitSailError::new(
+                    ErrorCode::OperationConflict,
+                    "worktree has uncommitted changes",
+                ));
+            }
+            Ok(())
         }
     }
 
@@ -534,6 +850,224 @@ mod tests {
 
         let err = use_case
             .execute(&sample_repository(), "amended message", &expected_head)
+            .unwrap_err();
+
+        assert_eq!(err.code(), ErrorCode::OperationConflict);
+    }
+
+    // -----------------------------------------------------------------
+    // EPIC-18: stash, tag, worktree use cases.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn create_stash_delegates_to_port_with_message_and_scope() {
+        let port = Arc::new(FakeWritePort::new());
+        let use_case = CreateStash::new(port.clone());
+        let scope = StashScope {
+            keep_index: true,
+            include_untracked: true,
+            all: false,
+        };
+
+        let stash = use_case
+            .execute(&sample_repository(), Some("WIP: refactor"), scope)
+            .unwrap();
+
+        assert_eq!(stash, port.created_stash);
+        assert_eq!(
+            *port.received_create_stash.lock().unwrap(),
+            Some((Some("WIP: refactor".to_string()), scope))
+        );
+    }
+
+    #[test]
+    fn create_stash_propagates_port_error_without_a_false_success() {
+        let port = Arc::new(FakeWritePort::failing());
+        let use_case = CreateStash::new(port);
+
+        let err = use_case
+            .execute(&sample_repository(), None, StashScope::default())
+            .unwrap_err();
+
+        assert_eq!(err.code(), ErrorCode::InvalidRepositoryState);
+    }
+
+    #[test]
+    fn apply_stash_delegates_to_port_with_the_previewed_entry() {
+        let port = Arc::new(FakeWritePort::new());
+        let use_case = ApplyStash::new(port.clone());
+        let expected = sample_stash();
+
+        let outcome = use_case.execute(&sample_repository(), &expected).unwrap();
+
+        assert!(!outcome.had_conflicts);
+        assert_eq!(*port.received_apply_stash.lock().unwrap(), Some(expected));
+    }
+
+    #[test]
+    fn apply_stash_propagates_a_stale_identity_conflict_without_a_false_success() {
+        let port = Arc::new(FakeWritePort::failing());
+        let use_case = ApplyStash::new(port);
+
+        let err = use_case
+            .execute(&sample_repository(), &sample_stash())
+            .unwrap_err();
+
+        assert_eq!(err.code(), ErrorCode::OperationConflict);
+    }
+
+    #[test]
+    fn pop_stash_delegates_to_port_and_reports_conflicts_distinctly() {
+        let mut port = FakeWritePort::new();
+        port.apply_outcome = StashApplyOutcome { had_conflicts: true };
+        let port = Arc::new(port);
+        let use_case = PopStash::new(port.clone());
+        let expected = sample_stash();
+
+        let outcome = use_case.execute(&sample_repository(), &expected).unwrap();
+
+        assert!(
+            outcome.had_conflicts,
+            "a conflicted pop must never be reported as a plain success"
+        );
+        assert_eq!(*port.received_pop_stash.lock().unwrap(), Some(expected));
+    }
+
+    #[test]
+    fn drop_stash_delegates_to_port_with_the_previewed_entry() {
+        let port = Arc::new(FakeWritePort::new());
+        let use_case = DropStash::new(port.clone());
+        let expected = sample_stash();
+
+        use_case.execute(&sample_repository(), &expected).unwrap();
+
+        assert_eq!(*port.received_drop_stash.lock().unwrap(), Some(expected));
+    }
+
+    #[test]
+    fn drop_stash_propagates_port_error_without_a_false_success() {
+        let port = Arc::new(FakeWritePort::failing());
+        let use_case = DropStash::new(port);
+
+        let err = use_case
+            .execute(&sample_repository(), &sample_stash())
+            .unwrap_err();
+
+        assert_eq!(err.code(), ErrorCode::OperationConflict);
+    }
+
+    #[test]
+    fn create_tag_delegates_to_port_with_name_target_and_annotation() {
+        let port = Arc::new(FakeWritePort::new());
+        let use_case = CreateTag::new(port.clone());
+        let target = CommitHash::new("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef").unwrap();
+        let annotation = TagAnnotation::Annotated {
+            message: "release".to_string(),
+        };
+
+        use_case
+            .execute(&sample_repository(), "v1.0", Some(&target), annotation.clone())
+            .unwrap();
+
+        assert_eq!(
+            *port.received_create_tag.lock().unwrap(),
+            Some(("v1.0".to_string(), Some(target), annotation))
+        );
+    }
+
+    #[test]
+    fn create_tag_propagates_a_name_collision_without_a_false_success() {
+        let port = Arc::new(FakeWritePort::failing());
+        let use_case = CreateTag::new(port);
+
+        let err = use_case
+            .execute(&sample_repository(), "v1.0", None, TagAnnotation::Lightweight)
+            .unwrap_err();
+
+        assert_eq!(err.code(), ErrorCode::InvalidRepositoryState);
+    }
+
+    #[test]
+    fn delete_tag_delegates_to_port_with_the_exact_name() {
+        let port = Arc::new(FakeWritePort::new());
+        let use_case = DeleteTag::new(port.clone());
+
+        use_case.execute(&sample_repository(), "v1.0").unwrap();
+
+        assert_eq!(
+            *port.received_delete_tag.lock().unwrap(),
+            Some("v1.0".to_string())
+        );
+    }
+
+    #[test]
+    fn delete_tag_propagates_port_error_without_a_false_success() {
+        let port = Arc::new(FakeWritePort::failing());
+        let use_case = DeleteTag::new(port);
+
+        let err = use_case.execute(&sample_repository(), "v1.0").unwrap_err();
+
+        assert_eq!(err.code(), ErrorCode::RepositoryNotFound);
+    }
+
+    #[test]
+    fn create_worktree_delegates_to_port_with_path_and_branch_spec() {
+        let port = Arc::new(FakeWritePort::new());
+        let use_case = CreateWorktree::new(port.clone());
+        let branch = WorktreeBranchSpec::NewBranch {
+            name: BranchName::new("feature").unwrap(),
+            start_point: None,
+        };
+
+        let worktree = use_case
+            .execute(&sample_repository(), Path::new("/repo-wt"), branch.clone())
+            .unwrap();
+
+        assert_eq!(worktree, port.created_worktree);
+        assert_eq!(
+            *port.received_create_worktree.lock().unwrap(),
+            Some((PathBuf::from("/repo-wt"), branch))
+        );
+    }
+
+    #[test]
+    fn create_worktree_propagates_a_branch_already_checked_out_error() {
+        let port = Arc::new(FakeWritePort::failing());
+        let use_case = CreateWorktree::new(port);
+
+        let err = use_case
+            .execute(
+                &sample_repository(),
+                Path::new("/repo-wt"),
+                WorktreeBranchSpec::ExistingBranch(BranchName::new("main").unwrap()),
+            )
+            .unwrap_err();
+
+        assert_eq!(err.code(), ErrorCode::InvalidRepositoryState);
+    }
+
+    #[test]
+    fn remove_worktree_delegates_to_port_with_the_force_flag() {
+        let port = Arc::new(FakeWritePort::new());
+        let use_case = RemoveWorktree::new(port.clone());
+
+        use_case
+            .execute(&sample_repository(), Path::new("/repo-wt"), true)
+            .unwrap();
+
+        assert_eq!(
+            *port.received_remove_worktree.lock().unwrap(),
+            Some((PathBuf::from("/repo-wt"), true))
+        );
+    }
+
+    #[test]
+    fn remove_worktree_propagates_uncommitted_changes_error_without_a_false_success() {
+        let port = Arc::new(FakeWritePort::failing());
+        let use_case = RemoveWorktree::new(port);
+
+        let err = use_case
+            .execute(&sample_repository(), Path::new("/repo-wt"), false)
             .unwrap_err();
 
         assert_eq!(err.code(), ErrorCode::OperationConflict);

@@ -20,15 +20,16 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use gitsail_application::{
-    BlameRequest, CommitQuery, DiffRequest, LineHistoryRequest, Page, RepositoryReadPort,
-    RepositoryWritePort,
+    BlameRequest, CommitQuery, DiffRequest, LineHistoryRequest, Page, Precondition,
+    RepositoryReadPort, RepositoryWritePort, StashApplyOutcome, StashScope, TagAnnotation,
+    WorktreeBranchSpec,
 };
 use gitsail_domain::{
     Blame, BlameLine, BlameOrigin, Branch, BranchKind, BranchName, ChangeType, Commit, CommitHash,
     Decoration, Diff, DiffHunk, DiffLine, DiffLineOrigin, ErrorCode, FileChange,
     FileContentAtRevision, FileContentKind, FileDiff, FileStatusCode, GitSailError, GitTimestamp,
-    HeadState, LineHistory, LineHistoryEntry, Repository, RepositoryId, RepositoryStatus,
-    ShortHash, Signature,
+    HeadState, LineHistory, LineHistoryEntry, Remote, RemoteUrl, Repository, RepositoryId,
+    RepositoryStatus, ShortHash, Signature, Stash, Tag, TagKind, Worktree, WorktreeHead,
 };
 
 use crate::runner::{CancellationToken, GitProcessRunner, ProcessOutput, ProcessRequest};
@@ -56,6 +57,40 @@ const LOG_FIELD_COUNT: usize = 12;
 /// `\n` is a safe record separator here).
 const FOR_EACH_REF_FORMAT: &str =
     "%(refname)\u{1f}%(objectname)\u{1f}%(upstream:short)\u{1f}%(upstream:track)\u{1f}%(HEAD)";
+
+/// `git for-each-ref --format:` string for `refs/tags` (EPIC-18/T-216/
+/// US-091), one `RECORD_SEP`-terminated record per tag: unlike a branch
+/// name, a tag's annotation message can contain embedded newlines (and, in
+/// principle, arbitrary text), so this cannot use a plain one-line-per-ref
+/// format like [`FOR_EACH_REF_FORMAT`] — it follows [`LOG_FORMAT`]'s
+/// `RECORD_SEP`-per-record convention instead. Fields, in order: short
+/// refname, the ref's own object id, that object's type (`tag` for
+/// annotated, `commit` for lightweight), the annotated tag's peeled
+/// (dereferenced) target commit id (empty for a lightweight tag), tagger
+/// name, tagger email, tagger date (`--date=raw` shape), and the tag's full
+/// message contents (empty for a lightweight tag — `%(contents)` on a
+/// lightweight tag would otherwise report the *pointed-to commit's*
+/// message, which [`parse_tag_record`] deliberately ignores by branching on
+/// object type first).
+const TAG_FORMAT: &str = "%(refname:short)\u{1f}%(objectname)\u{1f}%(objecttype)\u{1f}%(*objectname)\u{1f}%(taggername)\u{1f}%(taggeremail)\u{1f}%(taggerdate:raw)\u{1f}%(contents)\u{1e}";
+
+/// Number of `FIELD_SEP`-delimited fields in [`TAG_FORMAT`].
+const TAG_FIELD_COUNT: usize = 8;
+
+/// `git stash list --format:` string, one `RECORD_SEP`-terminated record per
+/// stash entry (EPIC-18/T-216/US-091): a stash's reflog subject can, in
+/// principle, contain arbitrary text, so this follows the same
+/// `RECORD_SEP`-per-record convention as [`LOG_FORMAT`]/[`TAG_FORMAT`]
+/// rather than a plain one-line-per-entry format. Deliberately excludes
+/// `%gd` (`stash@{N}`): combined with `--date=raw` (needed for the date
+/// field below), Git renders `%gd`'s `N` as the *date* rather than the
+/// stack position, so the index is instead taken from this record's
+/// position in `git stash list`'s output, which is always stack order
+/// (newest, `stash@{0}`, first).
+const STASH_FORMAT: &str = "%H\u{1f}%gs\u{1f}%ad\u{1e}";
+
+/// Number of `FIELD_SEP`-delimited fields in [`STASH_FORMAT`].
+const STASH_FIELD_COUNT: usize = 3;
 
 /// Default page size for [`RepositoryReadPort::commits`] when the caller
 /// does not specify one. History must never assume the full log fits in
@@ -196,7 +231,11 @@ impl RepositoryReadPort for GitCliProvider {
         let is_bare = match lines.next() {
             Some("true") => true,
             Some("false") => false,
-            _ => return Err(parse_err("could not parse git rev-parse --is-bare-repository output")),
+            _ => {
+                return Err(parse_err(
+                    "could not parse git rev-parse --is-bare-repository output",
+                ))
+            }
         };
         let git_dir = lines
             .next()
@@ -220,7 +259,11 @@ impl RepositoryReadPort for GitCliProvider {
             PathBuf::from(toplevel.trim())
         };
 
-        let worktree_path = if is_bare { None } else { Some(root_path.clone()) };
+        let worktree_path = if is_bare {
+            None
+        } else {
+            Some(root_path.clone())
+        };
         let id = RepositoryId::from_canonical_root(&root_path);
         let head_state = self.determine_head_state(path)?;
         let current_branch = match &head_state {
@@ -651,20 +694,21 @@ impl RepositoryReadPort for GitCliProvider {
         ];
         let output = match self.try_run(args, cwd)? {
             Some(output) => output,
-            None => self.try_run(
-                vec![
-                    "rev-parse".to_string(),
-                    "--path-format=absolute".to_string(),
-                    "--absolute-git-dir".to_string(),
-                ],
-                cwd,
-            )?
-            .ok_or_else(|| {
-                GitSailError::new(
-                    ErrorCode::RepositoryNotFound,
-                    "could not resolve the repository's Git directory",
-                )
-            })?,
+            None => self
+                .try_run(
+                    vec![
+                        "rev-parse".to_string(),
+                        "--path-format=absolute".to_string(),
+                        "--absolute-git-dir".to_string(),
+                    ],
+                    cwd,
+                )?
+                .ok_or_else(|| {
+                    GitSailError::new(
+                        ErrorCode::RepositoryNotFound,
+                        "could not resolve the repository's Git directory",
+                    )
+                })?,
         };
         let stdout = Self::stdout_string(&output)?;
         let path = stdout
@@ -672,6 +716,104 @@ impl RepositoryReadPort for GitCliProvider {
             .next()
             .ok_or_else(|| parse_err("git rev-parse did not report a Git common directory"))?;
         Ok(PathBuf::from(path))
+    }
+
+    /// Lists local tags via `git for-each-ref refs/tags` (EPIC-18/T-216/
+    /// US-091 criterion 1). An empty result (no tags at all) is a valid
+    /// state, not an error.
+    fn list_tags(&self, repo: &Repository) -> Result<Vec<Tag>, GitSailError> {
+        let args = vec![
+            "for-each-ref".to_string(),
+            format!("--format={TAG_FORMAT}"),
+            "refs/tags".to_string(),
+        ];
+        let output = self.run(args, &repo.root_path)?;
+        let stdout = Self::stdout_string(&output)?;
+        parse_tag_records(&stdout)
+    }
+
+    /// Lists configured remotes (EPIC-18/T-216/US-091 criterion 1),
+    /// resolving each name's fetch and push URL independently via `git
+    /// remote get-url`/`get-url --push` rather than parsing `git remote
+    /// -v`'s `name\turl (fetch|push)` text — Git itself already
+    /// distinguishes the two per name this way, including the case where
+    /// `--push` was never configured separately (it then simply reports the
+    /// same URL as fetch), and this avoids parsing a name or URL that could
+    /// otherwise be confused with the trailing `(fetch)`/`(push)` marker.
+    /// Embedded credentials are never stripped here: [`RemoteUrl`] itself
+    /// only ever renders its `redacted()` form via `Display`/`Debug`, so any
+    /// diagnostic built from this stays safe (US-091 criterion 3) while the
+    /// raw URL remains available via `RemoteUrl::as_str` for anything that
+    /// genuinely needs to invoke Git with it.
+    fn list_remotes(&self, repo: &Repository) -> Result<Vec<Remote>, GitSailError> {
+        let names_output = self.run(vec!["remote".to_string()], &repo.root_path)?;
+        let names_stdout = Self::stdout_string(&names_output)?;
+
+        let mut remotes = Vec::new();
+        for name in names_stdout.lines().filter(|l| !l.is_empty()) {
+            let fetch_output = self.run(
+                vec![
+                    "remote".to_string(),
+                    "get-url".to_string(),
+                    name.to_string(),
+                ],
+                &repo.root_path,
+            )?;
+            let fetch_url = Self::stdout_string(&fetch_output)?.trim().to_string();
+
+            let push_output = self.run(
+                vec![
+                    "remote".to_string(),
+                    "get-url".to_string(),
+                    "--push".to_string(),
+                    name.to_string(),
+                ],
+                &repo.root_path,
+            )?;
+            let push_url = Self::stdout_string(&push_output)?.trim().to_string();
+
+            remotes.push(Remote {
+                name: name.to_string(),
+                fetch_url: RemoteUrl::new(fetch_url),
+                push_url: RemoteUrl::new(push_url),
+            });
+        }
+        Ok(remotes)
+    }
+
+    /// Lists stash entries, newest (`stash@{0}`) first (US-091 criterion 2).
+    /// See [`STASH_FORMAT`]'s doc for why the index is this record's
+    /// position rather than a parsed `%gd`.
+    fn list_stash_entries(&self, repo: &Repository) -> Result<Vec<Stash>, GitSailError> {
+        let args = vec![
+            "stash".to_string(),
+            "list".to_string(),
+            "--date=raw".to_string(),
+            format!("--format={STASH_FORMAT}"),
+        ];
+        // No stash ref exists at all until the first `stash push` — `git
+        // stash list` still exits 0 with empty output in that case, so this
+        // never needs `try_run`'s "treat a failure as empty" fallback; a
+        // genuine failure here is a real error.
+        let output = self.run(args, &repo.root_path)?;
+        let stdout = Self::stdout_string(&output)?;
+        parse_stash_records(&stdout)
+    }
+
+    /// Lists worktrees via `git worktree list --porcelain -z` (US-095
+    /// criterion 1). `-z` (NUL-delimited, block-separated by an empty
+    /// field) is used instead of the newline-delimited default so a path
+    /// containing an embedded newline round-trips correctly.
+    fn list_worktrees(&self, repo: &Repository) -> Result<Vec<Worktree>, GitSailError> {
+        let args = vec![
+            "worktree".to_string(),
+            "list".to_string(),
+            "--porcelain".to_string(),
+            "-z".to_string(),
+        ];
+        let output = self.run(args, &repo.root_path)?;
+        let stdout = Self::stdout_string(&output)?;
+        parse_worktree_records(&stdout)
     }
 }
 
@@ -697,7 +839,10 @@ impl RepositoryWritePort for GitCliProvider {
         // --staged` to read from (it fails with "could not resolve HEAD");
         // `git rm --cached` unstages by editing the index directly and
         // works regardless of HEAD, leaving the working tree untouched.
-        if matches!(self.determine_head_state(&repo.root_path)?, HeadState::Unborn) {
+        if matches!(
+            self.determine_head_state(&repo.root_path)?,
+            HeadState::Unborn
+        ) {
             let mut args = vec![
                 "rm".to_string(),
                 "--cached".to_string(),
@@ -751,8 +896,10 @@ impl RepositoryWritePort for GitCliProvider {
         let args = vec!["commit".to_string(), "-m".to_string(), message.to_string()];
         match self.run(args, &repo.root_path) {
             Ok(_) => {
-                let hash_output =
-                    self.run(vec!["rev-parse".to_string(), "HEAD".to_string()], &repo.root_path)?;
+                let hash_output = self.run(
+                    vec!["rev-parse".to_string(), "HEAD".to_string()],
+                    &repo.root_path,
+                )?;
                 let hash = Self::stdout_string(&hash_output)?.trim().to_string();
                 CommitHash::new(hash)
             }
@@ -875,13 +1022,262 @@ impl RepositoryWritePort for GitCliProvider {
         ];
         match self.run(args, &repo.root_path) {
             Ok(_) => {
-                let hash_output =
-                    self.run(vec!["rev-parse".to_string(), "HEAD".to_string()], &repo.root_path)?;
+                let hash_output = self.run(
+                    vec!["rev-parse".to_string(), "HEAD".to_string()],
+                    &repo.root_path,
+                )?;
                 let hash = Self::stdout_string(&hash_output)?.trim().to_string();
                 CommitHash::new(hash)
             }
             Err(err) => Err(classify_commit_failure(err)),
         }
+    }
+
+    /// Creates a new stash via `git stash push` (US-092). `scope`'s flags
+    /// are passed through 1:1 (this adapter never infers or hides one), and
+    /// this always reports whether anything was actually captured rather
+    /// than trusting `git stash push`'s own "No local changes to save"
+    /// wording (locale-independent and format-stable either way): the stash
+    /// list's length before and after is compared instead, and the newest
+    /// entry (`stash@{0}`) is returned on success (US-092 criterion 3).
+    fn create_stash(
+        &self,
+        repo: &Repository,
+        message: Option<&str>,
+        scope: StashScope,
+    ) -> Result<Stash, GitSailError> {
+        require_worktree(repo, "stash")?;
+        let before = RepositoryReadPort::list_stash_entries(self, repo)?.len();
+
+        let mut args = vec!["stash".to_string(), "push".to_string()];
+        if scope.keep_index {
+            args.push("--keep-index".to_string());
+        }
+        if scope.all {
+            // `--all` already implies capturing untracked files too, so
+            // `--include-untracked` is never also passed here (Git accepts
+            // both together, but that would be redundant, not a behavior
+            // change).
+            args.push("--all".to_string());
+        } else if scope.include_untracked {
+            args.push("--include-untracked".to_string());
+        }
+        if let Some(message) = message {
+            args.push("-m".to_string());
+            args.push(message.to_string());
+        }
+
+        self.run(args, &repo.root_path)?;
+
+        let after = RepositoryReadPort::list_stash_entries(self, repo)?;
+        if after.len() == before {
+            return Err(
+                GitSailError::new(ErrorCode::InvalidRepositoryState, "nothing to stash")
+                    .with_remediation(
+                        "make some changes within the requested scope before stashing",
+                    ),
+            );
+        }
+        // `git stash push` can only ever grow the stash list by exactly one
+        // (it never reorders or removes existing entries), so the new
+        // entry is always the newest one, `stash@{0}`.
+        Ok(after
+            .into_iter()
+            .next()
+            .expect("just checked after.len() > before >= 0"))
+    }
+
+    /// Applies `expected` via `git stash apply` without removing it
+    /// (US-093 criterion 1). See [`Self::revalidate_stash_identity`] for the
+    /// precondition check run first, and [`classify_stash_restore_outcome`]
+    /// for how a conflict is distinguished from a genuine failure.
+    fn apply_stash(
+        &self,
+        repo: &Repository,
+        expected: &Stash,
+    ) -> Result<StashApplyOutcome, GitSailError> {
+        require_worktree(repo, "stash apply")?;
+        self.revalidate_stash_identity(repo, expected)?;
+        let stash_ref = format!("stash@{{{}}}", expected.index);
+        let args = vec!["stash".to_string(), "apply".to_string(), stash_ref];
+        match self.run(args, &repo.root_path) {
+            Ok(_) => Ok(StashApplyOutcome {
+                had_conflicts: false,
+            }),
+            Err(err) => classify_stash_restore_outcome(err),
+        }
+    }
+
+    /// Applies `expected`, then removes it — but only when the apply
+    /// succeeded without conflicts (US-093 criterion 2). `git stash pop`
+    /// already refuses to drop the entry itself when the apply half
+    /// conflicts (verified directly against real Git: a conflicted `pop`
+    /// exits non-zero and prints "The stash entry is kept in case you need
+    /// it again"), so this method does not need its own extra bookkeeping
+    /// to avoid dropping on conflict — it only needs to *report* the
+    /// conflict accurately rather than as a plain success, which
+    /// [`classify_stash_restore_outcome`] already does identically to
+    /// [`Self::apply_stash`].
+    fn pop_stash(
+        &self,
+        repo: &Repository,
+        expected: &Stash,
+    ) -> Result<StashApplyOutcome, GitSailError> {
+        require_worktree(repo, "stash pop")?;
+        self.revalidate_stash_identity(repo, expected)?;
+        let stash_ref = format!("stash@{{{}}}", expected.index);
+        let args = vec!["stash".to_string(), "pop".to_string(), stash_ref];
+        match self.run(args, &repo.root_path) {
+            Ok(_) => Ok(StashApplyOutcome {
+                had_conflicts: false,
+            }),
+            Err(err) => classify_stash_restore_outcome(err),
+        }
+    }
+
+    /// Deletes `expected` via `git stash drop`, without applying it
+    /// (US-093 criterion 3; `Destructive` — see
+    /// [`gitsail_application::MutationKind::DropStash`]).
+    fn drop_stash(&self, repo: &Repository, expected: &Stash) -> Result<(), GitSailError> {
+        self.revalidate_stash_identity(repo, expected)?;
+        let stash_ref = format!("stash@{{{}}}", expected.index);
+        self.run(
+            vec!["stash".to_string(), "drop".to_string(), stash_ref],
+            &repo.root_path,
+        )
+        .map_err(classify_stash_missing_failure)?;
+        Ok(())
+    }
+
+    /// Creates a local tag via `git tag` (US-094 criterion 1). Never passes
+    /// `-f`: Git's own default refusal on a name collision is preserved
+    /// (US-094 criterion 1), reclassified by
+    /// [`classify_create_tag_failure`] into a clearer error than a bare
+    /// process failure. Never contacts a remote (US-094 criterion 3) — `git
+    /// tag` itself has no network effect.
+    fn create_tag(
+        &self,
+        repo: &Repository,
+        name: &str,
+        target: Option<&CommitHash>,
+        annotation: TagAnnotation,
+    ) -> Result<(), GitSailError> {
+        let mut args = vec!["tag".to_string()];
+        if let TagAnnotation::Annotated { message } = &annotation {
+            args.push("-a".to_string());
+            args.push("-m".to_string());
+            args.push(message.clone());
+        }
+        // `--` ends option parsing before `name`/`target` (same rationale as
+        // `create_branch`'s own `--`): a caller-supplied tag name that
+        // happens to look like a flag is rejected as an invalid tag name
+        // rather than parsed as one.
+        args.push("--".to_string());
+        args.push(name.to_string());
+        if let Some(target) = target {
+            args.push(target.as_str().to_string());
+        }
+        self.run(args, &repo.root_path)
+            .map_err(classify_create_tag_failure)?;
+        Ok(())
+    }
+
+    /// Deletes the local tag `name` via `git tag -d` (US-094 criterion 2).
+    /// Always local (US-094 criterion 3).
+    fn delete_tag(&self, repo: &Repository, name: &str) -> Result<(), GitSailError> {
+        let args = vec![
+            "tag".to_string(),
+            "-d".to_string(),
+            "--".to_string(),
+            name.to_string(),
+        ];
+        self.run(args, &repo.root_path)
+            .map_err(classify_delete_tag_failure)?;
+        Ok(())
+    }
+
+    /// Creates a new worktree via `git worktree add` (US-095 criterion 2).
+    /// Propagates Git's own refusal, reclassified by
+    /// [`classify_create_worktree_failure`], when `path` already exists
+    /// unexpectedly or `branch` names a branch already checked out
+    /// elsewhere — this never works around either (US-095 criterion 2:
+    /// "propague esse erro com clareza, não tente contornar").
+    fn create_worktree(
+        &self,
+        repo: &Repository,
+        path: &Path,
+        branch: WorktreeBranchSpec,
+    ) -> Result<Worktree, GitSailError> {
+        require_worktree(repo, "create worktree")?;
+        let path_arg = path.to_string_lossy().into_owned();
+        let mut args = vec!["worktree".to_string(), "add".to_string()];
+        match &branch {
+            WorktreeBranchSpec::ExistingBranch(name) => {
+                args.push(path_arg);
+                args.push(name.as_str().to_string());
+            }
+            WorktreeBranchSpec::NewBranch { name, start_point } => {
+                args.push("-b".to_string());
+                args.push(name.as_str().to_string());
+                args.push(path_arg);
+                if let Some(start) = start_point {
+                    args.push(start.as_str().to_string());
+                }
+            }
+            WorktreeBranchSpec::Detached(commit) => {
+                args.push("--detach".to_string());
+                args.push(path_arg);
+                args.push(commit.as_str().to_string());
+            }
+        }
+        self.run(args, &repo.root_path)
+            .map_err(classify_create_worktree_failure)?;
+
+        // `git worktree add` reports success without echoing back a
+        // machine-readable description of what it created, so the new
+        // worktree is located by re-listing rather than assembled from the
+        // request alone (which would not know, e.g., the resolved detached
+        // HEAD commit for a `NewBranch { start_point: None }` request).
+        // Matched by canonical path where possible (Git reports the
+        // worktree's real, canonicalized path, which is not always
+        // byte-identical to the caller's `path`, e.g. a symlinked temp
+        // directory) — falling back to a literal match otherwise, a known
+        // simplification for a path that cannot be canonicalized (e.g. does
+        // not exist, on a filesystem quirk).
+        let canonical_requested = std::fs::canonicalize(path).ok();
+        let worktrees = RepositoryReadPort::list_worktrees(self, repo)?;
+        worktrees
+            .into_iter()
+            .find(|w| Some(&w.path) == canonical_requested.as_ref() || w.path == path)
+            .ok_or_else(|| {
+                parse_err(
+                    "worktree add succeeded but the new worktree could not be found in the listing",
+                )
+            })
+    }
+
+    /// Removes the worktree at `path` via `git worktree remove` (US-095
+    /// criterion 3). With `force: false`, propagates Git's own refusal
+    /// (reclassified by [`classify_remove_worktree_failure`]) when the
+    /// worktree has uncommitted changes, rather than discarding them
+    /// implicitly. Deliberately never escalates to Git's own "remove a
+    /// locked worktree" double-force (`-f -f`): a locked worktree's lock is
+    /// left untouched, surfaced as a clear, classified error instead (not
+    /// an "advanced workspace manager" concern this story's scope covers).
+    fn remove_worktree(
+        &self,
+        repo: &Repository,
+        path: &Path,
+        force: bool,
+    ) -> Result<(), GitSailError> {
+        let mut args = vec!["worktree".to_string(), "remove".to_string()];
+        if force {
+            args.push("--force".to_string());
+        }
+        args.push(path.to_string_lossy().into_owned());
+        self.run(args, &repo.root_path)
+            .map_err(classify_remove_worktree_failure)?;
+        Ok(())
     }
 }
 
@@ -989,7 +1385,11 @@ impl GitCliProvider {
         }
 
         let patch = render_hunk_patch(selection);
-        let mut args = vec!["apply".to_string(), "--cached".to_string(), "--whitespace=nowarn".to_string()];
+        let mut args = vec![
+            "apply".to_string(),
+            "--cached".to_string(),
+            "--whitespace=nowarn".to_string(),
+        ];
         if direction == ApplyDirection::Reverse {
             args.push("--reverse".to_string());
         }
@@ -998,6 +1398,36 @@ impl GitCliProvider {
         self.run_with_stdin(args, &repo.root_path, patch.into_bytes())
             .map_err(classify_apply_failure)?;
         Ok(())
+    }
+
+    /// Revalidates `expected` (a stash entry a caller observed via a prior
+    /// [`RepositoryReadPort::list_stash_entries`] read) is still the same
+    /// entry at the same stack position immediately before
+    /// `apply_stash`/`pop_stash`/`drop_stash` act on it (US-093 criterion
+    /// 1), via [`gitsail_application::Precondition`] — the same mechanism
+    /// [`RepositoryWritePort::amend_commit`] already applies to `HEAD`.
+    /// Refuses with [`ErrorCode::OperationConflict`] both when the entry at
+    /// that position no longer matches (another entry was pushed/dropped,
+    /// shifting indices) and when the stash list has since shrunk past that
+    /// position entirely (T-218/US-093 DoD: "o índice do stash ter mudado
+    /// externamente entre a prévia e a confirmação").
+    fn revalidate_stash_identity(
+        &self,
+        repo: &Repository,
+        expected: &Stash,
+    ) -> Result<(), GitSailError> {
+        let current_entries = RepositoryReadPort::list_stash_entries(self, repo)?;
+        match current_entries.into_iter().nth(expected.index as usize) {
+            Some(current) => Precondition::new(expected.clone()).revalidate(&current),
+            None => Err(GitSailError::new(
+                ErrorCode::OperationConflict,
+                format!(
+                    "stash@{{{}}} no longer exists (the stash list changed since it was previewed)",
+                    expected.index
+                ),
+            )
+            .with_remediation("refresh the stash list and retry against a current entry")),
+        }
     }
 }
 
@@ -1220,7 +1650,9 @@ fn classify_delete_branch_failure(err: GitSailError) -> GitSailError {
             ErrorCode::InvalidRepositoryState,
             "the branch is currently checked out",
         )
-        .with_remediation("switch to a different branch, or a different worktree, before deleting it")
+        .with_remediation(
+            "switch to a different branch, or a different worktree, before deleting it",
+        )
         .with_source(err)
     } else if diagnostic_text.contains("not fully merged") {
         GitSailError::new(
@@ -1229,6 +1661,171 @@ fn classify_delete_branch_failure(err: GitSailError) -> GitSailError {
         )
         .with_remediation("merge the branch first, or delete it with force if you are sure")
         .with_source(err)
+    } else {
+        err
+    }
+}
+
+/// Turns a failed `git stash apply`/`git stash pop` into a
+/// [`StashApplyOutcome`] when the failure is actually a reported merge
+/// conflict (US-093 criterion 2) — Git exits non-zero for this, but the
+/// conflict text ("Auto-merging ...", "CONFLICT (content): Merge conflict
+/// in ...") is on *stdout*, not stderr, verified directly against real Git
+/// (`gitsail-git/src/runner.rs`'s `ProcessDiagnostic::stdout` field exists
+/// specifically so this classification can see it). Any other
+/// `ProcessFailure` is reclassified into a clearer error, or passed through
+/// unchanged.
+fn classify_stash_restore_outcome(err: GitSailError) -> Result<StashApplyOutcome, GitSailError> {
+    if err.code() != ErrorCode::ProcessFailure {
+        return Err(err);
+    }
+    let diagnostic_text = err.diagnostic().map(|d| d.to_string()).unwrap_or_default();
+    if diagnostic_text.contains("CONFLICT") {
+        Ok(StashApplyOutcome {
+            had_conflicts: true,
+        })
+    } else if diagnostic_text.contains("would be overwritten") {
+        Err(GitSailError::new(
+            ErrorCode::OperationConflict,
+            "restoring the stash would overwrite local changes",
+        )
+        .with_remediation("commit or stash your current local changes first, then retry")
+        .with_source(err))
+    } else if diagnostic_text.contains("No stash entries found")
+        || diagnostic_text.contains("unknown option")
+        || diagnostic_text.contains("Log for")
+    {
+        Err(classify_stash_missing_failure(err))
+    } else {
+        Err(err)
+    }
+}
+
+/// Reclassifies a failed `git stash drop` (or a `git stash apply`/`pop`
+/// whose failure [`classify_stash_restore_outcome`] determined was not a
+/// conflict) as [`ErrorCode::OperationConflict`] when the named stash entry
+/// does not exist. In ordinary use this is already prevented by
+/// [`GitCliProvider::revalidate_stash_identity`] running first, but it is
+/// kept here too as defense in depth against the small window between that
+/// revalidation read and this mutation actually running. Any other failure
+/// passes through unchanged.
+fn classify_stash_missing_failure(err: GitSailError) -> GitSailError {
+    if err.code() != ErrorCode::ProcessFailure {
+        return err;
+    }
+    let diagnostic_text = err.diagnostic().map(|d| d.to_string()).unwrap_or_default();
+    if diagnostic_text.contains("No stash entries found") || diagnostic_text.contains("Log for") {
+        GitSailError::new(
+            ErrorCode::OperationConflict,
+            "the stash entry no longer exists",
+        )
+        .with_remediation("refresh the stash list and retry against a current entry")
+        .with_source(err)
+    } else {
+        err
+    }
+}
+
+/// Reclassifies a failed `git tag [-a -m ...] -- <name> [<target>]` when it
+/// failed because `name` already exists (US-094 criterion 1: "colisão de
+/// nome não sobrescreve silenciosamente") or `target` does not resolve to a
+/// commit. Any other failure passes through unchanged.
+fn classify_create_tag_failure(err: GitSailError) -> GitSailError {
+    if err.code() != ErrorCode::ProcessFailure {
+        return err;
+    }
+    let diagnostic_text = err.diagnostic().map(|d| d.to_string()).unwrap_or_default();
+    if diagnostic_text.contains("already exists") {
+        GitSailError::new(
+            ErrorCode::InvalidRepositoryState,
+            "a tag with that name already exists",
+        )
+        .with_remediation("choose a different tag name")
+        .with_source(err)
+    } else if diagnostic_text.contains("not a valid object name") {
+        GitSailError::new(
+            ErrorCode::RepositoryNotFound,
+            "the tag target does not exist",
+        )
+        .with_remediation("choose an existing commit, branch or tag as the target")
+        .with_source(err)
+    } else {
+        err
+    }
+}
+
+/// Reclassifies a failed `git tag -d -- <name>` when `name` does not exist.
+/// Any other failure passes through unchanged.
+fn classify_delete_tag_failure(err: GitSailError) -> GitSailError {
+    if err.code() != ErrorCode::ProcessFailure {
+        return err;
+    }
+    let diagnostic_text = err.diagnostic().map(|d| d.to_string()).unwrap_or_default();
+    if diagnostic_text.contains("not found") {
+        GitSailError::new(ErrorCode::RepositoryNotFound, "no such tag")
+            .with_remediation("verify the tag name")
+            .with_source(err)
+    } else {
+        err
+    }
+}
+
+/// Reclassifies a failed `git worktree add` when it failed because the
+/// requested branch is already checked out in another worktree (US-095
+/// criterion 2) or the target path already exists. Any other failure passes
+/// through unchanged.
+fn classify_create_worktree_failure(err: GitSailError) -> GitSailError {
+    if err.code() != ErrorCode::ProcessFailure {
+        return err;
+    }
+    let diagnostic_text = err.diagnostic().map(|d| d.to_string()).unwrap_or_default();
+    if diagnostic_text.contains("already used by worktree") {
+        GitSailError::new(
+            ErrorCode::InvalidRepositoryState,
+            "that branch is already checked out in another worktree",
+        )
+        .with_remediation("choose a different branch, or remove/switch the other worktree first")
+        .with_source(err)
+    } else if diagnostic_text.contains("already exists") {
+        GitSailError::new(
+            ErrorCode::InvalidRepositoryState,
+            "the target path already exists",
+        )
+        .with_remediation("choose an empty or nonexistent path for the new worktree")
+        .with_source(err)
+    } else {
+        err
+    }
+}
+
+/// Reclassifies a failed `git worktree remove` when it failed because the
+/// worktree has uncommitted changes and `force` was not set (US-095
+/// criterion 3), is locked, or does not exist. Any other failure passes
+/// through unchanged.
+fn classify_remove_worktree_failure(err: GitSailError) -> GitSailError {
+    if err.code() != ErrorCode::ProcessFailure {
+        return err;
+    }
+    let diagnostic_text = err.diagnostic().map(|d| d.to_string()).unwrap_or_default();
+    if diagnostic_text.contains("contains modified or untracked files") {
+        GitSailError::new(
+            ErrorCode::OperationConflict,
+            "the worktree has uncommitted changes",
+        )
+        .with_remediation(
+            "remove with force if you want to discard those changes, or commit/stash them first",
+        )
+        .with_source(err)
+    } else if diagnostic_text.contains("cannot remove a locked working tree") {
+        GitSailError::new(ErrorCode::OperationConflict, "the worktree is locked")
+            .with_remediation("unlock it first (`git worktree unlock`), then retry")
+            .with_source(err)
+    } else if diagnostic_text.contains("is not a working tree")
+        || diagnostic_text.contains("No such file or directory")
+    {
+        GitSailError::new(ErrorCode::RepositoryNotFound, "no such worktree")
+            .with_remediation("verify the worktree path")
+            .with_source(err)
     } else {
         err
     }
@@ -1376,12 +1973,10 @@ fn parse_status_entry<'a, I: Iterator<Item = &'a str>>(
         Some(b'1') => parse_ordinary_status_entry(segment).map(Some),
         Some(b'2') => parse_rename_status_entry(segment, rest).map(Some),
         Some(b'u') => parse_unmerged_status_entry(segment).map(Some),
-        Some(b'?') => parse_marker_status_entry(
-            segment,
-            FileStatusCode::Untracked,
-            ChangeType::Untracked,
-        )
-        .map(Some),
+        Some(b'?') => {
+            parse_marker_status_entry(segment, FileStatusCode::Untracked, ChangeType::Untracked)
+                .map(Some)
+        }
         Some(b'!') => {
             parse_marker_status_entry(segment, FileStatusCode::Ignored, ChangeType::Ignored)
                 .map(Some)
@@ -1687,7 +2282,9 @@ fn parse_ref_line(line: &str) -> Result<Option<Branch>, GitSailError> {
             branch.to_string(),
         )
     } else {
-        return Err(parse_err("unrecognized ref namespace in for-each-ref output"));
+        return Err(parse_err(
+            "unrecognized ref namespace in for-each-ref output",
+        ));
     };
 
     let name = BranchName::new(name)?;
@@ -1743,6 +2340,192 @@ fn parse_ahead_behind(track: &str) -> Result<(u32, u32), GitSailError> {
         }
     }
     Ok((ahead, behind))
+}
+
+// ---------------------------------------------------------------------
+// `git for-each-ref refs/tags` parsing (EPIC-18/T-216/US-091).
+// ---------------------------------------------------------------------
+
+/// Splits `raw` `for-each-ref`/`stash list` `RECORD_SEP`-terminated output
+/// into individual records, mirroring [`parse_log_records`]'s exact
+/// convention (Git inserts a `\n` before every record but the first, which
+/// is stripped here the same way).
+fn split_record_sep_blocks(raw: &str) -> impl Iterator<Item = &str> {
+    raw.split(RECORD_SEP)
+        .map(|record| record.strip_prefix('\n').unwrap_or(record))
+        .filter(|record| !record.is_empty())
+}
+
+fn parse_tag_records(raw: &str) -> Result<Vec<Tag>, GitSailError> {
+    split_record_sep_blocks(raw).map(parse_tag_record).collect()
+}
+
+fn parse_tag_record(record: &str) -> Result<Tag, GitSailError> {
+    let fields: Vec<&str> = record.split(FIELD_SEP).collect();
+    if fields.len() != TAG_FIELD_COUNT {
+        return Err(parse_err(
+            "malformed for-each-ref tag record: unexpected field count",
+        ));
+    }
+    let name = fields[0].to_string();
+    let object_name = fields[1];
+    let object_type = fields[2];
+    let peeled = fields[3];
+    let tagger_name = fields[4];
+    let tagger_email = fields[5];
+    let tagger_date = fields[6];
+    let contents = fields[7];
+
+    match object_type {
+        "tag" => {
+            // An annotated tag: `%(objectname)` is the tag object itself,
+            // never a commit — the commit this tag names is
+            // `%(*objectname)` (the peeled/dereferenced target).
+            if peeled.is_empty() {
+                return Err(parse_err(
+                    "annotated tag record missing its peeled (dereferenced) target",
+                ));
+            }
+            let target = CommitHash::new(peeled.to_string())?;
+            if tagger_name.is_empty() {
+                return Err(parse_err("annotated tag record missing tagger name"));
+            }
+            let tagger = Signature::new(tagger_name.to_string(), strip_angle_brackets(tagger_email));
+            let date = parse_raw_date(tagger_date)?;
+            // `%(contents)` always reports a trailing newline for a real
+            // message; trimmed once here so `Tag::kind`'s message matches
+            // what a person actually typed, not Git's own storage
+            // convention.
+            let message = contents.strip_suffix('\n').unwrap_or(contents).to_string();
+            Ok(Tag {
+                name,
+                target,
+                kind: TagKind::Annotated {
+                    message,
+                    tagger,
+                    date,
+                },
+            })
+        }
+        "commit" => {
+            // A lightweight tag pointing directly at a commit.
+            let target = CommitHash::new(object_name.to_string())?;
+            Ok(Tag {
+                name,
+                target,
+                kind: TagKind::Lightweight,
+            })
+        }
+        other => Err(parse_err(format!(
+            "tag '{name}' points at an unsupported object type '{other}' (expected a commit or an annotated tag)"
+        ))),
+    }
+}
+
+// ---------------------------------------------------------------------
+// `git stash list` parsing (EPIC-18/T-216/US-091).
+// ---------------------------------------------------------------------
+
+fn parse_stash_records(raw: &str) -> Result<Vec<Stash>, GitSailError> {
+    split_record_sep_blocks(raw)
+        .enumerate()
+        .map(|(index, record)| parse_stash_record(index as u32, record))
+        .collect()
+}
+
+fn parse_stash_record(index: u32, record: &str) -> Result<Stash, GitSailError> {
+    let fields: Vec<&str> = record.split(FIELD_SEP).collect();
+    if fields.len() != STASH_FIELD_COUNT {
+        return Err(parse_err(
+            "malformed git stash list record: unexpected field count",
+        ));
+    }
+    let commit = CommitHash::new(fields[0].to_string())?;
+    let message = fields[1].to_string();
+    let date = parse_raw_date(fields[2])?;
+    Ok(Stash {
+        index,
+        commit,
+        message,
+        date,
+    })
+}
+
+// ---------------------------------------------------------------------
+// `git worktree list --porcelain -z` parsing (EPIC-18/T-220/US-095).
+// ---------------------------------------------------------------------
+
+/// Parses `raw` `git worktree list --porcelain -z` output: each worktree's
+/// block of NUL-separated lines is itself terminated by an empty field,
+/// i.e. two consecutive NULs — [`str::split`] on that exact two-byte
+/// separator reproduces this reliably (unlike splitting on a single NUL and
+/// filtering empty lines, which cannot distinguish a genuine empty line
+/// from the block boundary).
+fn parse_worktree_records(raw: &str) -> Result<Vec<Worktree>, GitSailError> {
+    raw.split("\0\0")
+        .filter(|block| !block.is_empty())
+        .enumerate()
+        .map(|(index, block)| parse_worktree_record(index == 0, block))
+        .collect()
+}
+
+fn parse_worktree_record(is_main: bool, block: &str) -> Result<Worktree, GitSailError> {
+    let mut path: Option<PathBuf> = None;
+    let mut head_hash: Option<&str> = None;
+    let mut branch_ref: Option<&str> = None;
+    let mut detached = false;
+    let mut is_locked = false;
+    let mut is_prunable = false;
+
+    for line in block.split('\0').filter(|l| !l.is_empty()) {
+        if let Some(rest) = line.strip_prefix("worktree ") {
+            path = Some(PathBuf::from(rest));
+        } else if let Some(rest) = line.strip_prefix("HEAD ") {
+            head_hash = Some(rest);
+        } else if let Some(rest) = line.strip_prefix("branch ") {
+            branch_ref = Some(rest);
+        } else if line == "detached" {
+            detached = true;
+        } else if line == "locked" || line.starts_with("locked ") {
+            is_locked = true;
+        } else if line == "prunable" || line.starts_with("prunable ") {
+            is_prunable = true;
+        }
+        // Any other line (e.g. "bare", for a bare repository's own
+        // worktree entry) is not modeled by `Worktree` and is ignored
+        // rather than rejected — a forward-compatible parse, matching how
+        // `parse_decorations` already treats an unrecognized ref namespace.
+    }
+
+    let path = path.ok_or_else(|| parse_err("worktree record missing a path"))?;
+    let head = match head_hash {
+        None => return Err(parse_err("worktree record missing HEAD")),
+        Some(hash) => {
+            let commit = CommitHash::new(hash.to_string())?;
+            if commit.is_zero() {
+                WorktreeHead::Unborn
+            } else if detached {
+                WorktreeHead::Detached { commit }
+            } else if let Some(refname) = branch_ref {
+                let branch_name = refname.strip_prefix("refs/heads/").unwrap_or(refname);
+                WorktreeHead::Attached {
+                    branch: BranchName::new(branch_name.to_string())?,
+                }
+            } else {
+                return Err(parse_err(
+                    "worktree record has neither a branch nor a detached marker",
+                ));
+            }
+        }
+    };
+
+    Ok(Worktree {
+        path,
+        head,
+        is_main,
+        is_locked,
+        is_prunable,
+    })
 }
 
 // ---------------------------------------------------------------------
@@ -1817,10 +2600,11 @@ fn split_diff_blocks(raw: &str) -> Vec<Vec<&str>> {
     blocks
 }
 
-fn parse_diff_block(lines: Vec<&str>, cancel: &CancellationToken) -> Result<FileDiff, GitSailError> {
-    let header = *lines
-        .first()
-        .ok_or_else(|| parse_err("empty diff block"))?;
+fn parse_diff_block(
+    lines: Vec<&str>,
+    cancel: &CancellationToken,
+) -> Result<FileDiff, GitSailError> {
+    let header = *lines.first().ok_or_else(|| parse_err("empty diff block"))?;
 
     let mut previous_path: Option<PathBuf> = None;
     let mut is_copy = false;
@@ -2153,7 +2937,9 @@ fn parse_blame(raw: &str, cancel: &CancellationToken) -> Result<Vec<BlameLine>, 
 }
 
 fn strip_angle_brackets(raw: &str) -> String {
-    raw.trim_start_matches('<').trim_end_matches('>').to_string()
+    raw.trim_start_matches('<')
+        .trim_end_matches('>')
+        .to_string()
 }
 
 /// A blame header line is `<hash> <orig_line> <final_line> [<count>]`;
@@ -2295,8 +3081,11 @@ mod tests {
     impl std::error::Error for RawStderr {}
 
     fn process_failure(stderr: &'static str) -> GitSailError {
-        GitSailError::new(ErrorCode::ProcessFailure, "git process exited with a non-zero status")
-            .with_source(RawStderr(stderr))
+        GitSailError::new(
+            ErrorCode::ProcessFailure,
+            "git process exited with a non-zero status",
+        )
+        .with_source(RawStderr(stderr))
     }
 
     #[test]
@@ -2311,7 +3100,10 @@ mod tests {
 
         assert_eq!(classified.code(), ErrorCode::InvalidRepositoryState);
         assert!(classified.remediation().unwrap().contains("user.name"));
-        assert!(classified.diagnostic().is_some(), "original diagnostic must be preserved");
+        assert!(
+            classified.diagnostic().is_some(),
+            "original diagnostic must be preserved"
+        );
     }
 
     #[test]
@@ -2324,12 +3116,17 @@ mod tests {
         // understand it, only preserve it as a diagnostic (US-012 criterion
         // 2's "diagnóstico" requirement, without over-fitting to hook text).
         assert_eq!(classified.code(), ErrorCode::ProcessFailure);
-        assert!(classified.diagnostic().unwrap().to_string().contains("blocked by hook"));
+        assert!(classified
+            .diagnostic()
+            .unwrap()
+            .to_string()
+            .contains("blocked by hook"));
     }
 
     #[test]
     fn classifies_a_stale_hunk_as_operation_conflict() {
-        let err = process_failure("error: patch failed: f.txt:1\nerror: f.txt: patch does not apply\n");
+        let err =
+            process_failure("error: patch failed: f.txt:1\nerror: f.txt: patch does not apply\n");
 
         let classified = classify_apply_failure(err);
 
@@ -2478,7 +3275,10 @@ mod tests {
 
         assert_eq!(classified.code(), ErrorCode::RepositoryLocked);
         assert!(classified.remediation().unwrap().contains("retry"));
-        assert!(classified.diagnostic().is_some(), "original diagnostic must be preserved");
+        assert!(
+            classified.diagnostic().is_some(),
+            "original diagnostic must be preserved"
+        );
     }
 
     #[test]

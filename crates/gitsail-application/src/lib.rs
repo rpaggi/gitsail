@@ -36,8 +36,11 @@ pub use use_cases::{
     GetDiff, GetFileBlame, GetFileContent, GetLineHistory, GetRepositoryStatus, ListBranches,
     OpenRepository, PreviewAmend, RevisionComparison,
 };
-pub use write_ports::RepositoryWritePort;
+pub use write_ports::{
+    RepositoryWritePort, StashApplyOutcome, StashScope, TagAnnotation, WorktreeBranchSpec,
+};
 pub use write_use_cases::{
-    AmendCommit, CreateBranch, CreateCommit, DeleteBranch, StageFiles, StageHunks, SwitchBranch,
-    UnstageFiles, UnstageHunks,
+    AmendCommit, ApplyStash, CreateBranch, CreateCommit, CreateStash, CreateTag, CreateWorktree,
+    DeleteBranch, DeleteTag, DropStash, PopStash, RemoveWorktree, StageFiles, StageHunks,
+    SwitchBranch, UnstageFiles, UnstageHunks,
 };

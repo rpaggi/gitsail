@@ -8,7 +8,8 @@ use std::path::{Path, PathBuf};
 
 use gitsail_domain::{
     Blame, Branch, BranchName, CancellationToken, Commit, CommitHash, Diff, FileContentAtRevision,
-    GitSailError, LineHistory, LineRange, Repository, RepositoryStatus,
+    GitSailError, LineHistory, LineRange, Remote, Repository, RepositoryStatus, Stash, Tag,
+    Worktree,
 };
 
 /// A single page of results plus continuation metadata (SAD §25).
@@ -193,5 +194,51 @@ pub trait RepositoryReadPort: Send + Sync {
     /// per-worktree.
     fn lock_key(&self, repo: &Repository) -> Result<PathBuf, GitSailError> {
         Ok(repo.root_path.clone())
+    }
+
+    // -------------------------------------------------------------------
+    // EPIC-18/T-216/US-091: tags, remotes, stash inspection.
+    // -------------------------------------------------------------------
+    //
+    // Each of the four methods below defaults to reporting an empty list
+    // rather than being a required trait method: an adapter/test double that
+    // predates this epic (e.g. `gitsail-tui`/`apps/desktop`'s own
+    // `RepositoryReadPort` fakes) still compiles unchanged and truthfully
+    // reports "nothing here yet" — which is exactly the legitimate "empty is
+    // a valid state, not an error" contract these reads promise (US-091
+    // criterion 3) — rather than needing a mechanical, meaningless
+    // `unimplemented!()` stub added to every existing implementer just to
+    // satisfy the trait. [`crate::RepositoryWritePort`]'s new mutation
+    // methods follow the same reasoning (see that trait's doc).
+    // [`gitsail_git::GitCliProvider`] overrides all four with a real `git`
+    // implementation.
+
+    /// Lists local tags, both lightweight and annotated (US-091 criterion
+    /// 1). Default: an empty list.
+    fn list_tags(&self, repo: &Repository) -> Result<Vec<Tag>, GitSailError> {
+        let _ = repo;
+        Ok(Vec::new())
+    }
+
+    /// Lists configured remotes, with fetch and push URLs distinguished even
+    /// when they differ (US-091 criterion 1). Default: an empty list.
+    fn list_remotes(&self, repo: &Repository) -> Result<Vec<Remote>, GitSailError> {
+        let _ = repo;
+        Ok(Vec::new())
+    }
+
+    /// Lists stash entries, newest (index 0, i.e. `stash@{0}`) first
+    /// (US-091 criterion 2). Default: an empty list.
+    fn list_stash_entries(&self, repo: &Repository) -> Result<Vec<Stash>, GitSailError> {
+        let _ = repo;
+        Ok(Vec::new())
+    }
+
+    /// Lists this repository's worktrees, including the main (non-linked)
+    /// one (US-095 criterion 1). Default: an empty list — though a real
+    /// adapter implementing this always reports at least the main worktree.
+    fn list_worktrees(&self, repo: &Repository) -> Result<Vec<Worktree>, GitSailError> {
+        let _ = repo;
+        Ok(Vec::new())
     }
 }

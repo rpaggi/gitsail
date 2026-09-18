@@ -23,6 +23,8 @@ pub mod repository;
 pub mod sanitize;
 pub mod stash;
 pub mod status;
+pub mod tag;
+pub mod worktree;
 
 pub use blame::{Blame, BlameLine, BlameOrigin, LineRange};
 pub use branch::{Branch, BranchKind};
@@ -38,3 +40,5 @@ pub use remote::{Remote, RemoteUrl};
 pub use repository::{HeadState, Repository, RepositoryId};
 pub use stash::Stash;
 pub use status::{ChangeType, FileChange, FileStatusCode, RepositoryStatus};
+pub use tag::{Tag, TagKind};
+pub use worktree::{Worktree, WorktreeHead};

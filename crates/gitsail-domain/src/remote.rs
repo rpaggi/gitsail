@@ -8,8 +8,21 @@ use std::fmt;
 /// stray `{}`/`{:?}` in a log line cannot leak embedded credentials
 /// (SAD §11, §28). Use [`RemoteUrl::as_str`] when the raw value is
 /// genuinely needed, e.g. to hand it back to a Git process invocation.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+///
+/// `Debug` is implemented manually (not derived) specifically so this holds
+/// for `{:?}` too, not only `{}` — a plain `#[derive(Debug)]` would print the
+/// unredacted inner string (EPIC-18/T-216/US-091 criterion 3: "URLs com
+/// credenciais embutidas ... são redigidas em qualquer diagnóstico",
+/// exercised end-to-end for `RepositoryReadPort::list_remotes` in
+/// `gitsail-git`'s integration tests).
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub struct RemoteUrl(String);
+
+impl fmt::Debug for RemoteUrl {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("RemoteUrl").field(&self.redacted()).finish()
+    }
+}
 
 impl RemoteUrl {
     pub fn new(url: impl Into<String>) -> Self {
@@ -61,6 +74,22 @@ mod tests {
         let url = RemoteUrl::new("https://user:secret-token@github.com/org/repo.git");
         assert_eq!(url.redacted(), "https://***@github.com/org/repo.git");
         assert!(!url.to_string().contains("secret-token"));
+    }
+
+    /// EPIC-18/T-216/US-091 criterion 3: `{:?}` must never leak a credential
+    /// either, not only `{}` — a plain derived `Debug` would print the raw
+    /// inner string.
+    #[test]
+    fn redacts_embedded_credentials_in_debug_output_too() {
+        let url = RemoteUrl::new("https://user:secret-token@github.com/org/repo.git");
+        assert!(!format!("{url:?}").contains("secret-token"));
+
+        let remote = Remote {
+            name: "origin".to_string(),
+            fetch_url: url.clone(),
+            push_url: url,
+        };
+        assert!(!format!("{remote:?}").contains("secret-token"));
     }
 
     #[test]
