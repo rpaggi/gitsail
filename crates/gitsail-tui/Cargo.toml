@@ -18,6 +18,12 @@ rust-version.workspace = true
 arboard = { version = "3", default-features = false }
 clap = { version = "4", features = ["derive"] }
 crossterm = "0.29"
+# T-251/US-109: resolves the OS config directory for the optional
+# keybindings-override file (`crate::keybindings::default_config_path`),
+# the same crate and major version `apps/desktop/src-tauri` already uses
+# for its own preferences/recent-repositories file locations — no new
+# convention introduced.
+dirs = "6"
 gitsail-application = { path = "../gitsail-application" }
 gitsail-domain = { path = "../gitsail-domain" }
 gitsail-git = { path = "../gitsail-git" }

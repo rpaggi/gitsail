@@ -113,6 +113,27 @@ describe("formatBindingForDisplay", () => {
   });
 });
 
+// -- T-251/US-109 criterion 3: confirmation cannot be skipped via remap ----
+//
+// `CONFIGURABLE_ACTIONS` has no `risk`/destructive concept of its own — the
+// safety guarantee lives in `AppShell.vue`'s `GLOBAL_ACTION_HANDLERS`, a
+// closed map from a fixed set of ids to a fixed set of already-existing
+// store calls (`sync.requestFetch`/`requestPull`/`requestPush`,
+// `staging.requestCommit`, and a plain DOM focus call for `focus-search`) —
+// none of which ever constructs a `"destructive"`-risk `OperationDescriptor`
+// (see `stores/sync.ts`/`stores/staging.ts`: their risk tier is a hardcoded
+// literal at the call site, never derived from a preference). This canary
+// test is the audit T-251 asks for, made durable: it fails the moment
+// someone adds a new configurable action id without consciously reviewing
+// (and updating this list to reflect) that it still only ever reaches a
+// Safe/Moderate-risk call — never lets a remap reach a Destructive one.
+describe("T-251/US-109: configurable-actions allow-list stays a closed, audited set", () => {
+  it("only ever lists the ids AppShell.vue's fixed handler map recognizes", () => {
+    const ids = CONFIGURABLE_ACTIONS.map((a) => a.id).sort();
+    expect(ids).toEqual(["commit", "fetch", "focus-search", "pull", "push"]);
+  });
+});
+
 describe("isMacPlatform", () => {
   it("detects macOS from the platform string", () => {
     expect(isMacPlatform({ platform: "MacIntel", userAgent: "" })).toBe(true);

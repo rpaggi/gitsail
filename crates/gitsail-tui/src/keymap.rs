@@ -4,6 +4,8 @@
 //! never falls through to an action from a different one — e.g. `q` closes
 //! the help overlay instead of quitting while help is open).
 
+use std::collections::HashMap;
+
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 use crate::action::Action;
@@ -210,6 +212,43 @@ pub fn action_for(key: KeyEvent, ctx: InputContext) -> Option<Action> {
             _ => None,
         },
     }
+}
+
+/// Resolves one key press to an [`Action`] the same way [`action_for`]
+/// does, except that while `ctx` is [`InputContext::Normal`], a plain
+/// character key first checks `bindings` (built by
+/// [`crate::keybindings::effective_bindings`]) — a person's remapped
+/// shortcut for one of `crate::keybindings::CONFIGURABLE_ACTIONS` wins over
+/// the hardcoded default below it in [`action_for`]'s own `Normal` arm.
+///
+/// **Every other `InputContext`** — every overlay, prompt and dialog, most
+/// importantly the `Enter`/`Esc` keys that drive
+/// [`crate::operation::OperationState::confirm`]/
+/// [`crate::operation::OperationState::cancel`] for a pending `Moderate`/
+/// `Destructive` confirmation — is never routed through `bindings` at all;
+/// it always resolves through [`action_for`] alone, unconditionally. This
+/// is what makes T-251/US-109 criterion 3 ("a política de confirmação não
+/// pode ser desabilitada por preferência") a structural guarantee rather
+/// than a convention someone could quietly violate later: remapping only
+/// ever changes *which key starts* one of the fixed, allow-listed actions,
+/// never how a pending confirmation already in flight is advanced or
+/// cancelled. See `crate::keybindings`'s own module doc for the other half
+/// of this guarantee (why the allow-list itself can never contain
+/// `Activate`/`Dismiss`), and
+/// `crate::app::tests::a_destructive_reset_still_requires_two_explicit_confirmations`
+/// for the end-to-end proof.
+pub fn resolve_action(key: KeyEvent, ctx: InputContext, bindings: &HashMap<char, Action>) -> Option<Action> {
+    if key.kind != KeyEventKind::Press {
+        return None;
+    }
+    if ctx == InputContext::Normal {
+        if let KeyCode::Char(c) = key.code {
+            if let Some(action) = bindings.get(&c) {
+                return Some(*action);
+            }
+        }
+    }
+    action_for(key, ctx)
 }
 
 #[cfg(test)]
@@ -605,5 +644,65 @@ mod tests {
         let mut key = press(KeyCode::Char('q'));
         key.kind = KeyEventKind::Release;
         assert_eq!(action_for(key, InputContext::Normal), None);
+    }
+
+    // -- T-251/US-109: `resolve_action` bindings ----------------------------
+
+    #[test]
+    fn resolve_action_prefers_a_binding_override_in_the_normal_context() {
+        let mut bindings = HashMap::new();
+        bindings.insert('x', Action::Quit);
+
+        assert_eq!(
+            resolve_action(press(KeyCode::Char('x')), InputContext::Normal, &bindings),
+            Some(Action::Quit)
+        );
+    }
+
+    #[test]
+    fn resolve_action_falls_back_to_the_hardcoded_default_when_unbound() {
+        let bindings = HashMap::new();
+        assert_eq!(
+            resolve_action(press(KeyCode::Char('q')), InputContext::Normal, &bindings),
+            Some(Action::Quit)
+        );
+    }
+
+    /// The load-bearing case (T-251 criterion 3): even a maximally
+    /// adversarial bindings table — one that maps a key straight to
+    /// [`Action::Activate`], which [`crate::keybindings::parse_config`]
+    /// itself can never actually produce — has zero effect outside
+    /// [`InputContext::Normal`]. A pending confirmation's `Enter`/`Esc`
+    /// always resolves through [`action_for`] alone, regardless of what a
+    /// bindings table (however it was built) contains.
+    #[test]
+    fn bindings_are_never_consulted_outside_the_normal_context() {
+        let mut adversarial_bindings = HashMap::new();
+        adversarial_bindings.insert('x', Action::Activate);
+
+        for ctx in [
+            InputContext::Help,
+            InputContext::CommitDetails,
+            InputContext::ReferenceDetails,
+            InputContext::ReflogDetails,
+            InputContext::Conflicts,
+            InputContext::RebasePlan,
+            InputContext::RebasePlanReword,
+            InputContext::ResetMode,
+            InputContext::Amend,
+        ] {
+            assert_eq!(
+                resolve_action(press(KeyCode::Char('x')), ctx, &adversarial_bindings),
+                action_for(press(KeyCode::Char('x')), ctx),
+                "an overlay/dialog context must never consult the bindings table, got a different result for {ctx:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn only_key_press_events_produce_actions_through_resolve_action() {
+        let mut key = press(KeyCode::Char('q'));
+        key.kind = KeyEventKind::Release;
+        assert_eq!(resolve_action(key, InputContext::Normal, &HashMap::new()), None);
     }
 }

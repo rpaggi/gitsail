@@ -803,19 +803,52 @@ fn commit_details_lines(commit: &Commit) -> Vec<Line<'static>> {
     lines
 }
 
-/// Formats a [`GitTimestamp`] the same zero-dependency way `gitsail-cli`
-/// already does (no `chrono`/`time` crate anywhere in this workspace) —
-/// the raw Unix timestamp, plus the signer's own UTC offset so a reader
-/// does not have to convert it themselves.
+/// Formats a [`GitTimestamp`] as a calendar date/time in the commit's own
+/// recorded offset (T-251/US-109 criterion 1's format-alignment pass:
+/// before this, this was the workspace's one remaining raw-epoch-integer
+/// date display — `apps/vscode/src/blameFormat.ts::formatGitTimestamp` and
+/// `apps/desktop`'s DTOs already expect/produce a calendar date wherever
+/// they render one at all — see `docs/architecture/preferences-matrix.md`
+/// for the full audit). Still zero-dependency (no `chrono`/`time` crate
+/// anywhere in this workspace): shifts the epoch seconds by the offset and
+/// reads the civil (Gregorian) date back off the result with the same
+/// integer `civil_from_days` algorithm `blameFormat.ts`'s own doc
+/// describes in prose — never the host machine's local timezone, so the
+/// same commit renders identically regardless of where the TUI runs.
 fn format_timestamp(ts: &GitTimestamp) -> String {
+    let shifted = ts.seconds_since_epoch + i64::from(ts.utc_offset_minutes) * 60;
+    let days = shifted.div_euclid(86_400);
+    let seconds_of_day = shifted.rem_euclid(86_400);
+    let (year, month, day) = civil_from_days(days);
+    let hour = seconds_of_day / 3600;
+    let minute = (seconds_of_day % 3600) / 60;
+
     let sign = if ts.utc_offset_minutes >= 0 { '+' } else { '-' };
     let offset = ts.utc_offset_minutes.unsigned_abs();
     format!(
-        "{} ({sign}{:02}:{:02})",
-        ts.seconds_since_epoch,
+        "{year:04}-{month:02}-{day:02} {hour:02}:{minute:02} ({sign}{:02}:{:02})",
         offset / 60,
         offset % 60
     )
+}
+
+/// Howard Hinnant's `civil_from_days`: converts a day count relative to the
+/// 1970-01-01 epoch (as `i64::div_euclid(86_400)` on a shifted Unix
+/// timestamp produces) into a proleptic-Gregorian `(year, month, day)`,
+/// `month`/`day` both 1-based. Pure integer arithmetic, valid for every
+/// `i64` input — no dependency on any date/time crate.
+fn civil_from_days(days_since_epoch: i64) -> (i64, u32, u32) {
+    let z = days_since_epoch + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let day_of_era = (z - era * 146_097) as u64; // [0, 146096]
+    let year_of_era = (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365; // [0, 399]
+    let year = year_of_era as i64 + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100); // [0, 365]
+    let mp = (5 * day_of_year + 2) / 153; // [0, 11]
+    let day = (day_of_year - (153 * mp + 2) / 5 + 1) as u32; // [1, 31]
+    let month = if mp < 10 { mp + 3 } else { mp - 9 } as u32; // [1, 12]
+    let year = if month <= 2 { year + 1 } else { year };
+    (year, month, day)
 }
 
 /// Shows the reference-details overlay for the entry currently under the
@@ -1619,4 +1652,29 @@ fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
             Constraint::Percentage((100 - percent_x) / 2),
         ])
         .split(vertical[1])[1]
+}
+
+#[cfg(test)]
+mod format_timestamp_tests {
+    use super::*;
+
+    #[test]
+    fn renders_a_calendar_date_in_the_commit_s_own_offset() {
+        // 2024-01-15T12:30:00+02:00 (a fixed, hand-verified Unix instant).
+        let ts = GitTimestamp::new(1_705_314_600, 120);
+        assert_eq!(format_timestamp(&ts), "2024-01-15 12:30 (+02:00)");
+    }
+
+    #[test]
+    fn a_negative_offset_shifts_the_calendar_date_backward_across_midnight() {
+        // 2024-01-01T00:30:00Z shown at -02:00 falls back to 2023-12-31.
+        let ts = GitTimestamp::new(1_704_069_000, -120);
+        assert_eq!(format_timestamp(&ts), "2023-12-31 22:30 (-02:00)");
+    }
+
+    #[test]
+    fn the_unix_epoch_itself_renders_as_1970_01_01() {
+        let ts = GitTimestamp::new(0, 0);
+        assert_eq!(format_timestamp(&ts), "1970-01-01 00:00 (+00:00)");
+    }
 }

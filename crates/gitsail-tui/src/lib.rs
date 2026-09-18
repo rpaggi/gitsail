@@ -15,6 +15,11 @@
 //!   background thread.
 //! - [`keymap`] turns one key press into an [`action::Action`], depending
 //!   on the current [`keymap::InputContext`] (US-042 criterion 1).
+//!   [`keybindings`] documents and resolves the small, fixed set of
+//!   commands a person may rebind (T-251/US-109 criterion 2), consulted
+//!   only by [`keymap::resolve_action`] and only in the `Normal` context —
+//!   see that function's own doc comment for why that boundary is the
+//!   safety property T-251 criterion 3 requires.
 //! - [`app::App::update`] applies an [`action::Action`] to state and
 //!   returns any [`worker::Command`]s it needs run in the background
 //!   (US-041 criterion 2: Git process execution never runs here).
@@ -32,6 +37,7 @@ pub mod clipboard;
 pub mod commit_search;
 pub mod event;
 pub mod graph_view;
+pub mod keybindings;
 pub mod keymap;
 pub mod message;
 pub mod operation;

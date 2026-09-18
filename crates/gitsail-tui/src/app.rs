@@ -5723,6 +5723,130 @@ mod tests {
         }
     }
 
+    // -- T-251/US-109 criterion 3: confirmation cannot be skipped ----------
+
+    /// Opens a repository with one branch (`main`, current) and one commit
+    /// loaded into the Graph panel, focused there — the minimal fixture
+    /// [`Action::RequestReset`] needs (a selected commit) plus
+    /// [`App::current_head_hash`] needs (a `Local` branch matching the
+    /// attached `HEAD`'s name).
+    fn open_repository_with_one_graph_commit(app: &mut App) {
+        let open_commands = app.on_repository_opened(Ok(sample_repository()));
+        let ticket = match open_commands.first() {
+            Some(Command::RefreshStatus(t, _)) => *t,
+            other => panic!("unexpected first command: {other:?}"),
+        };
+        app.on_status_refreshed(ticket, Ok(clean_status()));
+
+        let generation = app.session().unwrap().generation();
+        app.on_branches_loaded(generation, Ok(vec![sample_branch("main", true)]));
+
+        // `restart_commit_graph` (called from `on_repository_opened`) always
+        // bumps `graph_request_id` to `1` on a session's very first open.
+        app.on_commit_graph_page_loaded(
+            1,
+            Ok(Page {
+                items: vec![sample_commit_for_details()],
+                next_cursor: None,
+                has_more: false,
+            }),
+        );
+
+        app.update(Action::FocusNext); // Sidebar -> Graph
+        assert_eq!(app.focus(), Panel::Graph);
+        assert!(app.selected_graph_commit().is_some());
+    }
+
+    /// The load-bearing proof for T-251/US-109 criterion 3 ("a política de
+    /// confirmação não pode ser desabilitada por preferência"): opening a
+    /// `Destructive`-risk operation (`Hard` reset) and running it to
+    /// completion always takes **two** distinct [`Action::Activate`]
+    /// dispatches — the first only picks the mode and starts confirmation
+    /// ([`OperationState::Confirming`]), never dispatching a [`Command`];
+    /// the second is what actually confirms and dispatches the mutation.
+    /// This is true independent of the TUI's own keybindings-remapping
+    /// mechanism (`crate::keybindings`) added by this same story: that
+    /// mechanism only ever resolves *which key* produces an [`Action`] in
+    /// [`crate::keymap::InputContext::Normal`] (see its own module doc);
+    /// it is never consulted for `Enter`/`Esc` in any of the overlay
+    /// contexts this flow passes through
+    /// (`crate::keymap::InputContext::ResetMode`, then `Normal` again
+    /// while `operation` is `Confirming` — see `App::input_context`'s own
+    /// doc for why), so there is no remapping, however constructed, that
+    /// could ever collapse this into a single keypress.
+    #[test]
+    fn a_destructive_reset_still_requires_two_explicit_confirmations() {
+        let (mut app, _port) = new_app();
+        open_repository_with_one_graph_commit(&mut app);
+
+        // Opening the chooser is itself not a mutation, and starts no
+        // operation at all yet.
+        let commands = app.update(Action::RequestReset);
+        assert!(commands.is_empty());
+        assert!(app.reset_mode_open());
+        assert!(app.operation().is_idle());
+
+        // Move the chooser's cursor to `Hard` (index 2 of [Soft, Mixed,
+        // Hard]).
+        app.update(Action::MoveDown);
+        app.update(Action::MoveDown);
+        assert_eq!(app.reset_mode_cursor(), 2);
+
+        // First `Activate`: picks the mode, starts confirmation. Still no
+        // `Command` dispatched — nothing has mutated yet.
+        let commands_after_first_activate = app.update(Action::Activate);
+        assert!(
+            commands_after_first_activate.is_empty(),
+            "picking a reset mode must never itself dispatch a mutation"
+        );
+        assert!(
+            !app.reset_mode_open(),
+            "the chooser hands off to the generic confirmation prompt"
+        );
+        match app.operation() {
+            OperationState::Confirming(OperationKind::Reset { mode: ResetMode::Hard, .. }) => {}
+            other => panic!("expected Confirming(Reset {{ Hard }}), got {other:?}"),
+        }
+
+        // Second `Activate`: only *now* does the mutation actually
+        // dispatch.
+        let commands_after_second_activate = app.update(Action::Activate);
+        assert!(
+            matches!(commands_after_second_activate.as_slice(), [Command::Reset(..)]),
+            "the second confirmation must be what actually dispatches the reset, got {commands_after_second_activate:?}"
+        );
+        assert!(matches!(app.operation(), OperationState::InProgress(_)));
+    }
+
+    /// The same guarantee from the opposite direction: cancelling at the
+    /// first confirmation prompt (`Esc`/[`Action::Dismiss`]) — reachable
+    /// exactly like any other overlay — leaves the repository untouched,
+    /// exactly like every other `Confirming` state already does (History
+    /// Editing Rules / Destructive Operations Guardrails wiki rule 5:
+    /// "Cancelling before confirmation leaves the repository completely
+    /// untouched").
+    #[test]
+    fn dismissing_a_pending_destructive_reset_confirmation_dispatches_nothing() {
+        let (mut app, _port) = new_app();
+        open_repository_with_one_graph_commit(&mut app);
+
+        app.update(Action::RequestReset);
+        app.update(Action::MoveDown);
+        app.update(Action::MoveDown);
+        app.update(Action::Activate);
+        assert!(matches!(
+            app.operation(),
+            OperationState::Confirming(OperationKind::Reset { mode: ResetMode::Hard, .. })
+        ));
+
+        app.update(Action::Dismiss);
+
+        assert!(
+            app.operation().is_idle(),
+            "dismissing a pending confirmation must cancel it, never silently confirm it"
+        );
+    }
+
     /// Focuses the References panel and cycles its sub-view to Reflog
     /// (Tags -> Remotes -> Stash -> Reflog).
     fn open_references_on_reflog(app: &mut App) {

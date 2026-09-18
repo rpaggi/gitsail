@@ -10,7 +10,8 @@
 
 #![forbid(unsafe_code)]
 
-use std::path::PathBuf;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::Duration;
@@ -19,7 +20,7 @@ use clap::Parser;
 
 use gitsail_application::{RepositoryReadPort, RepositoryWritePort};
 use gitsail_git::{GitCliProvider, GitProcessRunner, GitProcessRunnerConfig};
-use gitsail_tui::{event, keymap, terminal, ui, worker, App, Message};
+use gitsail_tui::{event, keybindings, keymap, terminal, ui, worker, Action, App, Message};
 
 /// GitSail — interactive terminal interface.
 #[derive(Debug, Parser)]
@@ -38,6 +39,37 @@ struct Cli {
     /// set, per that convention.
     #[arg(long)]
     ascii: bool,
+
+    /// Explicit path to a keybindings-override file (T-251/US-109
+    /// criterion 2). Defaults to
+    /// [`keybindings::default_config_path`] (`<OS config dir>/gitsail/tui/
+    /// keybindings.conf`) when omitted; a missing file at either location
+    /// is not an error — the documented defaults apply.
+    #[arg(long)]
+    keybindings: Option<PathBuf>,
+}
+
+/// Loads the keybindings-override file at `path` (or the platform default
+/// when `path` is `None`), reporting any rejected line to stderr and
+/// always returning a usable bindings table — a missing file, an
+/// unreadable file, or one with only invalid lines all fall back to
+/// [`CONFIGURABLE_ACTIONS`](keybindings::CONFIGURABLE_ACTIONS)'s own
+/// defaults, mirroring `gitsail_application::preferences`'s "invalid input
+/// degrades to safe defaults, never a crash" convention.
+fn load_bindings(path: Option<&Path>) -> HashMap<char, Action> {
+    let resolved_path = path.map(Path::to_path_buf).or_else(keybindings::default_config_path);
+    let contents = resolved_path.and_then(|p| std::fs::read_to_string(p).ok());
+    let overrides = match contents {
+        Some(contents) => {
+            let parsed = keybindings::parse_config(&contents);
+            for warning in &parsed.warnings {
+                eprintln!("warning: keybindings config: {warning}");
+            }
+            parsed.overrides
+        }
+        None => HashMap::new(),
+    };
+    keybindings::effective_bindings(&overrides)
 }
 
 const TICK_RATE: Duration = Duration::from_millis(250);
@@ -45,6 +77,7 @@ const TICK_RATE: Duration = Duration::from_millis(250);
 fn main() {
     let cli = Cli::parse();
     let low_color = cli.ascii || std::env::var_os("NO_COLOR").is_some();
+    let bindings = load_bindings(cli.keybindings.as_deref());
 
     let runner_config = GitProcessRunnerConfig {
         executable: cli.git_path.clone(),
@@ -70,7 +103,7 @@ fn main() {
         }
     };
 
-    let result = run(&mut tui, cli.repo, read_port, write_port, low_color);
+    let result = run(&mut tui, cli.repo, read_port, write_port, low_color, &bindings);
 
     // Always restore the terminal on the way out, whether `run` returned
     // `Ok` or `Err` (US-043 criterion 1). A panic is covered separately by
@@ -93,6 +126,7 @@ fn run(
     read_port: Arc<dyn RepositoryReadPort>,
     write_port: Arc<dyn RepositoryWritePort>,
     low_color: bool,
+    bindings: &HashMap<char, Action>,
 ) -> std::io::Result<()> {
     let (tx, rx) = mpsc::channel::<Message>();
     event::spawn(tx.clone(), TICK_RATE);
@@ -113,7 +147,7 @@ fn run(
 
         let commands = match message {
             Message::Term(crossterm::event::Event::Key(key)) => {
-                match keymap::action_for(key, app.input_context()) {
+                match keymap::resolve_action(key, app.input_context(), bindings) {
                     Some(action) => app.update(action),
                     None => Vec::new(),
                 }
