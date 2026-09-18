@@ -616,4 +616,40 @@ mod tests {
         token.cancel();
         assert!(clone.is_cancelled());
     }
+
+    /// T-256/US-123 criterion 3 (installation matrix): before this test,
+    /// no test anywhere in the workspace exercised `git` genuinely missing
+    /// (or a configured path pointing at a nonexistent executable) —
+    /// `GitProcessRunnerConfig::default()` always found a real `git` on
+    /// every developer/CI machine this crate's other tests ran on, so this
+    /// path was correct-by-reading but never proven to actually return
+    /// `ErrorCode::GitNotInstalled` (the error every interface's own
+    /// "install Git" onboarding message keys off — see
+    /// `gitsail-cli::exit_code::exit_code_for`'s dedicated mapping for it).
+    #[test]
+    fn discover_reports_git_not_installed_for_a_nonexistent_override_path() {
+        let path = PathBuf::from("/nonexistent/definitely-not-a-real-git-binary");
+        let error = GitExecutable::discover(Some(&path))
+            .expect_err("a nonexistent git path must never resolve to an executable");
+        assert_eq!(error.code(), ErrorCode::GitNotInstalled);
+    }
+
+    /// Same hazard as above, exercised through
+    /// `GitProcessRunner::new`/`GitProcessRunnerConfig` — the actual
+    /// constructor every adapter (`GitCliProvider`) and every interface
+    /// (TUI, Desktop, `gitsail-cli`) calls, not just the lower-level
+    /// `GitExecutable::discover` it wraps.
+    #[test]
+    fn runner_new_reports_git_not_installed_for_a_configured_nonexistent_path() {
+        let config = GitProcessRunnerConfig {
+            executable: Some(PathBuf::from(
+                "/nonexistent/definitely-not-a-real-git-binary",
+            )),
+            ..GitProcessRunnerConfig::default()
+        };
+        match GitProcessRunner::new(config) {
+            Ok(_) => panic!("a nonexistent configured git path must never construct a runner"),
+            Err(error) => assert_eq!(error.code(), ErrorCode::GitNotInstalled),
+        }
+    }
 }

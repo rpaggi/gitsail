@@ -7,5 +7,16 @@ rust-version.workspace = true
 [dependencies]
 gitsail-domain = { path = "../gitsail-domain" }
 
+# T-256/US-123: shared temporary-Git-fixture machinery (a real `git`
+# subprocess + a real `GitCliProvider`) for `tests/tui_desktop_parity.rs`.
+# This crate has a normal dependency on `gitsail-application` (it wires up
+# `git_ops::read_port`/`write_port`), so this is a dev-dependency cycle —
+# already the established, supported pattern (see `gitsail-git/Cargo.toml`'s
+# identical comment, and `gitsail-test-support/src/lib.rs`'s own doc: dev
+# dependencies are excluded from the graph used to build the library
+# artifact itself, only wired in for test/example/bench targets).
+[dev-dependencies]
+gitsail-test-support = { path = "../gitsail-test-support" }
+
 [lints]
 workspace = true
