@@ -141,6 +141,10 @@ fn run(
                 app.on_blame_loaded(request_id, result);
                 Vec::new()
             }
+            Message::CommitGraphPageLoaded(request_id, result) => {
+                app.on_commit_graph_page_loaded(request_id, result);
+                Vec::new()
+            }
             Message::OperationFinished(result) => app.on_operation_finished(result),
             Message::CommitCreated(result) => app.on_commit_created(result),
         };

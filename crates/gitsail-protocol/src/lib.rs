@@ -14,9 +14,9 @@ pub mod request_id;
 
 pub use dto::{
     BlameDto, BlameLineDto, BlameOriginDto, BranchDto, BranchKindDto, ChangeTypeDto, CommitDto,
-    DecorationDto, DiffDto, DiffHunkDto, DiffLineDto, DiffLineOriginDto, FileChangeDto,
-    FileDiffDto, FileStatusCodeDto, GitTimestampDto, HeadStateDto, RepositoryDto,
-    RepositoryStatusDto, SignatureDto,
+    CommitGraphPageDto, CommitGraphRowDto, DecorationDto, DiffDto, DiffHunkDto, DiffLineDto,
+    DiffLineOriginDto, FileChangeDto, FileDiffDto, FileStatusCodeDto, GitTimestampDto,
+    GraphEdgeDto, HeadStateDto, RepositoryDto, RepositoryStatusDto, SignatureDto,
 };
 pub use envelope::{Envelope, Page, SCHEMA_VERSION};
 pub use error::ErrorPayload;

@@ -21,9 +21,10 @@ use std::sync::Arc;
 use std::thread;
 
 use gitsail_application::{
-    BlameRequest, CreateBranch, CreateCommit, DeleteBranch, DiffRequest, GetDiff, GetFileBlame,
-    GetRepositoryStatus, ListBranches, OpenRepository, RefreshTicket, RepositoryReadPort,
-    RepositoryWritePort, StageFiles, SwitchBranch, UnstageFiles,
+    BlameRequest, CommitQuery, CreateBranch, CreateCommit, DeleteBranch, DiffRequest,
+    GetCommitHistory, GetDiff, GetFileBlame, GetRepositoryStatus, ListBranches, OpenRepository,
+    RefreshTicket, RepositoryReadPort, RepositoryWritePort, StageFiles, SwitchBranch,
+    UnstageFiles,
 };
 use gitsail_domain::{BranchName, CancellationToken, CommitHash, Repository};
 
@@ -46,6 +47,12 @@ pub enum Command {
     /// key its cache — the session's refresh generation, so any refresh
     /// invalidates it.
     LoadBlame(u64, Repository, BlameRequest, u64),
+    /// Loads one page of commit-graph history (US-065, US-066), tagged
+    /// with a request id like [`Self::LoadDiff`]. The `CommitQuery`'s
+    /// `cursor` is what makes this "the next page" rather than a restart —
+    /// [`crate::app::App`] carries it forward from the previous page's
+    /// result.
+    LoadCommitGraph(u64, Repository, CommitQuery),
     StageFiles(Repository, Vec<PathBuf>),
     UnstageFiles(Repository, Vec<PathBuf>),
     CreateCommit(Repository, String),
@@ -105,6 +112,10 @@ fn spawn_one(
                     &CancellationToken::new(),
                 );
                 Message::BlameLoaded(request_id, result)
+            }
+            Command::LoadCommitGraph(request_id, repo, query) => {
+                let result = GetCommitHistory::new(read_port).execute(&repo, &query);
+                Message::CommitGraphPageLoaded(request_id, result)
             }
             Command::StageFiles(repo, paths) => {
                 let result = StageFiles::new(write_port).execute(&repo, &paths);

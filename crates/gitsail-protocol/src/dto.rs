@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use gitsail_domain::{
     Blame, BlameLine, BlameOrigin, Branch, BranchKind, ChangeType, Commit, Decoration, Diff,
     DiffHunk, DiffLine, DiffLineOrigin, FileChange, FileDiff, FileStatusCode, GitTimestamp,
-    HeadState, Repository, RepositoryStatus, Signature,
+    GraphEdge, GraphRow, HeadState, Repository, RepositoryStatus, Signature,
 };
 
 /// Converts a filesystem path to its wire representation.
@@ -281,6 +281,73 @@ impl From<&Commit> for CommitDto {
             is_root: commit.is_root(),
         }
     }
+}
+
+// ---------------------------------------------------------------------
+// Commit graph (US-067): the Core-computed lanes/edges from
+// `gitsail_domain::graph`, sent as-is so the Desktop frontend never
+// recomputes a layout itself (US-067 criterion 3) — it only ever renders
+// what this crate serializes here.
+// ---------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GraphEdgeDto {
+    pub from_lane: u32,
+    pub to_lane: u32,
+    pub target: String,
+    pub resolved: bool,
+}
+
+impl From<&GraphEdge> for GraphEdgeDto {
+    fn from(edge: &GraphEdge) -> Self {
+        Self {
+            from_lane: edge.from_lane as u32,
+            to_lane: edge.to_lane as u32,
+            target: edge.target.as_str().to_string(),
+            resolved: edge.resolved,
+        }
+    }
+}
+
+/// One rendered row: the [`CommitDto`] it represents plus the lane/edge
+/// data [`GraphRow`] carries. Built by zipping a [`GraphRow`] with the
+/// [`Commit`] at the same index — see
+/// [`gitsail_domain::graph`]'s documentation for why that pairing is
+/// always safe (`CommitGraph::append_page` emits exactly one row per input
+/// commit, in order).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommitGraphRowDto {
+    pub commit: CommitDto,
+    pub lane: u32,
+    pub edges: Vec<GraphEdgeDto>,
+    pub passthrough_lanes: Vec<u32>,
+}
+
+impl CommitGraphRowDto {
+    pub fn from_row_and_commit(row: &GraphRow, commit: &Commit) -> Self {
+        Self {
+            commit: CommitDto::from(commit),
+            lane: row.lane as u32,
+            edges: row.edges.iter().map(GraphEdgeDto::from).collect(),
+            passthrough_lanes: row.passthrough_lanes.iter().map(|l| *l as u32).collect(),
+        }
+    }
+}
+
+/// One page of commit-graph rows plus continuation metadata (SAD §14, §25),
+/// mirroring [`crate::envelope::Page`] but adding `lane_count` — the widest
+/// lane column a renderer needs to reserve across every row accumulated so
+/// far, not just this page's own rows.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommitGraphPageDto {
+    pub rows: Vec<CommitGraphRowDto>,
+    pub lane_count: u32,
+    pub has_more: bool,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub next_cursor: Option<String>,
 }
 
 // ---------------------------------------------------------------------
@@ -562,6 +629,51 @@ mod tests {
         let dto = CommitDto::from(&commit);
         assert!(dto.is_root);
         assert!(!dto.is_merge);
+    }
+
+    #[test]
+    fn commit_graph_row_dto_carries_lane_edges_and_the_zipped_commit() {
+        let mut graph = gitsail_domain::CommitGraph::new();
+        let commit = Commit {
+            hash: CommitHash::new("a".repeat(40)).unwrap(),
+            short_hash: ShortHash::new("aaaaaaaa").unwrap(),
+            parents: vec![CommitHash::new("b".repeat(40)).unwrap()],
+            author: Signature::new("Ada", "ada@example.com"),
+            committer: Signature::new("Ada", "ada@example.com"),
+            author_date: GitTimestamp::new(0, 0),
+            commit_date: GitTimestamp::new(0, 0),
+            subject: "add feature".into(),
+            body: String::new(),
+            decorations: vec![],
+        };
+        graph.append_page(&[gitsail_domain::GraphCommit::from(&commit)]);
+        let row = &graph.rows()[0];
+
+        let dto = CommitGraphRowDto::from_row_and_commit(row, &commit);
+        let json = serde_json::to_value(&dto).unwrap();
+
+        assert_eq!(dto.commit.hash, commit.hash.as_str());
+        assert_eq!(dto.lane, 0);
+        assert_eq!(dto.edges.len(), 1);
+        assert!(
+            !dto.edges[0].resolved,
+            "a parent not present in this batch must be an unresolved continuation"
+        );
+        assert_eq!(json["edges"][0]["resolved"], false);
+        assert_eq!(json["passthroughLanes"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn commit_graph_page_dto_omits_next_cursor_when_absent() {
+        let page = CommitGraphPageDto {
+            rows: vec![],
+            lane_count: 0,
+            has_more: false,
+            next_cursor: None,
+        };
+        let json = serde_json::to_value(&page).unwrap();
+        assert!(json.get("nextCursor").is_none());
+        assert_eq!(json["hasMore"], false);
     }
 
     #[test]

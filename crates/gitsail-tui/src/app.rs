@@ -15,11 +15,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use gitsail_application::{
-    BlameRequest, DiffRequest, RefreshReason, RepositoryReadPort, RepositorySession,
+    BlameRequest, CommitQuery, DiffRequest, Page, RefreshReason, RepositoryReadPort,
+    RepositorySession,
 };
 use gitsail_domain::{
-    Blame, Branch, BranchName, CommitHash, Diff, GitSailError, HeadState, Repository,
-    RepositoryStatus,
+    Blame, Branch, BranchName, Commit, CommitGraph, CommitHash, Diff, GitSailError, GraphCommit,
+    HeadState, Repository, RepositoryStatus,
 };
 
 use crate::action::Action;
@@ -89,6 +90,13 @@ pub enum DiffViewMode {
     Blame,
 }
 
+/// How many commits [`App`] requests per commit-graph page (US-065, US-066
+/// criterion 3). Not tuned for any particular repository size — a large
+/// enough value that a typical scroll session rarely needs a second
+/// round-trip, small enough that opening a huge repository never blocks on
+/// loading its entire history up front.
+const GRAPH_PAGE_SIZE: u32 = 200;
+
 /// Application state (the "App State" box in SAD §18's diagram).
 pub struct App {
     repo_path: PathBuf,
@@ -99,6 +107,23 @@ pub struct App {
     branches: Vec<Branch>,
     focus: Panel,
     sidebar_cursor: usize,
+
+    // -- US-066: commit graph panel --------------------------------------
+    /// The shared, presentation-independent layout (US-064, US-065):
+    /// [`gitsail_domain::graph`]'s module documentation is this field's
+    /// lane-stability contract.
+    commit_graph: CommitGraph,
+    /// Full [`Commit`] metadata (subject, author, ...) parallel to
+    /// `commit_graph.rows()` — [`CommitGraph::append_page`] always emits
+    /// exactly one row per input commit, in the same order, so appending
+    /// the same page's items here keeps both indexed identically.
+    graph_commits: Vec<Commit>,
+    graph_cursor: usize,
+    graph_next_cursor: Option<String>,
+    graph_has_more: bool,
+    graph_loading: bool,
+    graph_error: Option<GitSailError>,
+    graph_request_id: u64,
 
     // -- US-046: status/diff/blame inspection --------------------------
     status_cursor: usize,
@@ -156,6 +181,14 @@ impl App {
             branches: Vec::new(),
             focus: Panel::Sidebar,
             sidebar_cursor: 0,
+            commit_graph: CommitGraph::new(),
+            graph_commits: Vec::new(),
+            graph_cursor: 0,
+            graph_next_cursor: None,
+            graph_has_more: false,
+            graph_loading: false,
+            graph_error: None,
+            graph_request_id: 0,
             status_cursor: 0,
             selected_file: None,
             diff: None,
@@ -305,6 +338,33 @@ impl App {
         self.branch_input.as_deref()
     }
 
+    /// The commit-graph layout loaded so far (US-064, US-065, US-066).
+    pub fn commit_graph(&self) -> &CommitGraph {
+        &self.commit_graph
+    }
+
+    /// Full commit metadata parallel to `commit_graph().rows()` (see the
+    /// field's own doc comment for the index-alignment guarantee).
+    pub fn graph_commits(&self) -> &[Commit] {
+        &self.graph_commits
+    }
+
+    pub fn graph_cursor(&self) -> usize {
+        self.graph_cursor
+    }
+
+    pub fn graph_has_more(&self) -> bool {
+        self.graph_has_more
+    }
+
+    pub fn graph_loading(&self) -> bool {
+        self.graph_loading
+    }
+
+    pub fn graph_error(&self) -> Option<&GitSailError> {
+        self.graph_error.as_ref()
+    }
+
     pub fn commit_message(&self) -> Option<&str> {
         self.commit_message.as_deref()
     }
@@ -371,14 +431,8 @@ impl App {
                 self.focus = self.focus.prev();
                 Vec::new()
             }
-            Action::MoveUp => {
-                self.move_cursor(-1);
-                Vec::new()
-            }
-            Action::MoveDown => {
-                self.move_cursor(1);
-                Vec::new()
-            }
+            Action::MoveUp => self.move_cursor(-1),
+            Action::MoveDown => self.move_cursor(1),
             Action::Activate => self.handle_activate(),
             Action::Dismiss => {
                 self.dismiss();
@@ -468,40 +522,90 @@ impl App {
         next as usize
     }
 
-    fn move_cursor(&mut self, delta: i32) {
+    fn move_cursor(&mut self, delta: i32) -> Vec<Command> {
         match self.focus {
             Panel::Sidebar => {
                 self.sidebar_cursor =
                     Self::cyclic_cursor(self.sidebar_cursor, delta, self.filtered_branches().len());
+                Vec::new()
             }
             Panel::Details => {
                 self.status_cursor =
                     Self::cyclic_cursor(self.status_cursor, delta, self.status_entries().len());
+                Vec::new()
             }
-            Panel::Diff => match self.diff_view_mode {
-                DiffViewMode::Diff => {
-                    let hunks = self
-                        .diff
-                        .as_ref()
-                        .and_then(|d| d.files.first())
-                        .map(|f| f.hunks.len())
-                        .unwrap_or(0);
-                    self.diff_hunk_cursor =
-                        Self::cyclic_cursor(self.diff_hunk_cursor, delta, hunks);
+            Panel::Diff => {
+                match self.diff_view_mode {
+                    DiffViewMode::Diff => {
+                        let hunks = self
+                            .diff
+                            .as_ref()
+                            .and_then(|d| d.files.first())
+                            .map(|f| f.hunks.len())
+                            .unwrap_or(0);
+                        self.diff_hunk_cursor =
+                            Self::cyclic_cursor(self.diff_hunk_cursor, delta, hunks);
+                    }
+                    DiffViewMode::Blame => {
+                        let max_scroll = self
+                            .blame
+                            .as_ref()
+                            .map(|b| b.lines.len())
+                            .unwrap_or(0)
+                            .saturating_sub(1) as i32;
+                        let next = (self.blame_scroll as i32 + delta).clamp(0, max_scroll.max(0));
+                        self.blame_scroll = next as u16;
+                    }
                 }
-                DiffViewMode::Blame => {
-                    let max_scroll = self
-                        .blame
-                        .as_ref()
-                        .map(|b| b.lines.len())
-                        .unwrap_or(0)
-                        .saturating_sub(1) as i32;
-                    let next = (self.blame_scroll as i32 + delta).clamp(0, max_scroll.max(0));
-                    self.blame_scroll = next as u16;
-                }
-            },
-            Panel::Graph => {}
+                Vec::new()
+            }
+            Panel::Graph => self.move_graph_cursor(delta),
         }
+    }
+
+    /// Moves the Graph panel's selection, clamped (not cyclic — reaching
+    /// the last loaded row is meaningful) to the loaded rows. Scrolling
+    /// past the last loaded row while more history is available triggers
+    /// loading the next page (US-066 criterion 3: "scroll... funciona
+    /// corretamente com paginação"), without ever firing a second request
+    /// while one is already in flight (`graph_loading`).
+    fn move_graph_cursor(&mut self, delta: i32) -> Vec<Command> {
+        let len = self.commit_graph.rows().len();
+        if len == 0 {
+            return Vec::new();
+        }
+        let next = (self.graph_cursor as i32 + delta).clamp(0, len as i32 - 1) as usize;
+        let reached_end = delta > 0 && next + 1 >= len;
+        self.graph_cursor = next;
+        if reached_end {
+            self.request_more_graph_commits()
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// Requests the next commit-graph page, continuing the same
+    /// [`CommitGraph`] (US-065) rather than starting over. A no-op while a
+    /// request is already outstanding or the last page already reported no
+    /// more history (US-041-style discard-by-flag, mirroring
+    /// `graph_loading` against `graph_has_more` instead of a request id,
+    /// since there is nothing to discard until a result actually arrives).
+    fn request_more_graph_commits(&mut self) -> Vec<Command> {
+        if self.graph_loading || !self.graph_has_more {
+            return Vec::new();
+        }
+        let Some(session) = self.session.as_ref() else {
+            return Vec::new();
+        };
+        let repo = session.repository().clone();
+        self.graph_loading = true;
+        self.graph_request_id += 1;
+        let query = CommitQuery {
+            limit: Some(GRAPH_PAGE_SIZE),
+            cursor: self.graph_next_cursor.clone(),
+            ..CommitQuery::default()
+        };
+        vec![Command::LoadCommitGraph(self.graph_request_id, repo, query)]
     }
 
     /// Intercepts `Enter` for the modes that give it a meaning beyond
@@ -782,9 +886,27 @@ impl App {
                 let generation = session.generation();
                 self.session = Some(session);
                 self.discovery_error = None;
+
+                // A freshly opened (or re-opened) repository starts a brand
+                // new commit graph rather than appending to whatever the
+                // previous repository's session had loaded.
+                self.commit_graph = CommitGraph::new();
+                self.graph_commits.clear();
+                self.graph_cursor = 0;
+                self.graph_next_cursor = None;
+                self.graph_has_more = false;
+                self.graph_error = None;
+                self.graph_loading = true;
+                self.graph_request_id += 1;
+                let graph_query = CommitQuery {
+                    limit: Some(GRAPH_PAGE_SIZE),
+                    ..CommitQuery::default()
+                };
+
                 vec![
                     Command::RefreshStatus(ticket, repo.clone()),
-                    Command::LoadBranches(generation, repo),
+                    Command::LoadBranches(generation, repo.clone()),
+                    Command::LoadCommitGraph(self.graph_request_id, repo, graph_query),
                 ]
             }
             Err(error) => {
@@ -833,6 +955,38 @@ impl App {
             }
             Err(error) => {
                 self.status_error = Some(error);
+            }
+        }
+    }
+
+    /// Handles [`crate::message::Message::CommitGraphPageLoaded`] (US-065,
+    /// US-066), discarding a result computed for a since-abandoned request
+    /// (e.g. the repository was reopened before this page arrived) exactly
+    /// like [`Self::on_diff_loaded`]. A kept result is folded into
+    /// `commit_graph` via [`CommitGraph::append_page`] — never replacing
+    /// it — so earlier pages' rows, lanes, and edges are preserved
+    /// unchanged (US-065 criterion 3).
+    pub fn on_commit_graph_page_loaded(
+        &mut self,
+        request_id: u64,
+        result: Result<Page<Commit>, GitSailError>,
+    ) {
+        if request_id != self.graph_request_id {
+            return;
+        }
+        self.graph_loading = false;
+        match result {
+            Ok(page) => {
+                let graph_commits: Vec<GraphCommit> =
+                    page.items.iter().map(GraphCommit::from).collect();
+                self.commit_graph.append_page(&graph_commits);
+                self.graph_commits.extend(page.items);
+                self.graph_next_cursor = page.next_cursor;
+                self.graph_has_more = page.has_more;
+                self.graph_error = None;
+            }
+            Err(error) => {
+                self.graph_error = Some(error);
             }
         }
     }
@@ -1117,7 +1271,9 @@ mod tests {
         assert_eq!(app.view_phase(), ViewPhase::Loading);
 
         let (ticket, repo_for_status) = match open_commands.as_slice() {
-            [Command::RefreshStatus(t, r), Command::LoadBranches(_, _)] => (*t, r.clone()),
+            [Command::RefreshStatus(t, r), Command::LoadBranches(_, _), Command::LoadCommitGraph(_, _, _)] => {
+                (*t, r.clone())
+            }
             other => panic!("unexpected commands: {other:?}"),
         };
 
@@ -1234,7 +1390,9 @@ mod tests {
 
         let open_commands = app.on_repository_opened(Ok(sample_repository()));
         let (ticket, repo) = match open_commands.as_slice() {
-            [Command::RefreshStatus(t, r), Command::LoadBranches(_, _)] => (*t, r.clone()),
+            [Command::RefreshStatus(t, r), Command::LoadBranches(_, _), Command::LoadCommitGraph(_, _, _)] => {
+                (*t, r.clone())
+            }
             other => panic!("unexpected commands: {other:?}"),
         };
 

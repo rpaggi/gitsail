@@ -60,3 +60,63 @@ export interface RepositoryStatusDto {
   files: FileChangeDto[];
   isClean: boolean;
 }
+
+// -- Commit graph (US-067) --------------------------------------------
+//
+// Mirrors `crates/gitsail-protocol/src/dto.rs`'s commit-graph section.
+// `CommitGraphRowDto`/`GraphEdgeDto` are the Core-computed layout as-is —
+// the frontend never recomputes a lane or edge itself (US-067 criterion 3).
+
+export interface SignatureDto {
+  name: string;
+  email: string;
+}
+
+export interface GitTimestampDto {
+  secondsSinceEpoch: number;
+  utcOffsetMinutes: number;
+}
+
+export type DecorationDto =
+  | { kind: "head" }
+  | { kind: "branch"; name: string }
+  | { kind: "remoteBranch"; remote: string; branch: string }
+  | { kind: "tag"; name: string };
+
+export interface CommitDto {
+  hash: string;
+  shortHash: string;
+  parents: string[];
+  author: SignatureDto;
+  committer: SignatureDto;
+  authorDate: GitTimestampDto;
+  commitDate: GitTimestampDto;
+  subject: string;
+  body: string;
+  decorations: DecorationDto[];
+  isMerge: boolean;
+  isRoot: boolean;
+}
+
+export interface GraphEdgeDto {
+  fromLane: number;
+  toLane: number;
+  target: string;
+  resolved: boolean;
+}
+
+// One rendered row: the commit it represents plus the lane/edge data the
+// Core-computed layout carries for it (`gitsail_domain::graph`).
+export interface CommitGraphRowDto {
+  commit: CommitDto;
+  lane: number;
+  edges: GraphEdgeDto[];
+  passthroughLanes: number[];
+}
+
+export interface CommitGraphPageDto {
+  rows: CommitGraphRowDto[];
+  laneCount: number;
+  hasMore: boolean;
+  nextCursor: string | null;
+}

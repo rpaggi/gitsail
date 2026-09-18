@@ -7,6 +7,7 @@
 //! rule applies at; `App` itself always holds the raw value.
 
 use gitsail_domain::{BlameOrigin, BranchKind, DiffLineOrigin};
+use crate::graph_view;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Line;
@@ -53,7 +54,7 @@ pub fn render(frame: &mut Frame, app: &App) {
         .split(content[1]);
 
     render_sidebar(frame, main[0], app);
-    render_placeholder_panel(frame, content[0], Panel::Graph, app);
+    render_graph_panel(frame, content[0], app);
     render_status_panel(frame, lower[0], app);
     render_diff_panel(frame, lower[1], app);
     render_shortcuts(frame, outer[1], app);
@@ -84,9 +85,7 @@ fn panel_block(title: &str, focused: bool, low_color: bool) -> Block<'static> {
         .border_style(style)
 }
 
-/// The placeholder text for a phase that has not reached `Loaded` yet, or
-/// (for a panel that never got its own `Loaded` content — only `Graph`
-/// today) for `Loaded` itself.
+/// The placeholder text for a phase that has not reached `Loaded` yet.
 fn phase_placeholder_text(phase: ViewPhase, panel: Panel) -> String {
     match phase {
         ViewPhase::Loading => "Loading…".to_string(),
@@ -187,13 +186,66 @@ fn render_sidebar(frame: &mut Frame, rect: Rect, app: &App) {
     frame.render_widget(List::new(items), split[1]);
 }
 
-fn render_placeholder_panel(frame: &mut Frame, rect: Rect, panel: Panel, app: &App) {
-    let block = panel_block(panel.title(), app.focus() == panel, app.low_color());
-    let text = phase_placeholder_text(app.view_phase(), panel);
-    frame.render_widget(
-        Paragraph::new(text).wrap(Wrap { trim: true }).block(block),
-        rect,
-    );
+/// Renders the Graph panel: the shared commit-graph layout from
+/// [`gitsail_domain::graph`], turned into text by [`crate::graph_view`]
+/// (US-066 criterion 1). Uses Ratatui's own [`ListState`] scrolling rather
+/// than hand-rolled offset math, so the highlighted row is always kept in
+/// view as `graph_cursor` moves or the terminal resizes (US-066 criterion
+/// 3).
+fn render_graph_panel(frame: &mut Frame, rect: Rect, app: &App) {
+    let block = panel_block(Panel::Graph.title(), app.focus() == Panel::Graph, app.low_color());
+
+    if app.view_phase() != ViewPhase::Loaded {
+        let text = phase_placeholder_text(app.view_phase(), Panel::Graph);
+        frame.render_widget(
+            Paragraph::new(text).wrap(Wrap { trim: true }).block(block),
+            rect,
+        );
+        return;
+    }
+
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+
+    if let Some(error) = app.graph_error() {
+        frame.render_widget(
+            Paragraph::new(sanitize::safe_line(error.message())).wrap(Wrap { trim: true }),
+            inner,
+        );
+        return;
+    }
+
+    let rows = app.commit_graph().rows();
+    if rows.is_empty() {
+        let text = if app.graph_loading() {
+            "Loading history…"
+        } else {
+            "No commits yet."
+        };
+        frame.render_widget(Paragraph::new(text), inner);
+        return;
+    }
+
+    let lines = graph_view::render_rows(rows, app.graph_commits(), app.commit_graph().lane_count());
+    let mut items: Vec<ListItem> = lines
+        .iter()
+        .enumerate()
+        .map(|(i, line)| {
+            let style = if app.focus() == Panel::Graph && i == app.graph_cursor() {
+                Style::default().add_modifier(Modifier::REVERSED)
+            } else {
+                Style::default()
+            };
+            ListItem::new(line.text.clone()).style(style)
+        })
+        .collect();
+    if app.graph_loading() {
+        items.push(ListItem::new("Loading more…"));
+    }
+
+    let mut state = ratatui::widgets::ListState::default();
+    state.select(Some(app.graph_cursor()));
+    frame.render_stateful_widget(List::new(items), inner, &mut state);
 }
 
 /// Renders the Details panel as the status list (US-046 criterion 1):

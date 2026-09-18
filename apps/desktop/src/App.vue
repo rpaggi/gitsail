@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import CommitGraph from "./components/CommitGraph.vue";
 import RepositoryOpener from "./components/RepositoryOpener.vue";
 import StatusPanel from "./components/StatusPanel.vue";
 </script>
@@ -8,6 +9,9 @@ import StatusPanel from "./components/StatusPanel.vue";
     <h1>GitSail</h1>
     <RepositoryOpener />
     <StatusPanel />
+    <section class="graph-section">
+      <CommitGraph />
+    </section>
   </main>
 </template>
 
@@ -20,5 +24,10 @@ body {
 }
 main {
   padding: 1.5rem;
+}
+.graph-section {
+  height: 60vh;
+  margin-top: 1rem;
+  border: 1px solid #444;
 }
 </style>

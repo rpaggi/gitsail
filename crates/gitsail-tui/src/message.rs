@@ -2,8 +2,10 @@
 //! a terminal input event or the outcome of a background [`crate::worker::Command`]
 //! (SAD §18: "... return typed messages/events").
 
-use gitsail_application::RefreshTicket;
-use gitsail_domain::{Blame, Branch, CommitHash, Diff, GitSailError, Repository, RepositoryStatus};
+use gitsail_application::{Page, RefreshTicket};
+use gitsail_domain::{
+    Blame, Branch, Commit, CommitHash, Diff, GitSailError, Repository, RepositoryStatus,
+};
 
 #[derive(Debug)]
 pub enum Message {
@@ -31,6 +33,9 @@ pub enum Message {
     /// [`crate::worker::Command::LoadBlame`] completed (US-046), tagged like
     /// [`Self::DiffLoaded`].
     BlameLoaded(u64, Result<Blame, GitSailError>),
+    /// [`crate::worker::Command::LoadCommitGraph`] completed (US-065,
+    /// US-066), tagged like [`Self::DiffLoaded`].
+    CommitGraphPageLoaded(u64, Result<Page<Commit>, GitSailError>),
     /// A `SwitchBranch`/`CreateBranch`/`DeleteBranch`/`StageFiles`/
     /// `UnstageFiles` [`crate::worker::Command`] completed (US-047, US-048).
     OperationFinished(Result<(), GitSailError>),

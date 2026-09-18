@@ -28,6 +28,7 @@
 pub mod action;
 pub mod app;
 pub mod event;
+pub mod graph_view;
 pub mod keymap;
 pub mod message;
 pub mod operation;
@@ -39,6 +40,7 @@ pub mod worker;
 
 pub use action::Action;
 pub use app::{App, DiffViewMode, Panel, ViewPhase};
+pub use graph_view::GraphLine;
 pub use keymap::InputContext;
 pub use message::Message;
 pub use operation::{OperationKind, OperationRisk, OperationState};

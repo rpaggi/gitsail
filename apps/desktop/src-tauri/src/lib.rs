@@ -33,6 +33,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::open_repository,
             commands::get_repository_status,
+            commands::get_commit_graph_page,
         ])
         .run(tauri::generate_context!())
         .expect("error while running the GitSail Desktop application");
