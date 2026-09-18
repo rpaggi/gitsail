@@ -162,4 +162,29 @@ pub enum Action {
     /// [`gitsail_domain::OperationCapability::Skip`] is supported (a merge
     /// never offers it).
     RequestSkipOperation,
+
+    // -- T-236/US-084: plan an interactive rebase -------------------------
+    /// Opens the interactive rebase plan overlay for the highlighted
+    /// reference (`O`, Sidebar only — the capital counterpart of
+    /// [`Action::RequestRebase`]'s lowercase `o`, reusing the same branch
+    /// search/selection mechanism). Dispatches
+    /// [`crate::worker::Command::PlanRebase`] immediately: reading a plan
+    /// never touches the working tree, the index, or any ref, so there is
+    /// nothing to confirm yet (T-236/US-084 criterion 1).
+    RequestRebasePlan,
+    /// Moves the highlighted plan entry one position up (`K` within
+    /// [`crate::keymap::InputContext::RebasePlan`] — reordering, distinct
+    /// from the plain cursor movement `k`/[`Action::MoveUp`] already does).
+    RebasePlanMoveEntryUp,
+    /// Moves the highlighted plan entry one position down (`J`), mirroring
+    /// [`Action::RebasePlanMoveEntryUp`].
+    RebasePlanMoveEntryDown,
+    /// Cycles the highlighted entry's action Pick -> Reword -> Squash ->
+    /// Fixup -> Drop -> Pick (`a` within
+    /// [`crate::keymap::InputContext::RebasePlan`]).
+    RebasePlanCycleAction,
+    /// Appends one character to the Reword message prompt.
+    RebasePlanRewordInput(char),
+    /// Removes the last character from the Reword message prompt.
+    RebasePlanRewordBackspace,
 }

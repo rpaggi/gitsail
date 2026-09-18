@@ -18,9 +18,16 @@
 // markup and the `merge-panel__conflicts`/`merge-panel__actions` styling
 // for no distinct concern (see `stores/merge.ts`'s own note on why the
 // store itself stayed one store).
+//
+// The interactive rebase plan (EPIC-17/T-236/US-084) is the one exception:
+// it is materially more UI than a request/result pair (a reorderable list
+// with a per-entry action selector and a conditional message field), so it
+// lives in its own `RebasePlanPanel.vue`, embedded here rather than folded
+// into this file's own markup.
 
 import { computed, onMounted, ref } from "vue";
 
+import RebasePlanPanel from "./RebasePlanPanel.vue";
 import { useBranchesStore } from "../stores/branches";
 import { useMergeStore } from "../stores/merge";
 import type { ConflictedFileDto, ConflictSideContentDto } from "../services/dto";
@@ -30,6 +37,19 @@ const merge = useMergeStore();
 
 const mergeTarget = ref("");
 const rebaseTarget = ref("");
+
+/** Opens the interactive rebase plan overlay for `rebaseTarget` (T-236/
+ * US-084), reusing the exact same base already chosen for a plain rebase
+ * above — a distinct button rather than folding this into `requestRebase`
+ * itself, since planning is read-only (no confirmation yet) while a plain
+ * rebase goes straight to confirmation. */
+function requestRebasePlan(): void {
+  const target = rebaseTarget.value.trim();
+  if (target.length === 0) {
+    return;
+  }
+  void merge.requestRebasePlan(target);
+}
 
 /** The path currently expanded for inspection (T-232/US-080 criterion 2) —
  * distinct from `merge.inspectedPath`, which is only set once the sides
@@ -138,7 +158,10 @@ onMounted(() => {
         </option>
       </select>
       <button :disabled="rebaseTarget.trim().length === 0" @click="requestRebase">Rebase current onto…</button>
+      <button :disabled="rebaseTarget.trim().length === 0" @click="requestRebasePlan">Plan interactive rebase…</button>
     </div>
+
+    <RebasePlanPanel />
 
     <p v-if="merge.lastRebaseResult" class="merge-panel__result" :class="{ conflict: merge.lastRebaseResult.outcome === 'conflict' }">
       <template v-if="merge.lastRebaseResult.outcome === 'completed'">

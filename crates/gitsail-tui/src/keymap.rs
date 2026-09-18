@@ -42,6 +42,15 @@ pub enum InputContext {
     /// overlay is itself navigable (multiple conflicted files) and offers
     /// resolution/continue/abort actions, not just dismiss.
     Conflicts,
+    /// The interactive rebase plan overlay is open (`O`, T-236/US-084) —
+    /// navigable like [`Self::Conflicts`], but reordering/reassigning
+    /// actions rather than resolving conflicts.
+    RebasePlan,
+    /// The Reword message prompt is active within the rebase plan overlay
+    /// (T-236/US-084's "reaproveite o mecanismo de input de texto"), taking
+    /// priority over [`Self::RebasePlan`] exactly like
+    /// [`Self::CommitMessage`] takes priority over [`Self::Normal`].
+    RebasePlanReword,
     /// No overlay is active; the panels and shortcuts bar are live.
     Normal,
 }
@@ -109,6 +118,23 @@ pub fn action_for(key: KeyEvent, ctx: InputContext) -> Option<Action> {
             KeyCode::Char('s') => Some(Action::RequestSkipOperation),
             _ => None,
         },
+        InputContext::RebasePlan => match key.code {
+            KeyCode::Char('q') | KeyCode::Esc => Some(Action::Dismiss),
+            KeyCode::Up | KeyCode::Char('k') => Some(Action::MoveUp),
+            KeyCode::Down | KeyCode::Char('j') => Some(Action::MoveDown),
+            KeyCode::Char('K') => Some(Action::RebasePlanMoveEntryUp),
+            KeyCode::Char('J') => Some(Action::RebasePlanMoveEntryDown),
+            KeyCode::Char('a') => Some(Action::RebasePlanCycleAction),
+            KeyCode::Enter => Some(Action::Activate),
+            _ => None,
+        },
+        InputContext::RebasePlanReword => match key.code {
+            KeyCode::Esc => Some(Action::Dismiss),
+            KeyCode::Enter => Some(Action::Activate),
+            KeyCode::Backspace => Some(Action::RebasePlanRewordBackspace),
+            KeyCode::Char(c) => Some(Action::RebasePlanRewordInput(c)),
+            _ => None,
+        },
         InputContext::Normal => match key.code {
             KeyCode::Tab => Some(Action::FocusNext),
             KeyCode::BackTab => Some(Action::FocusPrev),
@@ -138,6 +164,7 @@ pub fn action_for(key: KeyEvent, ctx: InputContext) -> Option<Action> {
             KeyCode::Char('m') => Some(Action::RequestMerge),
             KeyCode::Char('M') => Some(Action::ToggleConflictsPanel),
             KeyCode::Char('o') => Some(Action::RequestRebase),
+            KeyCode::Char('O') => Some(Action::RequestRebasePlan),
             _ => None,
         },
     }
@@ -409,6 +436,74 @@ mod tests {
         assert_eq!(
             action_for(press(KeyCode::Esc), InputContext::Conflicts),
             Some(Action::Dismiss)
+        );
+    }
+
+    /// T-236/US-084: `O` opens the interactive rebase plan (distinct from
+    /// lowercase `o`'s plain rebase), and the plan overlay's own keys route
+    /// distinctly from every other context.
+    #[test]
+    fn shift_o_requests_a_rebase_plan_in_the_normal_context() {
+        assert_eq!(
+            action_for(press(KeyCode::Char('O')), InputContext::Normal),
+            Some(Action::RequestRebasePlan)
+        );
+    }
+
+    #[test]
+    fn rebase_plan_context_routes_navigation_reorder_and_action_keys() {
+        assert_eq!(
+            action_for(press(KeyCode::Char('j')), InputContext::RebasePlan),
+            Some(Action::MoveDown)
+        );
+        assert_eq!(
+            action_for(press(KeyCode::Char('k')), InputContext::RebasePlan),
+            Some(Action::MoveUp)
+        );
+        assert_eq!(
+            action_for(press(KeyCode::Char('J')), InputContext::RebasePlan),
+            Some(Action::RebasePlanMoveEntryDown)
+        );
+        assert_eq!(
+            action_for(press(KeyCode::Char('K')), InputContext::RebasePlan),
+            Some(Action::RebasePlanMoveEntryUp)
+        );
+        assert_eq!(
+            action_for(press(KeyCode::Char('a')), InputContext::RebasePlan),
+            Some(Action::RebasePlanCycleAction)
+        );
+        assert_eq!(
+            action_for(press(KeyCode::Enter), InputContext::RebasePlan),
+            Some(Action::Activate)
+        );
+        assert_eq!(
+            action_for(press(KeyCode::Esc), InputContext::RebasePlan),
+            Some(Action::Dismiss)
+        );
+    }
+
+    #[test]
+    fn rebase_plan_reword_context_routes_characters_and_confirms_on_enter() {
+        assert_eq!(
+            action_for(press(KeyCode::Char('a')), InputContext::RebasePlanReword),
+            Some(Action::RebasePlanRewordInput('a'))
+        );
+        assert_eq!(
+            action_for(press(KeyCode::Backspace), InputContext::RebasePlanReword),
+            Some(Action::RebasePlanRewordBackspace)
+        );
+        assert_eq!(
+            action_for(press(KeyCode::Enter), InputContext::RebasePlanReword),
+            Some(Action::Activate)
+        );
+        assert_eq!(
+            action_for(press(KeyCode::Esc), InputContext::RebasePlanReword),
+            Some(Action::Dismiss)
+        );
+        assert_eq!(
+            action_for(press(KeyCode::Tab), InputContext::RebasePlanReword),
+            None,
+            "focus change is not a documented reword-prompt shortcut"
         );
     }
 

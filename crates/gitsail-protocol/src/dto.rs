@@ -14,16 +14,15 @@ use serde::{Deserialize, Serialize};
 
 use gitsail_application::{
     AmendPreview, ApplyPatchResult, CommitDiff, MergeResult, PatchExport, PatchPreview,
-    PullOutcome, RebaseResult,
-    RecentRepositoryEntry,
+    PullOutcome, RebaseAction, RebasePlan, RebasePlanEntry, RebaseResult, RecentRepositoryEntry,
 };
 use gitsail_domain::{
     Blame, BlameLine, BlameOrigin, Branch, BranchKind, ChangeType, Commit, CommitHash,
     ConflictSideContent, ConflictSides, ConflictStage, ConflictedFile, Decoration, Diff, DiffHunk,
     DiffLine, DiffLineOrigin, FileChange, FileContentAtRevision, FileContentKind, FileDiff,
-    FileStatusCode, GitTimestamp, GraphEdge, GraphRow, HeadState, InProgressOperation, LineHistory,
-    LineHistoryEntry, LineRange, OperationCapability, Remote, Repository, RepositoryStatus,
-    Signature,
+    FileStatusCode, GitSailError, GitTimestamp, GraphEdge, GraphRow, HeadState,
+    InProgressOperation, LineHistory, LineHistoryEntry, LineRange, OperationCapability, Remote,
+    Repository, RepositoryStatus, ShortHash, Signature,
 };
 
 /// Converts a filesystem path to its wire representation.
@@ -745,6 +744,141 @@ impl From<&RebaseResult> for RebaseResultDto {
                 conflicted_files: conflicted_files_dto(files),
             },
         }
+    }
+}
+
+/// One action assignable to a [`RebasePlanEntryDto`] (T-236/US-084 criterion
+/// 1), mirroring [`RebaseAction`] one-to-one. `Edit` is deliberately not
+/// modeled — see that type's own doc for why.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RebaseActionDto {
+    Pick,
+    Reword,
+    Squash,
+    Fixup,
+    Drop,
+}
+
+impl From<RebaseAction> for RebaseActionDto {
+    fn from(action: RebaseAction) -> Self {
+        match action {
+            RebaseAction::Pick => Self::Pick,
+            RebaseAction::Reword => Self::Reword,
+            RebaseAction::Squash => Self::Squash,
+            RebaseAction::Fixup => Self::Fixup,
+            RebaseAction::Drop => Self::Drop,
+        }
+    }
+}
+
+impl From<RebaseActionDto> for RebaseAction {
+    fn from(action: RebaseActionDto) -> Self {
+        match action {
+            RebaseActionDto::Pick => Self::Pick,
+            RebaseActionDto::Reword => Self::Reword,
+            RebaseActionDto::Squash => Self::Squash,
+            RebaseActionDto::Fixup => Self::Fixup,
+            RebaseActionDto::Drop => Self::Drop,
+        }
+    }
+}
+
+/// One commit's position and assigned action within a [`RebasePlanDto`]
+/// (T-236/US-084), mirroring [`RebasePlanEntry`] one-to-one. `subject` is
+/// inert display text — never interpreted as anything but a string, on
+/// either side of this boundary (mirrors [`RebasePlanEntry`]'s own doc on
+/// why that holds even for a maliciously crafted subject).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RebasePlanEntryDto {
+    pub commit: String,
+    #[serde(rename = "shortHash")]
+    pub short_hash: String,
+    pub subject: String,
+    pub action: RebaseActionDto,
+    #[serde(rename = "messageOverride")]
+    pub message_override: Option<String>,
+}
+
+impl From<&RebasePlanEntry> for RebasePlanEntryDto {
+    fn from(entry: &RebasePlanEntry) -> Self {
+        Self {
+            commit: entry.commit.as_str().to_string(),
+            short_hash: entry.short_hash.as_str().to_string(),
+            subject: entry.subject.clone(),
+            action: RebaseActionDto::from(entry.action),
+            message_override: entry.message_override.clone(),
+        }
+    }
+}
+
+/// Converts a frontend-edited entry back into the domain shape
+/// `RepositoryWritePort::execute_rebase_plan` expects, re-validating
+/// `commit`/`short_hash` as real hashes (never trusted as pre-validated just
+/// because they round-tripped through the wire once) — the same
+/// `CommitHash::new`/`ShortHash::new` parsing every other hash-carrying
+/// command argument in this workspace already goes through (mirrors
+/// `commands::amend_commit`'s own `expected_head` parsing on the Desktop
+/// side).
+impl TryFrom<&RebasePlanEntryDto> for RebasePlanEntry {
+    type Error = GitSailError;
+
+    fn try_from(dto: &RebasePlanEntryDto) -> Result<Self, GitSailError> {
+        Ok(Self {
+            commit: CommitHash::new(dto.commit.clone())?,
+            short_hash: ShortHash::new(dto.short_hash.clone())?,
+            subject: dto.subject.clone(),
+            action: RebaseAction::from(dto.action),
+            message_override: dto.message_override.clone(),
+        })
+    }
+}
+
+/// A non-mutating interactive rebase plan (T-236/US-084 criterion 1),
+/// mirroring [`RebasePlan`] one-to-one: the candidate commit range the
+/// current branch would reapply onto `onto_revision`, oldest first, each
+/// entry's action/message reassignable by the frontend before it round-trips
+/// back for `execute_rebase_plan` (criterion 2: `onto`/`branch_head` are
+/// what gets revalidated there, refusing a stale plan rather than silently
+/// rebuilding it).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RebasePlanDto {
+    #[serde(rename = "ontoRevision")]
+    pub onto_revision: String,
+    pub onto: String,
+    #[serde(rename = "branchHead")]
+    pub branch_head: String,
+    pub entries: Vec<RebasePlanEntryDto>,
+}
+
+impl From<&RebasePlan> for RebasePlanDto {
+    fn from(plan: &RebasePlan) -> Self {
+        Self {
+            onto_revision: plan.onto_revision.clone(),
+            onto: plan.onto.as_str().to_string(),
+            branch_head: plan.branch_head.as_str().to_string(),
+            entries: plan.entries.iter().map(RebasePlanEntryDto::from).collect(),
+        }
+    }
+}
+
+impl TryFrom<&RebasePlanDto> for RebasePlan {
+    type Error = GitSailError;
+
+    fn try_from(dto: &RebasePlanDto) -> Result<Self, GitSailError> {
+        let entries = dto
+            .entries
+            .iter()
+            .map(RebasePlanEntry::try_from)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Self {
+            onto_revision: dto.onto_revision.clone(),
+            onto: CommitHash::new(dto.onto.clone())?,
+            branch_head: CommitHash::new(dto.branch_head.clone())?,
+            entries,
+        })
     }
 }
 
@@ -1776,5 +1910,99 @@ mod tests {
         assert_eq!(json["ours"]["kind"], "text");
         assert_eq!(json["ours"]["text"], "ours\n");
         assert_eq!(json["theirs"]["kind"], "binary");
+    }
+
+    // -- T-236/US-084: interactive rebase plan --------------------------
+
+    fn sample_entry(n: u8, action: RebaseAction, message_override: Option<&str>) -> RebasePlanEntry {
+        RebasePlanEntry {
+            commit: CommitHash::new(format!("{n:0>40}")).unwrap(),
+            short_hash: ShortHash::new(format!("{n:0>7}")).unwrap(),
+            subject: format!("commit {n}"),
+            action,
+            message_override: message_override.map(|s| s.to_string()),
+        }
+    }
+
+    fn sample_plan(entries: Vec<RebasePlanEntry>) -> RebasePlan {
+        RebasePlan {
+            onto_revision: "main".to_string(),
+            onto: CommitHash::new("a".repeat(40)).unwrap(),
+            branch_head: CommitHash::new("b".repeat(40)).unwrap(),
+            entries,
+        }
+    }
+
+    #[test]
+    fn rebase_plan_dto_round_trips_through_json_camel_case() {
+        let plan = sample_plan(vec![
+            sample_entry(1, RebaseAction::Pick, None),
+            sample_entry(2, RebaseAction::Reword, Some("a better message")),
+        ]);
+
+        let dto = RebasePlanDto::from(&plan);
+        let json = serde_json::to_value(&dto).unwrap();
+
+        assert_eq!(json["ontoRevision"], "main");
+        assert_eq!(json["onto"], "a".repeat(40));
+        assert_eq!(json["branchHead"], "b".repeat(40));
+        assert_eq!(json["entries"][0]["action"], "pick");
+        assert_eq!(json["entries"][0]["shortHash"], "0000001");
+        assert_eq!(json["entries"][1]["action"], "reword");
+        assert_eq!(json["entries"][1]["messageOverride"], "a better message");
+
+        let round_tripped: RebasePlanDto = serde_json::from_value(json).unwrap();
+        assert_eq!(round_tripped, dto);
+    }
+
+    /// T-236/US-084 criterion 1: converting to the DTO and back never
+    /// changes what the plan actually says — order, actions, and messages
+    /// all survive the round trip exactly.
+    #[test]
+    fn rebase_plan_dto_round_trips_back_into_the_exact_same_domain_plan() {
+        let plan = sample_plan(vec![
+            sample_entry(1, RebaseAction::Pick, None),
+            sample_entry(2, RebaseAction::Squash, None),
+            sample_entry(3, RebaseAction::Drop, None),
+        ]);
+
+        let dto = RebasePlanDto::from(&plan);
+        let recovered = RebasePlan::try_from(&dto).unwrap();
+
+        assert_eq!(recovered, plan);
+    }
+
+    /// A DTO carrying a malformed hash (e.g. tampered with, or corrupted in
+    /// transit) is rejected with a clear error rather than silently
+    /// producing an unusable/incorrect [`CommitHash`] — mirrors every other
+    /// hash-carrying command argument's own parsing in this workspace.
+    #[test]
+    fn a_rebase_plan_dto_with_a_malformed_hash_is_rejected() {
+        let mut dto = RebasePlanDto::from(&sample_plan(vec![sample_entry(1, RebaseAction::Pick, None)]));
+        dto.onto = "not-a-hash".to_string();
+
+        assert!(RebasePlan::try_from(&dto).is_err());
+    }
+
+    #[test]
+    fn a_rebase_plan_entry_dto_with_a_malformed_commit_is_rejected() {
+        let mut dto = RebasePlanEntryDto::from(&sample_entry(1, RebaseAction::Pick, None));
+        dto.commit = "short".to_string();
+
+        assert!(RebasePlanEntry::try_from(&dto).is_err());
+    }
+
+    #[test]
+    fn rebase_action_dto_round_trips_every_variant() {
+        for action in [
+            RebaseAction::Pick,
+            RebaseAction::Reword,
+            RebaseAction::Squash,
+            RebaseAction::Fixup,
+            RebaseAction::Drop,
+        ] {
+            let dto = RebaseActionDto::from(action);
+            assert_eq!(RebaseAction::from(dto), action);
+        }
     }
 }

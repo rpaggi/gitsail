@@ -22,11 +22,11 @@ use std::thread;
 
 use gitsail_application::{
     AbortOperation, ApplyPatch, BlameRequest, CommitQuery, ContinueOperation, CreateBranch,
-    CreateCommit, DeleteBranch, DetectInProgressOperation, DiffRequest, Fetch, GetCommitHistory,
-    GetConflictSides, GetDiff, GetFileBlame, GetRepositoryStatus, ListBranches,
-    MarkConflictResolved, Merge, OpenRepository, PreviewPatchApplication, Pull, Push, Rebase,
-    RefreshTicket, RenameBranch, RepositoryReadPort, RepositoryWritePort, SkipOperation,
-    StageFiles, SwitchBranch, TakeConflictSide, UnstageFiles,
+    CreateCommit, DeleteBranch, DetectInProgressOperation, DiffRequest, ExecuteRebasePlan, Fetch,
+    GetCommitHistory, GetConflictSides, GetDiff, GetFileBlame, GetRepositoryStatus, ListBranches,
+    MarkConflictResolved, Merge, OpenRepository, PlanRebase, PreviewPatchApplication, Pull, Push,
+    Rebase, RebasePlan, RefreshTicket, RenameBranch, RepositoryReadPort, RepositoryWritePort,
+    SkipOperation, StageFiles, SwitchBranch, TakeConflictSide, UnstageFiles,
 };
 use gitsail_domain::{BranchName, CancellationToken, CommitHash, ConflictSide, Repository};
 
@@ -112,6 +112,14 @@ pub enum Command {
     /// Skips the current step of whichever operation is pending (T-235/
     /// US-083).
     SkipOperation(Repository),
+    /// Reads a non-mutating interactive rebase plan for the candidate range
+    /// the current branch would reapply onto `onto_revision` (T-236/US-084
+    /// criterion 1).
+    PlanRebase(Repository, String),
+    /// Applies a previously built/edited interactive rebase plan (T-236/
+    /// US-084; T-237/US-085's squash/fixup are just two of this same plan's
+    /// actions).
+    ExecuteRebasePlan(Repository, RebasePlan),
 }
 
 /// Spawns one background thread per command in `commands`, each reporting
@@ -268,6 +276,14 @@ fn spawn_one(
             Command::SkipOperation(repo) => {
                 let result = SkipOperation::new(write_port).execute(&repo);
                 Message::OperationResolutionFinished(result)
+            }
+            Command::PlanRebase(repo, onto_revision) => {
+                let result = PlanRebase::new(write_port).execute(&repo, &onto_revision);
+                Message::RebasePlanLoaded(result)
+            }
+            Command::ExecuteRebasePlan(repo, plan) => {
+                let result = ExecuteRebasePlan::new(write_port).execute(&repo, &plan);
+                Message::RebaseFinished(result)
             }
         };
         // The receiving end only disappears once the app is shutting down

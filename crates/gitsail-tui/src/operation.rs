@@ -95,6 +95,15 @@ pub enum OperationKind {
     /// whichever sequencer operation is actually detected, mirroring
     /// [`Self::ContinueOperation`]'s own reuse rationale.
     SkipOperation,
+    /// T-236/US-084: `RepositoryWritePort::execute_rebase_plan`. Carries the
+    /// target base and the number of commits the plan reapplies, mirroring
+    /// [`gitsail_application::MutationKind::ExecuteRebasePlan`] and this
+    /// enum's own [`Self::ApplyPatch`] convention — the actual
+    /// [`gitsail_application::RebasePlan`] (with its per-entry
+    /// actions/reordering/messages) lives in [`crate::app::App`]'s own
+    /// `rebase_plan` field, not here, exactly like `ApplyPatch`'s patch text
+    /// lives in `pending_patch_text`.
+    ExecuteRebasePlan { onto: String, commit_count: usize },
 }
 
 impl OperationKind {
@@ -158,6 +167,11 @@ impl OperationKind {
             // already-confirmed, in-progress operation, the same character
             // `ContinueOperation` already has.
             OperationKind::SkipOperation => OperationRisk::Moderate,
+            // Mirrors `gitsail_application::MutationKind::ExecuteRebasePlan`:
+            // a richer rebase, not a different character of operation — see
+            // `OperationKind::Rebase`'s own rationale, which applies
+            // identically here.
+            OperationKind::ExecuteRebasePlan { .. } => OperationRisk::Moderate,
         }
     }
 
@@ -194,6 +208,10 @@ impl OperationKind {
             OperationKind::SkipOperation => {
                 "the current step of the in-progress operation".to_string()
             }
+            OperationKind::ExecuteRebasePlan { onto, commit_count } => format!(
+                "rebasing {commit_count} commit{} onto '{onto}' (interactive plan)",
+                if *commit_count == 1 { "" } else { "s" }
+            ),
         }
     }
 }
@@ -386,6 +404,27 @@ mod tests {
         assert!(rebase.target_label().contains("main"));
 
         assert_eq!(OperationKind::SkipOperation.risk(), OperationRisk::Moderate);
+    }
+
+    /// T-236/US-084: `ExecuteRebasePlan` classifies `Moderate`, mirroring
+    /// `Rebase`, and its label names both the concrete target base and the
+    /// exact commit count the plan reapplies — never a generic "rebase".
+    #[test]
+    fn execute_rebase_plan_classifies_moderate_with_a_concrete_target_label() {
+        let single = OperationKind::ExecuteRebasePlan {
+            onto: "main".to_string(),
+            commit_count: 1,
+        };
+        assert_eq!(single.risk(), OperationRisk::Moderate);
+        let label = single.target_label();
+        assert!(label.contains("main"));
+        assert!(label.contains("1 commit "));
+
+        let plural = OperationKind::ExecuteRebasePlan {
+            onto: "main".to_string(),
+            commit_count: 3,
+        };
+        assert!(plural.target_label().contains("3 commits"));
     }
 
     #[test]

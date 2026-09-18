@@ -181,6 +181,10 @@ fn run(
                 app.on_operation_resolution_finished(result)
             }
             Message::RebaseFinished(result) => app.on_rebase_finished(result),
+            Message::RebasePlanLoaded(result) => {
+                app.on_rebase_plan_loaded(result);
+                Vec::new()
+            }
         };
         worker::dispatch(commands, &read_port, &write_port, &tx);
 

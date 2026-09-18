@@ -6,7 +6,7 @@
 //! reaching a widget (SAD §33) — this module is the render boundary that
 //! rule applies at; `App` itself always holds the raw value.
 
-use gitsail_application::{MergeResult, PullOutcome, RebaseResult};
+use gitsail_application::{MergeResult, PullOutcome, RebaseAction, RebaseResult};
 use gitsail_domain::{
     BlameOrigin, BranchKind, Commit, ConflictSideContent, ConflictStage, DiffLineOrigin,
     GitTimestamp, TagKind,
@@ -648,6 +648,10 @@ fn render_shortcuts(frame: &mut Frame, rect: Rect, app: &App) {
     } else if app.conflicts_open() {
         "j/k select · Enter inspects · r resolves · o/t take ours/theirs · c continue · a abort · s skip · Esc closes"
             .to_string()
+    } else if app.rebase_plan_reword_input().is_some() {
+        "Type the new message · Enter confirms · Esc cancels".to_string()
+    } else if app.rebase_plan_open() {
+        "j/k select · J/K move entry · a cycle action · Enter confirms plan · Esc closes".to_string()
     } else if app.in_progress_operation().has_conflicts() {
         format!(
             "{} conflicted file(s) — press 'M' to resolve them",
@@ -687,6 +691,10 @@ fn render_overlays(frame: &mut Frame, area: Rect, app: &App) {
         render_operation_overlay(frame, area, app);
     } else if app.conflicts_open() {
         render_conflicts_overlay(frame, area, app);
+    } else if app.rebase_plan_reword_input().is_some() {
+        render_rebase_plan_reword(frame, area, app);
+    } else if app.rebase_plan_open() {
+        render_rebase_plan_overlay(frame, area, app);
     } else if app.branch_input().is_some() {
         render_branch_name_prompt(frame, area, app);
     } else if app.sync_error().is_some() {
@@ -956,8 +964,14 @@ fn render_operation_overlay(frame: &mut Frame, area: Rect, app: &App) {
 
     // T-235/US-083 criterion 3: completion and conflict are always two
     // distinct, explicit lines for a rebase too, mirroring the merge block
-    // above exactly.
-    if matches!(kind, OperationKind::Rebase { .. }) {
+    // above exactly. Also covers T-236/US-084's `ExecuteRebasePlan`: both
+    // report through the same `RebaseResult`, so the same two outcomes
+    // apply unchanged (only the confirmation prompt's own target label
+    // above distinguishes "plain rebase" from "interactive plan").
+    if matches!(
+        kind,
+        OperationKind::Rebase { .. } | OperationKind::ExecuteRebasePlan { .. }
+    ) {
         if let Some(outcome) = app.last_rebase_result() {
             let text = match outcome {
                 RebaseResult::Completed { new_head } => {
@@ -1091,6 +1105,111 @@ fn conflict_side_label(content: &ConflictSideContent) -> String {
     }
 }
 
+/// A short, fixed-width label for a [`RebaseAction`], used by
+/// [`render_rebase_plan_overlay`] — never derived from repository content,
+/// so it needs no [`sanitize`] pass.
+fn rebase_action_label(action: RebaseAction) -> &'static str {
+    match action {
+        RebaseAction::Pick => "pick  ",
+        RebaseAction::Reword => "reword",
+        RebaseAction::Squash => "squash",
+        RebaseAction::Fixup => "fixup ",
+        RebaseAction::Drop => "drop  ",
+    }
+}
+
+/// Shows the interactive rebase plan overlay (`O`, T-236/US-084 criterion
+/// 1): the candidate commit range [`gitsail_application::PlanRebase`]
+/// returned, in order, each entry's currently assigned action, and a
+/// client-side validation error when one is pending (criterion 2) — never
+/// the plan's *execution* result, which instead flows through
+/// [`render_operation_overlay`] exactly like [`OperationKind::Merge`]/
+/// [`OperationKind::Rebase`] once confirmed (see
+/// [`crate::app::App::dispatch_operation`]'s own doc for why the overlay
+/// itself closes at that point).
+fn render_rebase_plan_overlay(frame: &mut Frame, area: Rect, app: &App) {
+    let mut lines = Vec::new();
+    match app.rebase_plan() {
+        Some(plan) => {
+            lines.push(Line::from(format!(
+                "{} candidate commit(s) onto '{}'",
+                plan.entries.len(),
+                plan.onto_revision
+            )));
+            lines.push(Line::from(""));
+            if plan.entries.is_empty() {
+                lines.push(Line::from("Nothing to reapply — already up to date."));
+            }
+            for (index, entry) in plan.entries.iter().enumerate() {
+                let marker = if index == app.rebase_plan_cursor() { '>' } else { ' ' };
+                let mut line = format!(
+                    "{marker} {} {} {}",
+                    rebase_action_label(entry.action),
+                    entry.short_hash.as_str(),
+                    sanitize::safe_line(&entry.subject)
+                );
+                if let Some(message) = &entry.message_override {
+                    line.push_str(&format!(" -> {}", sanitize::safe_line(message)));
+                }
+                lines.push(Line::from(line));
+            }
+        }
+        None => {
+            if app.rebase_plan_error().is_none() {
+                lines.push(Line::from("Loading the candidate commit range…"));
+            }
+        }
+    }
+
+    lines.push(Line::from(""));
+    if let Some(error) = app.rebase_plan_error() {
+        lines.push(Line::from(sanitize::safe_line(error.message())));
+        if let Some(remediation) = error.remediation() {
+            lines.push(Line::from(sanitize::safe_line(remediation)));
+        }
+        lines.push(Line::from(""));
+    }
+    lines.push(Line::from(
+        "j/k select · J/K move entry · a cycle pick/reword/squash/fixup/drop · Enter confirms · Esc closes",
+    ));
+
+    let popup = centered_rect(75, 75, area);
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: true })
+            .block(Block::default().title("Rebase Plan").borders(Borders::ALL)),
+        popup,
+    );
+}
+
+/// Shows the Reword message prompt layered over the rebase plan overlay
+/// (T-236/US-084's "reaproveite o mecanismo de input de texto"), mirroring
+/// [`render_commit_composer`]'s own shape.
+fn render_rebase_plan_reword(frame: &mut Frame, area: Rect, app: &App) {
+    let subject = app
+        .rebase_plan()
+        .and_then(|plan| plan.entries.get(app.rebase_plan_cursor()))
+        .map(|entry| entry.subject.as_str())
+        .unwrap_or("");
+    let lines = vec![
+        Line::from(format!("Original: {}", sanitize::safe_line(subject))),
+        Line::from(""),
+        Line::from("New message:"),
+        Line::from(sanitize::safe_line(app.rebase_plan_reword_input().unwrap_or(""))),
+        Line::from(""),
+        Line::from("Enter confirms · Esc cancels"),
+    ];
+    let popup = centered_rect(70, 45, area);
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: true })
+            .block(Block::default().title("Reword").borders(Borders::ALL)),
+        popup,
+    );
+}
+
 fn render_branch_name_prompt(frame: &mut Frame, area: Rect, app: &App) {
     let lines = vec![
         Line::from("New branch name:"),
@@ -1178,6 +1297,9 @@ fn render_help(frame: &mut Frame, area: Rect) {
         Line::from("f                 fetch the resolved remote"),
         Line::from("p                 pull (fast-forward only)"),
         Line::from("P                 push the current branch"),
+        Line::from("o (Sidebar)       rebase the current branch onto the highlighted branch"),
+        Line::from("O (Sidebar)       plan an interactive rebase onto the highlighted branch"),
+        Line::from("  within the plan: j/k select · J/K reorder · a cycle action · Enter confirms"),
         Line::from("t (References)    cycle Tags/Remotes/Stash"),
         Line::from("Enter (References) view the highlighted entry's details"),
         Line::from("r                 refresh status and branches"),

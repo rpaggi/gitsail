@@ -3,7 +3,8 @@
 //! (SAD §18: "... return typed messages/events").
 
 use gitsail_application::{
-    ApplyPatchResult, MergeResult, Page, PatchPreview, PullOutcome, RebaseResult, RefreshTicket,
+    ApplyPatchResult, MergeResult, Page, PatchPreview, PullOutcome, RebasePlan, RebaseResult,
+    RefreshTicket,
 };
 use gitsail_domain::{
     Blame, Branch, Commit, CommitHash, ConflictSides, Diff, GitSailError, InProgressOperation,
@@ -107,4 +108,9 @@ pub enum Message {
     /// distinct, explicit outcomes, never collapsed into a bare
     /// success/failure (mirrors [`Self::MergeFinished`]'s own reasoning).
     RebaseFinished(Result<RebaseResult, GitSailError>),
+    /// [`crate::worker::Command::PlanRebase`] completed (T-236/US-084
+    /// criterion 1). A load failure is shown inline in the (already open)
+    /// overlay rather than through [`crate::operation::OperationState`] —
+    /// see [`crate::app::App::on_rebase_plan_loaded`].
+    RebasePlanLoaded(Result<RebasePlan, GitSailError>),
 }

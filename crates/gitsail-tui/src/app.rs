@@ -17,7 +17,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use gitsail_application::{
     export_patch, ApplyPatchResult, BlameRequest, CommitQuery, DiffRequest, MergeResult, Page,
-    PatchPreview, PullOutcome, RebaseResult, RefreshReason, RepositoryReadPort, RepositorySession,
+    PatchPreview, PullOutcome, RebaseAction, RebasePlan, RebaseResult, RefreshReason,
+    RepositoryReadPort, RepositorySession,
 };
 use gitsail_domain::{
     Blame, Branch, BranchKind, BranchName, Commit, CommitGraph, CommitHash, ConflictSide,
@@ -370,8 +371,50 @@ pub struct App {
     /// The outcome of the last successful [`Action::RequestRebase`] (T-235/
     /// US-083 criterion 3: completion and conflict are always two distinct,
     /// explicit outcomes) — mirrors [`Self::last_merge_result`]'s own
-    /// "transient banner" convention.
+    /// "transient banner" convention. Also the outcome of a successful
+    /// [`Action::RequestRebasePlan`] confirmation (T-236/US-084): both
+    /// [`crate::worker::Command::Rebase`] and
+    /// [`crate::worker::Command::ExecuteRebasePlan`] report through the same
+    /// [`crate::message::Message::RebaseFinished`]/[`Self::on_rebase_finished`]
+    /// path, since both ultimately produce the same [`RebaseResult`].
     last_rebase_result: Option<RebaseResult>,
+
+    // -- T-236/US-084: plan an interactive rebase -------------------------
+    /// Whether the interactive rebase plan overlay (`O`, Sidebar only) is
+    /// open. Kept `true` through `Confirming`/`InProgress` once a plan is
+    /// submitted (mirrors [`Self::commit_message`]'s own "stays around
+    /// through confirmation" convention) so [`Self::dispatch_operation`] can
+    /// still read the exact plan being executed; only actually cleared the
+    /// moment that dispatch happens, or the overlay is dismissed outright.
+    rebase_plan_open: bool,
+    /// The interactive rebase plan currently being edited: the exact
+    /// candidate commit range [`gitsail_application::PlanRebase`] returned,
+    /// oldest first, each entry's action/message reassignable in place
+    /// before [`Self::dispatch_operation`] hands the whole thing to
+    /// [`crate::worker::Command::ExecuteRebasePlan`] (T-236/US-084 criterion
+    /// 1). `None` while the overlay is closed, or while a freshly requested
+    /// plan is still loading — [`Self::rebase_plan_open`] tracks the overlay
+    /// itself separately, so a loading/error state can still be shown while
+    /// this stays `None`.
+    rebase_plan: Option<RebasePlan>,
+    /// Which entry (an index into `rebase_plan`'s `entries`) is highlighted.
+    rebase_plan_cursor: usize,
+    /// The Reword message prompt's buffer, `Some` while editing the
+    /// highlighted entry's replacement message — mirrors
+    /// [`Self::commit_message`], reused per this task's own instruction to
+    /// reuse the existing text-input mechanism rather than build a new one.
+    rebase_plan_reword_input: Option<String>,
+    /// A plan-load failure, or a client-side [`RebasePlan::validate`]
+    /// failure surfaced before ever reaching
+    /// [`crate::worker::Command::ExecuteRebasePlan`] (T-236/US-084 criterion
+    /// 2's "plano inválido não executa") — shown inline in the overlay like
+    /// [`Self::conflict_error`]. Never the final authority: the real,
+    /// authoritative revalidation always happens in
+    /// `RepositoryWritePort::execute_rebase_plan` itself; this is only an
+    /// immediate, client-side echo of the same rules for faster feedback,
+    /// and a stale-plan refusal from the Core still surfaces through the
+    /// ordinary `OperationState::Failed` path, never through this field.
+    rebase_plan_error: Option<GitSailError>,
 }
 
 impl App {
@@ -467,6 +510,11 @@ impl App {
             conflict_error: None,
             last_merge_result: None,
             last_rebase_result: None,
+            rebase_plan_open: false,
+            rebase_plan: None,
+            rebase_plan_cursor: 0,
+            rebase_plan_reword_input: None,
+            rebase_plan_error: None,
         };
         (app, vec![Command::OpenRepository(repo_path)])
     }
@@ -538,6 +586,33 @@ impl App {
 
     pub fn last_rebase_result(&self) -> Option<&RebaseResult> {
         self.last_rebase_result.as_ref()
+    }
+
+    /// Whether the interactive rebase plan overlay (`O`, T-236/US-084) is
+    /// open.
+    pub fn rebase_plan_open(&self) -> bool {
+        self.rebase_plan_open
+    }
+
+    /// The interactive rebase plan currently being edited, or `None` while
+    /// the overlay is closed or a freshly requested plan is still loading.
+    pub fn rebase_plan(&self) -> Option<&RebasePlan> {
+        self.rebase_plan.as_ref()
+    }
+
+    pub fn rebase_plan_cursor(&self) -> usize {
+        self.rebase_plan_cursor
+    }
+
+    /// The Reword message prompt's buffer, or `None` when it is not open.
+    pub fn rebase_plan_reword_input(&self) -> Option<&str> {
+        self.rebase_plan_reword_input.as_deref()
+    }
+
+    /// A plan-load or client-side validation failure (T-236/US-084
+    /// criterion 2), shown inline in the overlay.
+    pub fn rebase_plan_error(&self) -> Option<&GitSailError> {
+        self.rebase_plan_error.as_ref()
     }
 
     pub fn should_quit(&self) -> bool {
@@ -799,6 +874,21 @@ impl App {
             // `Self::handle_activate`'s intercept, not `InputContext::
             // Conflicts`'s own (unrelated) `Enter` meaning.
             InputContext::Conflicts
+        } else if self.rebase_plan_open && self.rebase_plan_reword_input.is_some() {
+            // Mirrors `commit_message`'s own priority over `Normal`: the
+            // Reword prompt is itself layered over the plan overlay, so it
+            // must win over `InputContext::RebasePlan` below whenever it is
+            // open, regardless of `operation`'s state (editing a message
+            // never starts an operation, so there is no analogous
+            // `operation.is_idle()` race to guard against here).
+            InputContext::RebasePlanReword
+        } else if self.rebase_plan_open && self.operation.is_idle() {
+            // Falls through to `Normal` while an `ExecuteRebasePlan`
+            // confirmation is in flight, exactly like `Conflicts`/
+            // `CommitMessage` above — the second `Enter` that confirms it
+            // must reach `Self::handle_activate`'s intercept, not this
+            // context's own (unrelated) `Enter` meaning.
+            InputContext::RebasePlan
         } else if self.commit_message.is_some() && self.operation.is_idle() {
             InputContext::CommitMessage
         } else if self.branch_input.is_some() && self.rename_source.is_some() {
@@ -985,6 +1075,31 @@ impl App {
                 self.request_skip_operation();
                 Vec::new()
             }
+            Action::RequestRebasePlan => self.request_rebase_plan(),
+            Action::RebasePlanMoveEntryUp => {
+                self.rebase_plan_move_entry_up();
+                Vec::new()
+            }
+            Action::RebasePlanMoveEntryDown => {
+                self.rebase_plan_move_entry_down();
+                Vec::new()
+            }
+            Action::RebasePlanCycleAction => {
+                self.rebase_plan_cycle_action();
+                Vec::new()
+            }
+            Action::RebasePlanRewordInput(c) => {
+                if let Some(text) = self.rebase_plan_reword_input.as_mut() {
+                    text.push(c);
+                }
+                Vec::new()
+            }
+            Action::RebasePlanRewordBackspace => {
+                if let Some(text) = self.rebase_plan_reword_input.as_mut() {
+                    text.pop();
+                }
+                Vec::new()
+            }
         }
     }
 
@@ -1007,6 +1122,13 @@ impl App {
                 self.conflict_error = None;
             }
             self.conflict_cursor = next;
+            return Vec::new();
+        }
+        if self.rebase_plan_open {
+            if let Some(plan) = self.rebase_plan.as_ref() {
+                self.rebase_plan_cursor =
+                    Self::cyclic_cursor(self.rebase_plan_cursor, delta, plan.entries.len());
+            }
             return Vec::new();
         }
         match self.focus {
@@ -1166,6 +1288,14 @@ impl App {
         }
         if self.input_context() == InputContext::CommitMessage {
             self.operation.begin(OperationKind::CreateCommit);
+            return Vec::new();
+        }
+        if self.input_context() == InputContext::RebasePlanReword {
+            self.confirm_rebase_plan_reword();
+            return Vec::new();
+        }
+        if self.input_context() == InputContext::RebasePlan {
+            self.confirm_rebase_plan();
             return Vec::new();
         }
         if let OperationState::Confirming(kind) = &self.operation {
@@ -1379,6 +1509,22 @@ impl App {
             // confirmation returns to an editable composer with the typed
             // message intact.
             self.commit_message = None;
+        } else if self.rebase_plan_reword_input.is_some() {
+            // Cancels only the message edit — the entry's `action` stays
+            // `Reword` (client-side validation will require a message
+            // before this plan can be confirmed), matching `branch_input`'s
+            // own "discard the unsubmitted edit" rule below.
+            self.rebase_plan_reword_input = None;
+        } else if self.rebase_plan_open && self.operation.is_idle() {
+            // A confirmation in flight is left alone here (same guard as
+            // `commit_message` above) — cancelling *that* is
+            // `operation.cancel()` in the final `else` below, which never
+            // touches `rebase_plan`, so a cancelled confirmation returns to
+            // an editable plan with every entry intact.
+            self.rebase_plan_open = false;
+            self.rebase_plan = None;
+            self.rebase_plan_cursor = 0;
+            self.rebase_plan_error = None;
         } else if self.branch_input.is_some() {
             self.branch_input = None;
             self.rename_source = None;
@@ -1698,6 +1844,148 @@ impl App {
         });
     }
 
+    /// Opens the interactive rebase plan overlay for the highlighted
+    /// reference (`O`, Sidebar only — reuses exactly the same Sidebar
+    /// branch search/selection mechanism [`Self::request_rebase`] already
+    /// uses). Unlike [`Self::request_rebase`], this dispatches
+    /// [`Command::PlanRebase`] immediately rather than starting a
+    /// confirmation: reading a plan never touches the working tree, the
+    /// index, or any ref, so there is nothing to confirm yet (T-236/US-084
+    /// criterion 1 — the plan itself, once loaded, is what gets confirmed).
+    fn request_rebase_plan(&mut self) -> Vec<Command> {
+        if self.focus != Panel::Sidebar {
+            return Vec::new();
+        }
+        let Some(branch) = self
+            .filtered_branches()
+            .get(self.sidebar_cursor)
+            .map(|b| (*b).clone())
+        else {
+            return Vec::new();
+        };
+        let Some(session) = self.session.as_ref() else {
+            return Vec::new();
+        };
+        self.rebase_plan_open = true;
+        self.rebase_plan = None;
+        self.rebase_plan_cursor = 0;
+        self.rebase_plan_reword_input = None;
+        self.rebase_plan_error = None;
+        let repo = session.repository().clone();
+        vec![Command::PlanRebase(repo, branch.name.as_str().to_string())]
+    }
+
+    /// Moves the highlighted plan entry one position up (`K`, T-236/US-084
+    /// criterion 1's "pode reordenar"), keeping the cursor on the same
+    /// entry as it moves. A no-op at the first position, and a no-op
+    /// entirely while no plan is loaded yet.
+    fn rebase_plan_move_entry_up(&mut self) {
+        let Some(plan) = self.rebase_plan.as_mut() else {
+            return;
+        };
+        if self.rebase_plan_cursor == 0 {
+            return;
+        }
+        plan.entries
+            .swap(self.rebase_plan_cursor, self.rebase_plan_cursor - 1);
+        self.rebase_plan_cursor -= 1;
+        self.rebase_plan_error = None;
+    }
+
+    /// Moves the highlighted plan entry one position down (`J`), mirroring
+    /// [`Self::rebase_plan_move_entry_up`].
+    fn rebase_plan_move_entry_down(&mut self) {
+        let Some(plan) = self.rebase_plan.as_mut() else {
+            return;
+        };
+        if self.rebase_plan_cursor + 1 >= plan.entries.len() {
+            return;
+        }
+        plan.entries
+            .swap(self.rebase_plan_cursor, self.rebase_plan_cursor + 1);
+        self.rebase_plan_cursor += 1;
+        self.rebase_plan_error = None;
+    }
+
+    /// Cycles the highlighted entry's action Pick -> Reword -> Squash ->
+    /// Fixup -> Drop -> Pick (`a`, T-236/US-084 criterion 1). Landing on
+    /// `Reword` immediately opens the message prompt — this task's own
+    /// "reaproveite o mecanismo de input de texto" instruction — pre-filled
+    /// with whatever override already exists, or the commit's own subject
+    /// otherwise, a more useful starting point to edit than a blank field.
+    /// Leaving `Reword` for any other action always clears
+    /// `message_override`, mirroring [`RebasePlan::validate`]'s own rule
+    /// that only a `Reword` entry may carry one.
+    fn rebase_plan_cycle_action(&mut self) {
+        let Some(plan) = self.rebase_plan.as_mut() else {
+            return;
+        };
+        let Some(entry) = plan.entries.get_mut(self.rebase_plan_cursor) else {
+            return;
+        };
+        entry.action = match entry.action {
+            RebaseAction::Pick => RebaseAction::Reword,
+            RebaseAction::Reword => RebaseAction::Squash,
+            RebaseAction::Squash => RebaseAction::Fixup,
+            RebaseAction::Fixup => RebaseAction::Drop,
+            RebaseAction::Drop => RebaseAction::Pick,
+        };
+        if entry.action == RebaseAction::Reword {
+            self.rebase_plan_reword_input = Some(
+                entry
+                    .message_override
+                    .clone()
+                    .unwrap_or_else(|| entry.subject.clone()),
+            );
+        } else {
+            entry.message_override = None;
+        }
+        self.rebase_plan_error = None;
+    }
+
+    /// Commits the Reword prompt's current text into the highlighted
+    /// entry's `message_override` (Enter within
+    /// [`InputContext::RebasePlanReword`]), then returns to the plan
+    /// overlay. Stores the text exactly as typed, including empty — this
+    /// only echoes [`RebasePlan::validate`]'s rules for immediate feedback;
+    /// it never itself decides what counts as a valid message.
+    fn confirm_rebase_plan_reword(&mut self) {
+        let Some(text) = self.rebase_plan_reword_input.take() else {
+            return;
+        };
+        if let Some(plan) = self.rebase_plan.as_mut() {
+            if let Some(entry) = plan.entries.get_mut(self.rebase_plan_cursor) {
+                entry.message_override = Some(text);
+            }
+        }
+    }
+
+    /// Validates the current plan client-side (T-236/US-084 criterion 2:
+    /// "plano inválido não executa"), mirroring [`RebasePlan::validate`]'s
+    /// own rules exactly (squash/fixup at position 0, reword without a
+    /// message, ...) so a mistake is refused *before* ever reaching
+    /// [`Command::ExecuteRebasePlan`] — and, only once it passes, starts
+    /// confirmation for [`OperationKind::ExecuteRebasePlan`]. Never the
+    /// final authority: `RepositoryWritePort::execute_rebase_plan` always
+    /// re-validates for real (and revalidates `onto`/`branch_head` against
+    /// the live repository) before touching anything, so a stale plan is
+    /// still refused there even if it happened to validate here a moment
+    /// ago.
+    fn confirm_rebase_plan(&mut self) {
+        let Some(plan) = self.rebase_plan.as_ref() else {
+            return;
+        };
+        if let Err(error) = plan.validate() {
+            self.rebase_plan_error = Some(error);
+            return;
+        }
+        self.rebase_plan_error = None;
+        self.operation.begin(OperationKind::ExecuteRebasePlan {
+            onto: plan.onto_revision.clone(),
+            commit_count: plan.entries.len(),
+        });
+    }
+
     /// Starts confirmation to skip the current step of the pending operation
     /// (T-235/US-083 criterion 3). A no-op when skip is not offered for
     /// whatever is currently detected (e.g. a merge, which has no further
@@ -1943,6 +2231,29 @@ impl App {
             OperationKind::AbortOperation => vec![Command::AbortOperation(repo)],
             OperationKind::Rebase { onto } => vec![Command::Rebase(repo, onto)],
             OperationKind::SkipOperation => vec![Command::SkipOperation(repo)],
+            OperationKind::ExecuteRebasePlan { .. } => {
+                // The overlay is fully consumed the moment this actually
+                // dispatches — from here on, `render_overlays` shows the
+                // generic operation overlay instead (mirrors
+                // `OperationKind::Merge`/`Rebase`'s own convention rather
+                // than the commit composer's "stays visible" one). On
+                // failure (e.g. the Core's own stale-plan revalidation
+                // refusal) this is a deliberate, documented scope cut, not
+                // an oversight: T-236/US-084 asks for a clear error, never
+                // "reconstrução mágica" — the person presses `O` again for
+                // a fresh plan rather than this silently rebuilding one.
+                self.rebase_plan_open = false;
+                match std::mem::take(&mut self.rebase_plan) {
+                    Some(plan) => vec![Command::ExecuteRebasePlan(repo, plan)],
+                    None => {
+                        self.operation.fail(GitSailError::new(
+                            ErrorCode::Internal,
+                            "the rebase plan was lost before it could be executed",
+                        ));
+                        Vec::new()
+                    }
+                }
+            }
         }
     }
 
@@ -2001,6 +2312,12 @@ impl App {
                 self.inspected_conflict = None;
                 self.conflict_error = None;
                 self.last_merge_result = None;
+                self.last_rebase_result = None;
+                self.rebase_plan_open = false;
+                self.rebase_plan = None;
+                self.rebase_plan_cursor = 0;
+                self.rebase_plan_reword_input = None;
+                self.rebase_plan_error = None;
 
                 let mut commands = vec![
                     Command::RefreshStatus(ticket, repo.clone()),
@@ -2283,6 +2600,32 @@ impl App {
             Err(error) => {
                 self.operation.fail(error);
                 Vec::new()
+            }
+        }
+    }
+
+    /// Handles [`crate::message::Message::RebasePlanLoaded`] (T-236/US-084
+    /// criterion 1). A load failure is shown inline in the overlay (already
+    /// opened by [`Self::request_rebase_plan`]) rather than through
+    /// [`OperationState`], mirroring [`Self::on_conflict_sides_loaded`]'s own
+    /// "side-channel error" convention — nothing was ever confirmed here,
+    /// so there is no operation to fail.
+    ///
+    /// A result arriving after the overlay was already dismissed (`Esc`) is
+    /// discarded outright: it must never resurrect a plan the person already
+    /// walked away from.
+    pub fn on_rebase_plan_loaded(&mut self, result: Result<RebasePlan, GitSailError>) {
+        if !self.rebase_plan_open {
+            return;
+        }
+        match result {
+            Ok(plan) => {
+                self.rebase_plan_cursor = 0;
+                self.rebase_plan_error = None;
+                self.rebase_plan = Some(plan);
+            }
+            Err(error) => {
+                self.rebase_plan_error = Some(error);
             }
         }
     }

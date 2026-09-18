@@ -283,6 +283,39 @@ export type RebaseResultDto =
   | { outcome: "completed"; newHead: string }
   | { outcome: "conflict"; conflictedFiles: ConflictedFileDto[] };
 
+/** One action assignable to a rebase plan entry (T-236/US-084 criterion 1).
+ * `"edit"` is deliberately not modeled — see `RebaseAction`'s own doc in
+ * `gitsail-application`: every other action a person would reach for before
+ * sharing history is covered, and stopping mid-rebase to hand-edit a
+ * commit's content is a materially larger, separate capability. */
+export type RebaseActionDto = "pick" | "reword" | "squash" | "fixup" | "drop";
+
+/** One commit's position and assigned action within a rebase plan (T-236/
+ * US-084). `messageOverride` is only ever meaningful for `"reword"` —
+ * `execute_rebase_plan`'s own revalidation is the final authority on that
+ * rule, never this shape alone. */
+export interface RebasePlanEntryDto {
+  commit: string;
+  shortHash: string;
+  subject: string;
+  action: RebaseActionDto;
+  messageOverride: string | null;
+}
+
+/** A non-mutating interactive rebase plan (T-236/US-084 criterion 1): the
+ * candidate commit range the current branch would reapply onto
+ * `ontoRevision`, oldest first, each defaulted to `"pick"` until reassigned.
+ * `onto`/`branchHead` are the exact state the plan was built against —
+ * `execute_rebase_plan` revalidates both immediately before applying
+ * anything (criterion 2), refusing a stale plan rather than silently
+ * rebuilding it. */
+export interface RebasePlanDto {
+  ontoRevision: string;
+  onto: string;
+  branchHead: string;
+  entries: RebasePlanEntryDto[];
+}
+
 /** One conflict side's content (T-232/US-080 criterion 2) — `"absent"` is a
  * legitimate, expected outcome (e.g. no common ancestor for a file added
  * independently on both sides), never an error. */

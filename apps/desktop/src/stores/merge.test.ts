@@ -8,8 +8,33 @@ import type {
   ConflictSidesDto,
   InProgressOperationDto,
   MergeResultDto,
+  RebasePlanDto,
   RebaseResultDto,
 } from "../services/dto";
+
+function samplePlan(): RebasePlanDto {
+  return {
+    ontoRevision: "main",
+    onto: "a".repeat(40),
+    branchHead: "b".repeat(40),
+    entries: [
+      {
+        commit: "c".repeat(40),
+        shortHash: "ccccccc",
+        subject: "feature A",
+        action: "pick",
+        messageOverride: null,
+      },
+      {
+        commit: "d".repeat(40),
+        shortHash: "ddddddd",
+        subject: "feature B",
+        action: "pick",
+        messageOverride: null,
+      },
+    ],
+  };
+}
 
 function statusResponse() {
   return { branch: "main", headState: { state: "attached", branch: "main" }, files: [], isClean: true };
@@ -325,5 +350,169 @@ describe("merge store", () => {
     expect(received).toContain("skip_operation");
     expect(operation.status).toBe("succeeded");
     expect(store.inProgressOperation).toEqual({ kind: "none" });
+  });
+
+  // -- T-236/US-084: plan an interactive rebase --------------------------
+
+  it("requestRebasePlan loads the plan directly, without going through useOperationStore", async () => {
+    const plan = samplePlan();
+    mockIPC((cmd, args) => {
+      if (cmd === "plan_rebase") {
+        expect(args).toEqual({ ontoRevision: "main" });
+        return plan;
+      }
+      throw new Error(`unexpected command ${cmd}`);
+    });
+    const store = useMergeStore();
+
+    await store.requestRebasePlan("main");
+
+    expect(store.rebasePlan).toEqual(plan);
+    expect(store.rebasePlanError).toBeNull();
+    expect(store.isLoadingRebasePlan).toBe(false);
+    expect(useOperationStore().status).toBe("idle");
+  });
+
+  it("requestRebasePlan records a clear error without throwing, and never leaves a stale plan behind", async () => {
+    mockIPC(() => {
+      throw { code: "invalid_repository_state", message: "no candidates" };
+    });
+    const store = useMergeStore();
+    store.rebasePlan = samplePlan();
+
+    await store.requestRebasePlan("main");
+
+    expect(store.rebasePlan).toBeNull();
+    expect(store.rebasePlanError?.code).toBe("invalid_repository_state");
+  });
+
+  it("moveRebasePlanEntry reorders entries and is a no-op at either edge", () => {
+    const store = useMergeStore();
+    store.rebasePlan = samplePlan();
+
+    store.moveRebasePlanEntry(1, "up");
+    expect(store.rebasePlan?.entries.map((e) => e.subject)).toEqual(["feature B", "feature A"]);
+
+    // Moving the first entry up must be a no-op.
+    store.moveRebasePlanEntry(0, "up");
+    expect(store.rebasePlan?.entries.map((e) => e.subject)).toEqual(["feature B", "feature A"]);
+
+    // Moving the last entry down must be a no-op.
+    store.moveRebasePlanEntry(1, "down");
+    expect(store.rebasePlan?.entries.map((e) => e.subject)).toEqual(["feature B", "feature A"]);
+  });
+
+  it("setRebasePlanAction reassigns the entry's action and clears messageOverride when leaving reword", () => {
+    const store = useMergeStore();
+    store.rebasePlan = samplePlan();
+
+    store.setRebasePlanAction(0, "reword");
+    store.setRebasePlanMessage(0, "a better message");
+    expect(store.rebasePlan?.entries[0].action).toBe("reword");
+    expect(store.rebasePlan?.entries[0].messageOverride).toBe("a better message");
+
+    store.setRebasePlanAction(0, "drop");
+    expect(store.rebasePlan?.entries[0].action).toBe("drop");
+    // Leaving reword for any other action must clear messageOverride.
+    expect(store.rebasePlan?.entries[0].messageOverride).toBeNull();
+  });
+
+  it("validateRebasePlan mirrors RebasePlan::validate's own rules", () => {
+    const store = useMergeStore();
+    store.rebasePlan = samplePlan();
+    expect(store.validateRebasePlan()).toBeNull();
+
+    store.setRebasePlanAction(0, "squash");
+    expect(store.validateRebasePlan()).toContain("squash");
+
+    store.setRebasePlanAction(0, "reword");
+    expect(store.validateRebasePlan()).toContain("reword entry requires");
+
+    store.setRebasePlanMessage(0, "  ");
+    expect(store.validateRebasePlan()).toContain("reword entry requires");
+
+    store.setRebasePlanMessage(0, "a real message");
+    expect(store.validateRebasePlan()).toBeNull();
+  });
+
+  it("requestExecuteRebasePlan refuses an invalid plan before ever calling execute_rebase_plan", async () => {
+    mockIPC((cmd) => {
+      throw new Error(`unexpected command ${cmd}`);
+    });
+    const store = useMergeStore();
+    store.rebasePlan = samplePlan();
+    store.setRebasePlanAction(0, "squash");
+
+    await store.requestExecuteRebasePlan();
+
+    expect(store.rebasePlanError?.message).toContain("squash");
+    expect(useOperationStore().status).toBe("idle");
+    expect(store.rebasePlan).not.toBeNull();
+  });
+
+  it("requestExecuteRebasePlan is Moderate risk, waits for confirmation, names the concrete scope, and clears the plan once dispatched", async () => {
+    const received: string[] = [];
+    const outcome: RebaseResultDto = { outcome: "completed", newHead: "e".repeat(40) };
+    let executedPlan: RebasePlanDto | undefined;
+    mockIPC((cmd, args) => {
+      received.push(cmd);
+      if (cmd === "execute_rebase_plan") {
+        executedPlan = (args as { plan: RebasePlanDto }).plan;
+        return outcome;
+      }
+      if (cmd === "get_repository_status") return statusResponse();
+      if (cmd === "detect_in_progress_operation") return { kind: "none" } satisfies InProgressOperationDto;
+      throw new Error(`unexpected command ${cmd}`);
+    });
+    const store = useMergeStore();
+    store.rebasePlan = samplePlan();
+
+    await store.requestExecuteRebasePlan();
+    const operation = useOperationStore();
+    expect(operation.status).toBe("confirming");
+    expect(operation.current?.risk).toBe("moderate");
+    expect(operation.current?.targetLabel).toBe("rebasing 2 commit(s) onto 'main' (interactive plan)");
+    // The plan is still visible while only confirmation is pending — it is
+    // cleared once the mutation actually dispatches, not before.
+    expect(store.rebasePlan).not.toBeNull();
+
+    await operation.confirm();
+
+    expect(received).toContain("execute_rebase_plan");
+    expect(executedPlan).toEqual(samplePlan());
+    expect(operation.status).toBe("succeeded");
+    expect(store.lastRebaseResult).toEqual(outcome);
+    expect(store.rebasePlan).toBeNull();
+  });
+
+  it("a stale plan's execution failure clears the plan overlay rather than silently rebuilding it", async () => {
+    mockIPC((cmd) => {
+      if (cmd === "execute_rebase_plan") {
+        throw { code: "operation_conflict", message: "onto has moved" };
+      }
+      throw new Error(`unexpected command ${cmd}`);
+    });
+    const store = useMergeStore();
+    store.rebasePlan = samplePlan();
+
+    await store.requestExecuteRebasePlan();
+    await useOperationStore().confirm();
+
+    expect(useOperationStore().status).toBe("failed");
+    expect(useOperationStore().error?.code).toBe("operation_conflict");
+    // A failed execution must never leave a stale plan around to retry
+    // blindly.
+    expect(store.rebasePlan).toBeNull();
+  });
+
+  it("closeRebasePlan discards the plan and any pending error without executing anything", () => {
+    const store = useMergeStore();
+    store.rebasePlan = samplePlan();
+    store.rebasePlanError = { code: "internal", message: "x" };
+
+    store.closeRebasePlan();
+
+    expect(store.rebasePlan).toBeNull();
+    expect(store.rebasePlanError).toBeNull();
   });
 });

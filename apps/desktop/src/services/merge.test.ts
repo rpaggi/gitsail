@@ -5,9 +5,11 @@ import {
   abortOperation,
   continueOperation,
   detectInProgressOperation,
+  executeRebasePlan,
   getConflictSides,
   markConflictResolved,
   merge,
+  planRebase,
   rebase,
   skipOperation,
   takeConflictSide,
@@ -16,6 +18,7 @@ import type {
   ConflictSidesDto,
   InProgressOperationDto,
   MergeResultDto,
+  RebasePlanDto,
   RebaseResultDto,
 } from "./dto";
 
@@ -167,5 +170,60 @@ describe("merge service", () => {
 
     expect(receivedCommand).toBe("skip_operation");
     expect(receivedArgs).toEqual({});
+  });
+
+  // -- T-236/US-084: plan an interactive rebase --------------------------
+
+  it("planRebase invokes plan_rebase with the exact onto revision and returns the plan", async () => {
+    let receivedCommand = "";
+    let receivedArgs: unknown;
+    const plan: RebasePlanDto = {
+      ontoRevision: "main",
+      onto: "a".repeat(40),
+      branchHead: "b".repeat(40),
+      entries: [
+        {
+          commit: "c".repeat(40),
+          shortHash: "ccccccc",
+          subject: "feature change",
+          action: "pick",
+          messageOverride: null,
+        },
+      ],
+    };
+    mockIPC((cmd, args) => {
+      receivedCommand = cmd;
+      receivedArgs = args;
+      return plan;
+    });
+
+    const result = await planRebase("main");
+
+    expect(receivedCommand).toBe("plan_rebase");
+    expect(receivedArgs).toEqual({ ontoRevision: "main" });
+    expect(result).toEqual(plan);
+  });
+
+  it("executeRebasePlan invokes execute_rebase_plan with the exact plan and returns the outcome", async () => {
+    let receivedCommand = "";
+    let receivedArgs: unknown;
+    const plan: RebasePlanDto = {
+      ontoRevision: "main",
+      onto: "a".repeat(40),
+      branchHead: "b".repeat(40),
+      entries: [],
+    };
+    const outcome: RebaseResultDto = { outcome: "completed", newHead: "d".repeat(40) };
+    mockIPC((cmd, args) => {
+      receivedCommand = cmd;
+      receivedArgs = args;
+      return outcome;
+    });
+
+    const result = await executeRebasePlan(plan);
+
+    expect(receivedCommand).toBe("execute_rebase_plan");
+    expect(receivedArgs).toEqual({ plan });
+    expect(result).toEqual(outcome);
   });
 });

@@ -20,10 +20,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use gitsail_application::{
     AbortOperation, AmendCommit, ApplyPatch, CommitQuery, ContinueOperation, CreateBranch,
-    CreateCommit, DeleteBranch, DetectInProgressOperation, DiffRequest, Fetch,
+    CreateCommit, DeleteBranch, DetectInProgressOperation, DiffRequest, ExecuteRebasePlan, Fetch,
     ForgetRecentRepository, GetCommit, GetCommitHistory, GetConflictSides, GetDiff, ListBranches,
-    ListRecentRepositories, MarkConflictResolved, Merge, OpenRepository, PreviewAmend,
-    PreviewPatchApplication, Pull, Push, Rebase, RecordRecentRepository, RefreshReason,
+    ListRecentRepositories, MarkConflictResolved, Merge, OpenRepository, PlanRebase, PreviewAmend,
+    PreviewPatchApplication, Pull, Push, Rebase, RebasePlan, RecordRecentRepository, RefreshReason,
     RenameBranch, SkipOperation, StageFiles, StageHunks, SwitchBranch, TakeConflictSide,
     UnstageFiles, UnstageHunks,
 };
@@ -35,7 +35,7 @@ use gitsail_protocol::{
     AmendPreviewDto, ApplyPatchResultDto, BranchDto, CommitDto, CommitGraphPageDto,
     CommitGraphRowDto, CommitResultDto, ConflictSidesDto, DiffDto, ErrorPayload, FileDiffDto,
     InProgressOperationDto, MergeResultDto, PatchExportDto, PatchPreviewDto, PullOutcomeDto,
-    PullResultDto, RebaseResultDto, RecentRepositoryDto, RemoteDto, RepositoryDto,
+    PullResultDto, RebasePlanDto, RebaseResultDto, RecentRepositoryDto, RemoteDto, RepositoryDto,
     RepositoryStatusDto, SyncTargetDto,
 };
 
@@ -1043,6 +1043,61 @@ fn skip_operation_impl(state: &AppState) -> Result<(), GitSailError> {
     run_mutation(state, |repository| {
         SkipOperation::new(state.write_port()).execute(repository)
     })
+}
+
+// -- T-236/US-084: plan an interactive rebase ----------------------------
+//
+// `plan_rebase` is read-only (building a plan never touches the working
+// tree, the index, or any ref) so it reads the repository directly rather
+// than going through `run_mutation`'s post-hoc epoch guard, mirroring
+// `get_conflict_sides`/`detect_in_progress_operation`'s own convention.
+// `execute_rebase_plan` is the one command here that actually mutates, so
+// it goes through `run_mutation` exactly like `rebase` above; the DTO ->
+// domain conversion (`RebasePlan::try_from`, `gitsail-protocol`'s own
+// reverse `TryFrom` impl) is the only "logic" in this pair, matching this
+// file's own module doc.
+
+/// Reads a non-mutating interactive rebase plan for the candidate range the
+/// current branch would reapply onto `onto_revision` (T-236/US-084
+/// criterion 1).
+#[tauri::command]
+pub fn plan_rebase(
+    onto_revision: String,
+    state: tauri::State<AppState>,
+) -> Result<RebasePlanDto, ErrorPayload> {
+    plan_rebase_impl(&state, &onto_revision).map_err(|err| ErrorPayload::from(&err))
+}
+
+fn plan_rebase_impl(state: &AppState, onto_revision: &str) -> Result<RebasePlanDto, GitSailError> {
+    let (repository, _epoch) = state.repository_with_epoch()?;
+    let plan = PlanRebase::new(state.write_port()).execute(&repository, onto_revision)?;
+    Ok(RebasePlanDto::from(&plan))
+}
+
+/// Applies a previously built/edited interactive rebase plan (T-236/US-084;
+/// T-237/US-085's squash/fixup are just two of this same plan's actions).
+/// `plan` is whatever the frontend last edited from a prior `plan_rebase`
+/// result — `RepositoryWritePort::execute_rebase_plan` itself revalidates
+/// `onto`/`HEAD` immediately before applying anything (criterion 2),
+/// refusing a stale plan with a clear error rather than silently rebuilding
+/// it, exactly as it does for the TUI.
+#[tauri::command]
+pub fn execute_rebase_plan(
+    plan: RebasePlanDto,
+    state: tauri::State<AppState>,
+) -> Result<RebaseResultDto, ErrorPayload> {
+    execute_rebase_plan_impl(&state, &plan).map_err(|err| ErrorPayload::from(&err))
+}
+
+fn execute_rebase_plan_impl(
+    state: &AppState,
+    plan: &RebasePlanDto,
+) -> Result<RebaseResultDto, GitSailError> {
+    let plan = RebasePlan::try_from(plan)?;
+    let result = run_mutation(state, |repository| {
+        ExecuteRebasePlan::new(state.write_port()).execute(repository, &plan)
+    })?;
+    Ok(RebaseResultDto::from(&result))
 }
 
 #[cfg(test)]
@@ -3363,6 +3418,165 @@ mod tests {
                 detect_in_progress_operation_impl(&state).unwrap(),
                 InProgressOperationDto::None
             );
+        }
+
+        // -- T-236/US-084: plan an interactive rebase --------------------
+
+        /// Two independent feature commits diverging from `main` by one
+        /// commit of its own, on unrelated files throughout — so a plain
+        /// rebase of the whole range never conflicts, leaving the plan's
+        /// own reordering/action assignment as the only thing under test.
+        /// Mirrors `gitsail-tui`'s own `setup_two_commit_divergence` fixture
+        /// in `crates/gitsail-tui/tests/rebase.rs`.
+        fn setup_two_commit_divergence(dir: &Path) {
+            std::fs::write(dir.join("base.txt"), "base\n").unwrap();
+            git(dir, &["add", "-A"]);
+            git(dir, &["commit", "--quiet", "-m", "base"]);
+
+            git(dir, &["checkout", "-q", "-b", "feature"]);
+            std::fs::write(dir.join("a.txt"), "a\n").unwrap();
+            git(dir, &["add", "-A"]);
+            git(dir, &["commit", "--quiet", "-m", "feature A"]);
+            std::fs::write(dir.join("b.txt"), "b\n").unwrap();
+            git(dir, &["add", "-A"]);
+            git(dir, &["commit", "--quiet", "-m", "feature B"]);
+
+            git(dir, &["checkout", "-q", "main"]);
+            std::fs::write(dir.join("main.txt"), "main\n").unwrap();
+            git(dir, &["add", "-A"]);
+            git(dir, &["commit", "--quiet", "-m", "main advances"]);
+
+            git(dir, &["checkout", "-q", "feature"]);
+        }
+
+        fn commit_subjects(dir: &Path, count: usize) -> Vec<String> {
+            let output = ProcessCommand::new("git")
+                .args(["log", &format!("-{count}"), "--pretty=format:%s"])
+                .current_dir(dir)
+                .output()
+                .unwrap();
+            String::from_utf8(output.stdout)
+                .unwrap()
+                .lines()
+                .map(|s| s.to_string())
+                .collect()
+        }
+
+        /// T-236/US-084 criterion 1: the plan lists the exact candidate
+        /// range `plan_rebase` reads, oldest first, each defaulted to
+        /// `pick` — before anything is confirmed.
+        #[test]
+        fn plan_rebase_lists_candidates_oldest_first_defaulted_to_pick() {
+            let dir = init_repo("rebase-plan-list");
+            setup_two_commit_divergence(dir.path());
+
+            let state = real_app_state();
+            open_repository_impl(&state, dir.path().to_str().unwrap()).unwrap();
+
+            let plan = plan_rebase_impl(&state, "main").unwrap();
+
+            assert_eq!(plan.onto_revision, "main");
+            let subjects: Vec<_> = plan.entries.iter().map(|e| e.subject.clone()).collect();
+            assert_eq!(subjects, vec!["feature A", "feature B"]);
+            assert!(plan
+                .entries
+                .iter()
+                .all(|e| e.action == gitsail_protocol::RebaseActionDto::Pick));
+            assert!(plan.entries.iter().all(|e| e.message_override.is_none()));
+        }
+
+        /// T-236/US-084 criterion 1: reordering and reassigning an action
+        /// through the DTO round trip, then executing, actually reapplies
+        /// the commits in the new order with the new action's effect — a
+        /// real resulting tree, not just a converted shape.
+        #[test]
+        fn execute_rebase_plan_reorders_and_rewords_reapplying_commits_in_the_new_order() {
+            let dir = init_repo("rebase-plan-reorder-reword");
+            setup_two_commit_divergence(dir.path());
+
+            let state = real_app_state();
+            open_repository_impl(&state, dir.path().to_str().unwrap()).unwrap();
+
+            let mut plan = plan_rebase_impl(&state, "main").unwrap();
+            assert_eq!(plan.entries.len(), 2);
+
+            // Reorder to [feature B, feature A] and reword "feature B".
+            plan.entries.swap(0, 1);
+            plan.entries[0].action = gitsail_protocol::RebaseActionDto::Reword;
+            plan.entries[0].message_override = Some("reworded B".to_string());
+
+            let result = execute_rebase_plan_impl(&state, &plan).unwrap();
+            match result {
+                RebaseResultDto::Completed { new_head } => assert_eq!(new_head, head(dir.path())),
+                other => panic!("expected Completed, got {other:?}"),
+            }
+
+            let subjects = commit_subjects(dir.path(), 2);
+            assert_eq!(subjects, vec!["feature A", "reworded B"]);
+            assert!(dir.path().join("a.txt").exists());
+            assert!(dir.path().join("b.txt").exists());
+            assert!(dir.path().join("main.txt").exists());
+        }
+
+        /// T-236/US-084 criterion 2 / T-237/US-085 criterion 2: the Core's
+        /// own `RebasePlan::validate` is the final authority — a `squash`
+        /// on the first entry is refused before touching the repository at
+        /// all, even if a compromised/buggy frontend sent it anyway.
+        #[test]
+        fn execute_rebase_plan_rejects_an_invalid_plan_before_touching_the_repository() {
+            let dir = init_repo("rebase-plan-invalid");
+            setup_two_commit_divergence(dir.path());
+
+            let state = real_app_state();
+            open_repository_impl(&state, dir.path().to_str().unwrap()).unwrap();
+
+            let mut plan = plan_rebase_impl(&state, "main").unwrap();
+            plan.entries[0].action = gitsail_protocol::RebaseActionDto::Squash;
+            let head_before = head(dir.path());
+
+            let err = execute_rebase_plan_impl(&state, &plan).unwrap_err();
+
+            assert_eq!(err.code(), ErrorCode::InvalidRepositoryState);
+            assert_eq!(
+                head(dir.path()),
+                head_before,
+                "an invalid plan must never touch the repository"
+            );
+            assert_eq!(
+                detect_in_progress_operation_impl(&state).unwrap(),
+                InProgressOperationDto::None
+            );
+        }
+
+        /// T-236/US-084 criterion 2: a plan built against one state of
+        /// `onto` that has since moved is refused by the Core's own
+        /// revalidation with a clear error, never silently executed against
+        /// the newer state.
+        #[test]
+        fn execute_rebase_plan_refuses_a_stale_plan_after_onto_moves_concurrently() {
+            let dir = init_repo("rebase-plan-stale");
+            setup_two_commit_divergence(dir.path());
+
+            let state = real_app_state();
+            open_repository_impl(&state, dir.path().to_str().unwrap()).unwrap();
+
+            let plan = plan_rebase_impl(&state, "main").unwrap();
+
+            // `main` moves after the plan was built, without this session's
+            // knowledge — mirrors another terminal/process advancing it
+            // concurrently.
+            git(dir.path(), &["checkout", "-q", "main"]);
+            std::fs::write(dir.path().join("late.txt"), "late\n").unwrap();
+            git(dir.path(), &["add", "-A"]);
+            git(dir.path(), &["commit", "--quiet", "-m", "late main commit"]);
+            git(dir.path(), &["checkout", "-q", "feature"]);
+
+            let err = execute_rebase_plan_impl(&state, &plan).unwrap_err();
+
+            assert_eq!(err.code(), ErrorCode::OperationConflict);
+            assert!(err
+                .to_string()
+                .contains("now resolves to a different commit"));
         }
     }
 }

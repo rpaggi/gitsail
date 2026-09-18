@@ -9,6 +9,7 @@ import type {
   ConflictSidesDto,
   InProgressOperationDto,
   MergeResultDto,
+  RebasePlanDto,
   RebaseResultDto,
 } from "./dto";
 
@@ -82,4 +83,20 @@ export async function rebase(ontoRevision: string): Promise<RebaseResultDto> {
  * presumed, always reinspected" contract. */
 export async function skipOperation(): Promise<void> {
   await invoke<void>("skip_operation");
+}
+
+/** Reads a non-mutating interactive rebase plan for the candidate range the
+ * current branch would reapply onto `ontoRevision` (T-236/US-084 criterion
+ * 1). Read-only: never touches the working tree, the index, or any ref. */
+export async function planRebase(ontoRevision: string): Promise<RebasePlanDto> {
+  return invoke<RebasePlanDto>("plan_rebase", { ontoRevision });
+}
+
+/** Applies a previously built/edited interactive rebase plan (T-236/US-084;
+ * T-237/US-085's squash/fixup are just two of this same plan's actions).
+ * `onto`/`branchHead` are revalidated by the Core immediately before
+ * applying anything (criterion 2) — a stale plan rejects with a clear error
+ * rather than silently rebuilding itself. */
+export async function executeRebasePlan(plan: RebasePlanDto): Promise<RebaseResultDto> {
+  return invoke<RebaseResultDto>("execute_rebase_plan", { plan });
 }

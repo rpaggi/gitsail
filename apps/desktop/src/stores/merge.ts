@@ -35,9 +35,11 @@ import {
   abortOperation as abortOperationCommand,
   continueOperation as continueOperationCommand,
   detectInProgressOperation,
+  executeRebasePlan as executeRebasePlanCommand,
   getConflictSides,
   markConflictResolved as markConflictResolvedCommand,
   merge as mergeCommand,
+  planRebase as planRebaseCommand,
   rebase as rebaseCommand,
   skipOperation as skipOperationCommand,
   takeConflictSide as takeConflictSideCommand,
@@ -48,6 +50,8 @@ import type {
   InProgressOperationDto,
   MergeResultDto,
   OperationCapabilityDto,
+  RebaseActionDto,
+  RebasePlanDto,
   RebaseResultDto,
 } from "../services/dto";
 import { isErrorPayload, type ErrorPayload } from "../services/errors";
@@ -93,6 +97,21 @@ export const useMergeStore = defineStore("merge", {
      * immediately (Safe-risk convention) rather than through a confirm
      * step. */
     conflictError: null as ErrorPayload | null,
+
+    // -- T-236/US-084: plan an interactive rebase ------------------------
+    /** The interactive rebase plan currently being edited, or `null` while
+     * closed or a freshly requested plan is still loading. */
+    rebasePlan: null as RebasePlanDto | null,
+    isLoadingRebasePlan: false,
+    /** A plan-load failure, or a client-side `validateRebasePlan` failure
+     * surfaced before ever calling `executeRebasePlanCommand` — mirrors
+     * `conflictError`'s own "side-channel, not routed through
+     * `useOperationStore`" convention (nothing was ever confirmed for
+     * either of those two cases, so there is no operation to fail). An
+     * execution failure (e.g. the Core's own stale-plan revalidation
+     * refusal) instead surfaces through the ordinary `useOperationStore`
+     * failure path, never through this field. */
+    rebasePlanError: null as ErrorPayload | null,
   }),
   getters: {
     conflictedFiles: (state): ConflictedFileDto[] => conflictedFilesOf(state.inProgressOperation),
@@ -316,6 +335,148 @@ export const useMergeStore = defineStore("merge", {
         targetLabel: "the current step of the in-progress operation",
         run: async () => {
           await skipOperationCommand();
+          await session.refreshStatus("after_mutation");
+          await this.refreshInProgressOperation();
+        },
+      });
+    },
+
+    // -- T-236/US-084: plan an interactive rebase ------------------------
+
+    /** Requests a fresh interactive rebase plan onto `ontoRevision`
+     * (T-236/US-084 criterion 1). Read-only — building a plan never
+     * touches the working tree, the index, or any ref — so this runs
+     * immediately rather than through `useOperationStore`, mirroring
+     * `inspectConflict`'s own convention. Replaces whatever was being
+     * edited before: there is nothing yet to lose, since this is the only
+     * way a plan is ever loaded, and it always starts from a clean slate. */
+    async requestRebasePlan(ontoRevision: string): Promise<void> {
+      this.isLoadingRebasePlan = true;
+      this.rebasePlanError = null;
+      try {
+        this.rebasePlan = await planRebaseCommand(ontoRevision);
+      } catch (error) {
+        this.rebasePlan = null;
+        this.rebasePlanError = toErrorPayload(error);
+      } finally {
+        this.isLoadingRebasePlan = false;
+      }
+    },
+
+    /** Discards the plan currently being edited without executing
+     * anything (T-236/US-084's own "cancelling never touches the
+     * repository"). */
+    closeRebasePlan(): void {
+      this.rebasePlan = null;
+      this.rebasePlanError = null;
+    },
+
+    /** Moves entry `index` one position up/down (T-236/US-084 criterion
+     * 1's "pode reordenar"). A no-op at either edge, or without a loaded
+     * plan. */
+    moveRebasePlanEntry(index: number, direction: "up" | "down"): void {
+      if (!this.rebasePlan) {
+        return;
+      }
+      const target = direction === "up" ? index - 1 : index + 1;
+      if (target < 0 || target >= this.rebasePlan.entries.length) {
+        return;
+      }
+      const entries = [...this.rebasePlan.entries];
+      [entries[index], entries[target]] = [entries[target], entries[index]];
+      this.rebasePlan = { ...this.rebasePlan, entries };
+      this.rebasePlanError = null;
+    },
+
+    /** Reassigns entry `index`'s action (T-236/US-084 criterion 1).
+     * Clears `messageOverride` for any action other than `"reword"` —
+     * mirrors `RebasePlan::validate`'s own rule that only a reword entry
+     * may carry one. */
+    setRebasePlanAction(index: number, action: RebaseActionDto): void {
+      if (!this.rebasePlan) {
+        return;
+      }
+      const entries = this.rebasePlan.entries.map((entry, i) =>
+        i === index
+          ? { ...entry, action, messageOverride: action === "reword" ? entry.messageOverride : null }
+          : entry,
+      );
+      this.rebasePlan = { ...this.rebasePlan, entries };
+      this.rebasePlanError = null;
+    },
+
+    /** Sets entry `index`'s replacement message — only meaningful once its
+     * action is `"reword"`; this never assigns the action as a side
+     * effect, matching `setRebasePlanAction`'s own single-responsibility
+     * split. */
+    setRebasePlanMessage(index: number, message: string): void {
+      if (!this.rebasePlan) {
+        return;
+      }
+      const entries = this.rebasePlan.entries.map((entry, i) =>
+        i === index ? { ...entry, messageOverride: message } : entry,
+      );
+      this.rebasePlan = { ...this.rebasePlan, entries };
+    },
+
+    /** Client-side mirror of `gitsail_application::RebasePlan::validate`
+     * (T-236/US-084 criterion 2), so an invalid plan is refused with a
+     * clear message before `executeRebasePlanCommand` is ever called.
+     * Never the final authority: `execute_rebase_plan` always re-validates
+     * for real (the same position/action/message rules, plus `onto`/HEAD
+     * revalidation) before touching anything, so a stale plan is still
+     * refused there even if it happened to validate here a moment ago.
+     * Returns a human-readable reason, or `null` when the plan is valid. */
+    validateRebasePlan(): string | null {
+      const plan = this.rebasePlan;
+      if (!plan) {
+        return "no rebase plan is loaded";
+      }
+      for (let index = 0; index < plan.entries.length; index += 1) {
+        const entry = plan.entries[index];
+        if ((entry.action === "squash" || entry.action === "fixup") && index === 0) {
+          return `the first commit in a rebase plan cannot be ${entry.action}: there is no preceding commit to combine it into`;
+        }
+        if (entry.action === "reword" && !entry.messageOverride?.trim()) {
+          return "a reword entry requires a non-empty message";
+        }
+        if (entry.action !== "reword" && entry.messageOverride) {
+          return "only a reword entry may carry a replacement message";
+        }
+      }
+      return null;
+    },
+
+    /** Validates the current plan client-side and, only once it passes,
+     * requests confirmation to execute it (T-236/US-084 criteria 1/2:
+     * candidate range, order, and action are all shown by `targetLabel`
+     * before anything runs, and an invalid plan never reaches
+     * confirmation at all). The plan overlay is cleared the moment this
+     * actually dispatches — regardless of whether execution then succeeds
+     * or fails — so a failed/stale execution is never followed by
+     * silently rebuilding or reusing the same plan (T-236/US-084's own
+     * "sem reconstrução mágica"); the person re-requests a fresh plan
+     * instead. */
+    async requestExecuteRebasePlan(): Promise<void> {
+      const plan = this.rebasePlan;
+      if (!plan) {
+        return;
+      }
+      const validationError = this.validateRebasePlan();
+      if (validationError) {
+        this.rebasePlanError = { code: "invalid_repository_state", message: validationError };
+        return;
+      }
+      this.rebasePlanError = null;
+      const operation = useOperationStore();
+      const session = useRepositorySessionStore();
+      await operation.request({
+        kind: "executeRebasePlan",
+        risk: "moderate",
+        targetLabel: `rebasing ${plan.entries.length} commit(s) onto '${plan.ontoRevision}' (interactive plan)`,
+        run: async () => {
+          this.rebasePlan = null;
+          this.lastRebaseResult = await executeRebasePlanCommand(plan);
           await session.refreshStatus("after_mutation");
           await this.refreshInProgressOperation();
         },
