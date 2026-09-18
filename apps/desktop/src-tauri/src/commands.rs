@@ -19,21 +19,23 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use gitsail_application::{
-    AmendCommit, ApplyPatch, CommitQuery, CreateBranch, CreateCommit, DeleteBranch, DiffRequest,
-    Fetch, ForgetRecentRepository, GetCommit, GetCommitHistory, GetDiff, ListBranches,
-    ListRecentRepositories, OpenRepository, PreviewAmend, PreviewPatchApplication, Pull, Push,
-    RecordRecentRepository, RefreshReason, RenameBranch, StageFiles, StageHunks, SwitchBranch,
-    UnstageFiles, UnstageHunks,
+    AbortOperation, AmendCommit, ApplyPatch, CommitQuery, ContinueOperation, CreateBranch,
+    CreateCommit, DeleteBranch, DetectInProgressOperation, DiffRequest, Fetch,
+    ForgetRecentRepository, GetCommit, GetCommitHistory, GetConflictSides, GetDiff, ListBranches,
+    ListRecentRepositories, MarkConflictResolved, Merge, OpenRepository, PreviewAmend,
+    PreviewPatchApplication, Pull, Push, RecordRecentRepository, RefreshReason, RenameBranch,
+    StageFiles, StageHunks, SwitchBranch, TakeConflictSide, UnstageFiles, UnstageHunks,
 };
 use gitsail_domain::{
-    Branch, BranchKind, BranchName, CancellationToken, CommitHash, ErrorCode, FileDiff,
-    GitSailError, GraphCommit, Remote, Repository,
+    Branch, BranchKind, BranchName, CancellationToken, CommitHash, ConflictSide, ErrorCode,
+    FileDiff, GitSailError, GraphCommit, Remote, Repository,
 };
 use gitsail_protocol::{
     AmendPreviewDto, ApplyPatchResultDto, BranchDto, CommitDto, CommitGraphPageDto,
-    CommitGraphRowDto, CommitResultDto, DiffDto, ErrorPayload, FileDiffDto, PatchExportDto,
-    PatchPreviewDto, PullOutcomeDto, PullResultDto, RecentRepositoryDto, RemoteDto, RepositoryDto,
-    RepositoryStatusDto, SyncTargetDto,
+    CommitGraphRowDto, CommitResultDto, ConflictSidesDto, DiffDto, ErrorPayload, FileDiffDto,
+    InProgressOperationDto, MergeResultDto, PatchExportDto, PatchPreviewDto, PullOutcomeDto,
+    PullResultDto, RecentRepositoryDto, RemoteDto, RepositoryDto, RepositoryStatusDto,
+    SyncTargetDto,
 };
 
 use crate::state::{AppState, StartupIntent};
@@ -855,6 +857,146 @@ fn push_impl(state: &AppState) -> Result<SyncTargetDto, GitSailError> {
     Ok(SyncTargetDto {
         remote,
         branch: Some(current_branch.as_str().to_string()),
+    })
+}
+
+// -- EPIC-16/T-231..T-233: merge, conflict resolution, continue/abort ----
+//
+// Mirrors `gitsail-tui`'s own T-231/T-232/T-233 wiring one-to-one: `merge`
+// refuses up front when another operation is already pending (US-079
+// criterion 3, enforced by `RepositoryWritePort::merge` itself) and reports
+// fast-forward/merge-commit/conflict as three distinct, explicit
+// [`MergeResultDto`] outcomes (criterion 2) — never a generic success/
+// failure. `detect_in_progress_operation` is what both the frontend's
+// conflicts panel and any future mutation guard reads to know what is
+// actually pending, always freshly re-read (never cached), matching
+// [`gitsail_application::DetectInProgressOperation`]'s own contract.
+
+/// Detects a merge/rebase/cherry-pick/revert/bisect currently in progress
+/// (T-230/US-078), read-only.
+#[tauri::command]
+pub fn detect_in_progress_operation(
+    state: tauri::State<AppState>,
+) -> Result<InProgressOperationDto, ErrorPayload> {
+    detect_in_progress_operation_impl(&state).map_err(|err| ErrorPayload::from(&err))
+}
+
+fn detect_in_progress_operation_impl(
+    state: &AppState,
+) -> Result<InProgressOperationDto, GitSailError> {
+    let (repository, _epoch) = state.repository_with_epoch()?;
+    let operation = DetectInProgressOperation::new(state.port()).execute(&repository)?;
+    Ok(InProgressOperationDto::from(&operation))
+}
+
+/// Integrates `target_revision` into the current branch (T-231/US-079).
+/// `target_revision` is whatever reference the frontend's own search/
+/// selection UI resolved (a branch, tag, or other revision expression),
+/// mirroring `RepositoryReadPort::resolve_revision`'s own free-text
+/// contract.
+#[tauri::command]
+pub fn merge(
+    target_revision: String,
+    state: tauri::State<AppState>,
+) -> Result<MergeResultDto, ErrorPayload> {
+    merge_impl(&state, &target_revision).map_err(|err| ErrorPayload::from(&err))
+}
+
+fn merge_impl(state: &AppState, target_revision: &str) -> Result<MergeResultDto, GitSailError> {
+    let result = run_mutation(state, |repository| {
+        Merge::new(state.write_port()).execute(repository, target_revision)
+    })?;
+    Ok(MergeResultDto::from(&result))
+}
+
+/// Reads one conflicted file's base/ours/theirs sides (T-232/US-080
+/// criterion 2), read-only.
+#[tauri::command]
+pub fn get_conflict_sides(
+    path: String,
+    state: tauri::State<AppState>,
+) -> Result<ConflictSidesDto, ErrorPayload> {
+    get_conflict_sides_impl(&state, &path).map_err(|err| ErrorPayload::from(&err))
+}
+
+fn get_conflict_sides_impl(state: &AppState, path: &str) -> Result<ConflictSidesDto, GitSailError> {
+    let (repository, _epoch) = state.repository_with_epoch()?;
+    let sides =
+        GetConflictSides::new(state.port()).execute(&repository, Path::new(path))?;
+    Ok(ConflictSidesDto::from(&sides))
+}
+
+/// Marks a conflicted file resolved by staging its current working-tree
+/// content (T-232/US-080 criterion 3) — only ever this explicit call, never
+/// inferred by the frontend from the file merely "looking" resolved.
+#[tauri::command]
+pub fn mark_conflict_resolved(path: String, state: tauri::State<AppState>) -> Result<(), ErrorPayload> {
+    mark_conflict_resolved_impl(&state, &path).map_err(|err| ErrorPayload::from(&err))
+}
+
+fn mark_conflict_resolved_impl(state: &AppState, path: &str) -> Result<(), GitSailError> {
+    run_mutation(state, |repository| {
+        MarkConflictResolved::new(state.write_port()).execute(repository, Path::new(path))
+    })
+}
+
+/// Resolves a conflicted file by taking `side` ("ours" or "theirs")
+/// wholesale (T-232/US-080 criterion 3's documented binary-conflict flow —
+/// equally usable for a text file).
+#[tauri::command]
+pub fn take_conflict_side(
+    path: String,
+    side: String,
+    state: tauri::State<AppState>,
+) -> Result<(), ErrorPayload> {
+    take_conflict_side_impl(&state, &path, &side).map_err(|err| ErrorPayload::from(&err))
+}
+
+fn take_conflict_side_impl(state: &AppState, path: &str, side: &str) -> Result<(), GitSailError> {
+    let side = match side {
+        "ours" => ConflictSide::Ours,
+        "theirs" => ConflictSide::Theirs,
+        other => {
+            return Err(GitSailError::new(
+                ErrorCode::InvalidRepositoryState,
+                format!("unknown conflict side '{other}'"),
+            )
+            .with_remediation("pass exactly 'ours' or 'theirs'"))
+        }
+    };
+    run_mutation(state, |repository| {
+        TakeConflictSide::new(state.write_port()).execute(repository, Path::new(path), side)
+    })
+}
+
+/// Resumes whichever operation is currently pending (T-233/US-081). The
+/// real resulting state is never presumed here — the frontend re-calls
+/// `detect_in_progress_operation` afterward to see it (criterion 3), and
+/// this command's own `Ok(())` only means the underlying `git` command
+/// itself exited successfully.
+#[tauri::command]
+pub fn continue_operation(state: tauri::State<AppState>) -> Result<(), ErrorPayload> {
+    continue_operation_impl(&state).map_err(|err| ErrorPayload::from(&err))
+}
+
+fn continue_operation_impl(state: &AppState) -> Result<(), GitSailError> {
+    run_mutation(state, |repository| {
+        ContinueOperation::new(state.write_port()).execute(repository)
+    })
+}
+
+/// Abandons whichever operation is currently pending (T-233/US-081),
+/// restoring the pre-operation state as far as Git itself guarantees.
+/// Matches [`continue_operation`]'s own "never presumed, always
+/// reinspected" contract.
+#[tauri::command]
+pub fn abort_operation(state: tauri::State<AppState>) -> Result<(), ErrorPayload> {
+    abort_operation_impl(&state).map_err(|err| ErrorPayload::from(&err))
+}
+
+fn abort_operation_impl(state: &AppState) -> Result<(), GitSailError> {
+    run_mutation(state, |repository| {
+        AbortOperation::new(state.write_port()).execute(repository)
     })
 }
 
@@ -2785,6 +2927,254 @@ mod tests {
                 "a rejected push must never be silently escalated to a force push — the \
                  remote's state must be exactly what it was before the attempt"
             );
+        }
+    }
+
+    /// EPIC-16/T-231..T-233 against a real, temporary Git repository via the
+    /// real `GitCliProvider` adapter — never a fake — mirroring
+    /// `remote_sync_real_git`'s own fixture conventions.
+    mod merge_conflicts_real_git {
+        use super::*;
+        use gitsail_git::{GitCliProvider, GitProcessRunner, GitProcessRunnerConfig};
+        use std::process::Command as ProcessCommand;
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        struct TempDir(PathBuf);
+
+        impl TempDir {
+            fn new(label: &str) -> Self {
+                static COUNTER: AtomicU32 = AtomicU32::new(0);
+                let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+                let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+                let path = std::env::temp_dir().join(format!("gitsail-desktop-merge-{label}-{nanos}-{n}"));
+                std::fs::create_dir_all(&path).expect("create temp dir");
+                Self(path)
+            }
+
+            fn path(&self) -> &Path {
+                &self.0
+            }
+        }
+
+        impl Drop for TempDir {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+
+        fn git(dir: &Path, args: &[&str]) {
+            let status = ProcessCommand::new("git")
+                .args(args)
+                .current_dir(dir)
+                .env("LC_ALL", "C")
+                .env("LANG", "C")
+                .status()
+                .unwrap_or_else(|e| panic!("failed to spawn git {args:?}: {e}"));
+            assert!(status.success(), "git {args:?} failed in {dir:?}");
+        }
+
+        fn init_repo(label: &str) -> TempDir {
+            let dir = TempDir::new(label);
+            git(dir.path(), &["init", "--quiet", "--initial-branch=main"]);
+            git(dir.path(), &["config", "user.name", "Test User"]);
+            git(dir.path(), &["config", "user.email", "test@example.com"]);
+            dir
+        }
+
+        fn head(dir: &Path) -> String {
+            let output = ProcessCommand::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(dir)
+                .output()
+                .unwrap();
+            String::from_utf8(output.stdout).unwrap().trim().to_string()
+        }
+
+        fn real_app_state() -> AppState {
+            let runner =
+                GitProcessRunner::new(GitProcessRunnerConfig::default()).expect("git runner");
+            let provider = Arc::new(GitCliProvider::new(runner));
+            let port: Arc<dyn gitsail_application::RepositoryReadPort> = provider.clone();
+            let write_port: Arc<dyn gitsail_application::RepositoryWritePort> = provider;
+            AppState::new(port, write_port, InMemoryRecents::shared())
+        }
+
+        /// Sets up two branches that both modify the same line of the same
+        /// file, so merging one into the other reliably conflicts —
+        /// mirrors `gitsail-git`'s and `gitsail-tui`'s own EPIC-16
+        /// integration tests.
+        fn setup_conflicting_divergence(dir: &Path) {
+            std::fs::write(dir.join("f.txt"), "line1\nline2\nline3\n").unwrap();
+            git(dir, &["add", "-A"]);
+            git(dir, &["commit", "--quiet", "-m", "base"]);
+
+            git(dir, &["checkout", "-q", "-b", "feature"]);
+            std::fs::write(dir.join("f.txt"), "line1\nCHANGED-feature\nline3\n").unwrap();
+            git(dir, &["add", "-A"]);
+            git(dir, &["commit", "--quiet", "-m", "feature change"]);
+
+            git(dir, &["checkout", "-q", "main"]);
+            std::fs::write(dir.join("f.txt"), "line1\nCHANGED-main\nline3\n").unwrap();
+            git(dir, &["add", "-A"]);
+            git(dir, &["commit", "--quiet", "-m", "main change"]);
+        }
+
+        #[test]
+        fn merge_fast_forwards_and_detect_reports_nothing_pending() {
+            let dir = init_repo("merge-ff");
+            std::fs::write(dir.path().join("f.txt"), "line1\n").unwrap();
+            git(dir.path(), &["add", "-A"]);
+            git(dir.path(), &["commit", "--quiet", "-m", "base"]);
+            git(dir.path(), &["checkout", "-q", "-b", "feature"]);
+            std::fs::write(dir.path().join("f.txt"), "line1\nline2\n").unwrap();
+            git(dir.path(), &["add", "-A"]);
+            git(dir.path(), &["commit", "--quiet", "-m", "feature change"]);
+            let feature_tip = head(dir.path());
+            git(dir.path(), &["checkout", "-q", "main"]);
+
+            let state = real_app_state();
+            open_repository_impl(&state, dir.path().to_str().unwrap()).unwrap();
+
+            let result = merge_impl(&state, "feature").unwrap();
+
+            match result {
+                MergeResultDto::FastForwarded { new_head } => assert_eq!(new_head, feature_tip),
+                other => panic!("expected FastForwarded, got {other:?}"),
+            }
+            assert_eq!(
+                detect_in_progress_operation_impl(&state).unwrap(),
+                InProgressOperationDto::None
+            );
+        }
+
+        #[test]
+        fn merge_reports_a_conflict_and_the_full_resolve_continue_flow_completes_it() {
+            let dir = init_repo("merge-conflict-flow");
+            setup_conflicting_divergence(dir.path());
+
+            let state = real_app_state();
+            open_repository_impl(&state, dir.path().to_str().unwrap()).unwrap();
+
+            let result = merge_impl(&state, "feature").unwrap();
+            let files = match result {
+                MergeResultDto::Conflict { conflicted_files } => conflicted_files,
+                other => panic!("a conflict must never be reported as {other:?}"),
+            };
+            assert_eq!(files.len(), 1);
+            assert_eq!(files[0].path, "f.txt");
+
+            // T-232 criterion 2: the base/ours/theirs sides can be inspected.
+            let sides = get_conflict_sides_impl(&state, "f.txt").unwrap();
+            assert!(matches!(sides.ours, gitsail_protocol::ConflictSideContentDto::Text { .. }));
+            assert!(matches!(sides.theirs, gitsail_protocol::ConflictSideContentDto::Text { .. }));
+
+            // T-232 criterion 3: resolving is only ever this explicit call —
+            // simulates resolving the conflict outside GitSail, then marking
+            // it resolved.
+            std::fs::write(dir.path().join("f.txt"), "line1\nRESOLVED\nline3\n").unwrap();
+            mark_conflict_resolved_impl(&state, "f.txt").unwrap();
+
+            // T-233 criterion 2/3: continue completes the merge commit, and
+            // the real resulting state is reinspected, never presumed.
+            continue_operation_impl(&state).unwrap();
+            assert_eq!(
+                detect_in_progress_operation_impl(&state).unwrap(),
+                InProgressOperationDto::None
+            );
+            let merged_head = head(dir.path());
+            let parents = ProcessCommand::new("git")
+                .args(["rev-parse", &format!("{merged_head}^1"), &format!("{merged_head}^2")])
+                .current_dir(dir.path())
+                .output()
+                .unwrap();
+            assert!(parents.status.success(), "HEAD must be a two-parent merge commit");
+            assert_eq!(
+                std::fs::read_to_string(dir.path().join("f.txt")).unwrap(),
+                "line1\nRESOLVED\nline3\n"
+            );
+        }
+
+        #[test]
+        fn a_binary_conflict_resolves_via_take_conflict_side() {
+            let dir = init_repo("merge-conflict-binary");
+            std::fs::write(dir.path().join("img.bin"), [0u8, 1, 2, 3]).unwrap();
+            git(dir.path(), &["add", "-A"]);
+            git(dir.path(), &["commit", "--quiet", "-m", "base"]);
+            git(dir.path(), &["checkout", "-q", "-b", "feature"]);
+            std::fs::write(dir.path().join("img.bin"), [0u8, 9, 9, 9]).unwrap();
+            git(dir.path(), &["add", "-A"]);
+            git(dir.path(), &["commit", "--quiet", "-m", "feature binary change"]);
+            git(dir.path(), &["checkout", "-q", "main"]);
+            std::fs::write(dir.path().join("img.bin"), [0u8, 5, 5, 5]).unwrap();
+            git(dir.path(), &["add", "-A"]);
+            git(dir.path(), &["commit", "--quiet", "-m", "main binary change"]);
+
+            let state = real_app_state();
+            open_repository_impl(&state, dir.path().to_str().unwrap()).unwrap();
+            assert!(matches!(
+                merge_impl(&state, "feature").unwrap(),
+                MergeResultDto::Conflict { .. }
+            ));
+
+            take_conflict_side_impl(&state, "img.bin", "theirs").unwrap();
+            assert_eq!(
+                std::fs::read(dir.path().join("img.bin")).unwrap(),
+                vec![0u8, 9, 9, 9]
+            );
+
+            continue_operation_impl(&state).unwrap();
+            assert_eq!(
+                detect_in_progress_operation_impl(&state).unwrap(),
+                InProgressOperationDto::None
+            );
+        }
+
+        #[test]
+        fn aborting_a_pending_merge_restores_head_and_preserves_unrelated_work() {
+            let dir = init_repo("merge-abort");
+            setup_conflicting_divergence(dir.path());
+            let head_before_merge = head(dir.path());
+            std::fs::write(dir.path().join("unrelated.txt"), "unrelated work\n").unwrap();
+
+            let state = real_app_state();
+            open_repository_impl(&state, dir.path().to_str().unwrap()).unwrap();
+            assert!(matches!(
+                merge_impl(&state, "feature").unwrap(),
+                MergeResultDto::Conflict { .. }
+            ));
+
+            abort_operation_impl(&state).unwrap();
+
+            assert_eq!(
+                detect_in_progress_operation_impl(&state).unwrap(),
+                InProgressOperationDto::None
+            );
+            assert_eq!(head(dir.path()), head_before_merge);
+            assert_eq!(
+                std::fs::read_to_string(dir.path().join("unrelated.txt")).unwrap(),
+                "unrelated work\n"
+            );
+        }
+
+        #[test]
+        fn merging_while_another_operation_is_pending_is_refused() {
+            let dir = init_repo("merge-refuses-existing-op");
+            setup_conflicting_divergence(dir.path());
+            // Start a real conflicting merge directly, as another
+            // terminal/editor would.
+            let _ = ProcessCommand::new("git")
+                .args(["merge", "feature"])
+                .current_dir(dir.path())
+                .output()
+                .unwrap();
+
+            let state = real_app_state();
+            open_repository_impl(&state, dir.path().to_str().unwrap()).unwrap();
+
+            let err = merge_impl(&state, "feature").unwrap_err();
+
+            assert_eq!(err.code(), ErrorCode::OperationConflict);
         }
     }
 }

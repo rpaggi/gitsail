@@ -74,6 +74,19 @@ pub enum OperationKind {
     /// reaching this `Confirming` state (US-030 criterion 1: the prompt
     /// always names concrete scope, never a generic "apply a patch").
     ApplyPatch { affected_file_count: usize },
+    /// T-231/US-079: `RepositoryWritePort::merge`. Carries the target
+    /// revision so origin, destination and policy are all shown before
+    /// executing (US-079 criterion 1) — never a generic "merge" prompt.
+    Merge { target: String },
+    /// T-233/US-081: `RepositoryWritePort::continue_operation`. Generic
+    /// across merge/rebase/cherry-pick/revert (the port itself dispatches on
+    /// whatever `InProgressOperation` is actually detected), so this carries
+    /// no per-kind data of its own — mirrors
+    /// `gitsail_application::MutationKind::ContinueOperation`.
+    ContinueOperation,
+    /// T-233/US-081: `RepositoryWritePort::abort_operation`. Mirrors
+    /// `gitsail_application::MutationKind::AbortOperation`.
+    AbortOperation,
 }
 
 impl OperationKind {
@@ -113,6 +126,19 @@ impl OperationKind {
             // mutates the working tree, but never HEAD/the index, and is
             // not irreversible the way a `Destructive` operation is.
             OperationKind::ApplyPatch { .. } => OperationRisk::Moderate,
+            // Mirrors `gitsail_application::MutationKind::Merge`: SAD §20's
+            // own named `Moderate` example includes merge.
+            OperationKind::Merge { .. } => OperationRisk::Moderate,
+            // Mirrors `gitsail_application::MutationKind::ContinueOperation`:
+            // concluding an already-confirmed operation once conflicts are
+            // resolved, the same character `CreateCommit`/`Merge` have.
+            OperationKind::ContinueOperation => OperationRisk::Moderate,
+            // Mirrors `gitsail_application::MutationKind::AbortOperation`:
+            // discards the in-progress operation's own changes (e.g. a
+            // merge's conflict resolutions in progress), so this requires
+            // reinforced confirmation even though Git restores the
+            // pre-operation state rather than losing history outright.
+            OperationKind::AbortOperation => OperationRisk::Destructive,
         }
     }
 
@@ -142,6 +168,9 @@ impl OperationKind {
                     if *affected_file_count == 1 { "" } else { "s" }
                 )
             }
+            OperationKind::Merge { target } => format!("merging '{target}' into the current branch"),
+            OperationKind::ContinueOperation => "the in-progress operation".to_string(),
+            OperationKind::AbortOperation => "the in-progress operation".to_string(),
         }
     }
 }
@@ -303,6 +332,22 @@ mod tests {
             .risk(),
             OperationRisk::Moderate
         );
+    }
+
+    /// T-231/T-233: `Merge`/`ContinueOperation` classify `Moderate` while
+    /// `AbortOperation` classifies `Destructive`, mirroring
+    /// `gitsail_application::MutationKind`'s own classification, and
+    /// `Merge`'s label always names the concrete target revision.
+    #[test]
+    fn merge_and_continue_classify_moderate_while_abort_classifies_destructive() {
+        let merge = OperationKind::Merge {
+            target: "feature/x".into(),
+        };
+        assert_eq!(merge.risk(), OperationRisk::Moderate);
+        assert!(merge.target_label().contains("feature/x"));
+
+        assert_eq!(OperationKind::ContinueOperation.risk(), OperationRisk::Moderate);
+        assert_eq!(OperationKind::AbortOperation.risk(), OperationRisk::Destructive);
     }
 
     #[test]

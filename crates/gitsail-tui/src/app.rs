@@ -16,12 +16,13 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use gitsail_application::{
-    export_patch, ApplyPatchResult, BlameRequest, CommitQuery, DiffRequest, Page, PatchPreview,
-    PullOutcome, RefreshReason, RepositoryReadPort, RepositorySession,
+    export_patch, ApplyPatchResult, BlameRequest, CommitQuery, DiffRequest, MergeResult, Page,
+    PatchPreview, PullOutcome, RefreshReason, RepositoryReadPort, RepositorySession,
 };
 use gitsail_domain::{
-    Blame, Branch, BranchKind, BranchName, Commit, CommitGraph, CommitHash, Diff, ErrorCode,
-    GitSailError, GraphCommit, HeadState, Remote, Repository, RepositoryStatus, Stash, Tag,
+    Blame, Branch, BranchKind, BranchName, Commit, CommitGraph, CommitHash, ConflictSide,
+    ConflictSides, Diff, ErrorCode, GitSailError, GraphCommit, HeadState, InProgressOperation,
+    OperationCapability, Remote, Repository, RepositoryStatus, Stash, Tag,
 };
 
 use crate::action::Action;
@@ -332,6 +333,40 @@ pub struct App {
     should_quit: bool,
     low_color: bool,
     frame_size: (u16, u16),
+
+    // -- EPIC-16/T-231..T-233: merge, conflicts, continue/abort -----------
+    /// The freshest known merge/rebase/cherry-pick/revert/bisect state
+    /// (T-230/US-078), loaded after every refresh and after a merge/
+    /// continue/abort mutation — never assumed from GitSail's own last
+    /// action, so an operation started in another terminal, or the real
+    /// outcome of a just-run continue/abort (US-081 criterion 3: "resultado
+    /// real é reinspecionado"), is always what is actually shown.
+    in_progress_operation: InProgressOperation,
+    /// Whether the conflicts overlay (`M`) is open. A no-op to open when
+    /// [`Self::in_progress_operation`] has no conflicted files (T-232/
+    /// US-080 criterion 1).
+    conflicts_open: bool,
+    /// Which conflicted file (an index into
+    /// `in_progress_operation.conflicted_files()`) is highlighted in the
+    /// overlay.
+    conflict_cursor: usize,
+    /// The base/ours/theirs sides last loaded for inspection (T-232/US-080
+    /// criterion 2), cleared whenever the highlighted file changes or a
+    /// resolution action runs, so a stale inspection can never be mistaken
+    /// for the newly selected file's content.
+    inspected_conflict: Option<ConflictSides>,
+    /// A failure from loading conflict sides or resolving a conflict,
+    /// shown inline in the overlay — side-channel like
+    /// [`Self::patch_export`], not modeled through [`OperationState`] since
+    /// mark-resolved/take-side dispatch immediately (mirrors
+    /// [`Self::request_toggle_stage`]'s `Safe`-risk "skip confirmation"
+    /// convention) rather than going through a confirm step.
+    conflict_error: Option<GitSailError>,
+    /// The outcome of the last successful [`Action::RequestMerge`] (T-231/
+    /// US-079 criterion 2: fast-forward, merge commit and conflict are
+    /// always three distinct, explicit outcomes) — mirrors
+    /// [`Self::last_pull_outcome`]'s own "transient banner" convention.
+    last_merge_result: Option<MergeResult>,
 }
 
 impl App {
@@ -420,6 +455,12 @@ impl App {
             should_quit: false,
             low_color,
             frame_size: (0, 0),
+            in_progress_operation: InProgressOperation::None,
+            conflicts_open: false,
+            conflict_cursor: 0,
+            inspected_conflict: None,
+            conflict_error: None,
+            last_merge_result: None,
         };
         (app, vec![Command::OpenRepository(repo_path)])
     }
@@ -460,6 +501,33 @@ impl App {
 
     pub fn operation(&self) -> &OperationState {
         &self.operation
+    }
+
+    /// The freshest known in-progress-operation state (T-230/US-078),
+    /// consumed by both the TUI's own conflicts overlay and (once wired) any
+    /// mutation guard.
+    pub fn in_progress_operation(&self) -> &InProgressOperation {
+        &self.in_progress_operation
+    }
+
+    pub fn conflicts_open(&self) -> bool {
+        self.conflicts_open
+    }
+
+    pub fn conflict_cursor(&self) -> usize {
+        self.conflict_cursor
+    }
+
+    pub fn inspected_conflict(&self) -> Option<&ConflictSides> {
+        self.inspected_conflict.as_ref()
+    }
+
+    pub fn conflict_error(&self) -> Option<&GitSailError> {
+        self.conflict_error.as_ref()
+    }
+
+    pub fn last_merge_result(&self) -> Option<&MergeResult> {
+        self.last_merge_result.as_ref()
     }
 
     pub fn should_quit(&self) -> bool {
@@ -713,6 +781,14 @@ impl App {
             InputContext::CommitDetails
         } else if self.reference_details_open {
             InputContext::ReferenceDetails
+        } else if self.conflicts_open && self.operation.is_idle() {
+            // Falls through to `Normal` while a merge/continue/abort
+            // confirmation is in flight (`operation` not idle), exactly
+            // like `commit_message` above does for the commit composer —
+            // the second `Enter` that confirms it must reach
+            // `Self::handle_activate`'s intercept, not `InputContext::
+            // Conflicts`'s own (unrelated) `Enter` meaning.
+            InputContext::Conflicts
         } else if self.commit_message.is_some() && self.operation.is_idle() {
             InputContext::CommitMessage
         } else if self.branch_input.is_some() && self.rename_source.is_some() {
@@ -871,6 +947,26 @@ impl App {
                 Vec::new()
             }
             Action::RequestApplyPatch => self.request_apply_patch(),
+            Action::RequestMerge => {
+                self.request_merge();
+                Vec::new()
+            }
+            Action::ToggleConflictsPanel => {
+                self.toggle_conflicts_panel();
+                Vec::new()
+            }
+            Action::InspectConflict => self.inspect_conflict(),
+            Action::MarkConflictResolved => self.request_mark_conflict_resolved(),
+            Action::TakeConflictSideOurs => self.request_take_conflict_side(ConflictSide::Ours),
+            Action::TakeConflictSideTheirs => self.request_take_conflict_side(ConflictSide::Theirs),
+            Action::RequestContinueOperation => {
+                self.request_continue_operation();
+                Vec::new()
+            }
+            Action::RequestAbortOperation => {
+                self.request_abort_operation();
+                Vec::new()
+            }
         }
     }
 
@@ -883,6 +979,18 @@ impl App {
     }
 
     fn move_cursor(&mut self, delta: i32) -> Vec<Command> {
+        if self.conflicts_open {
+            let len = self.in_progress_operation.conflicted_files().len();
+            let next = Self::cyclic_cursor(self.conflict_cursor, delta, len);
+            if next != self.conflict_cursor {
+                // A different file is now highlighted — the previously
+                // inspected sides no longer describe it.
+                self.inspected_conflict = None;
+                self.conflict_error = None;
+            }
+            self.conflict_cursor = next;
+            return Vec::new();
+        }
         match self.focus {
             Panel::Sidebar => {
                 self.sidebar_cursor =
@@ -1267,6 +1375,10 @@ impl App {
             self.sidebar_cursor = 0;
         } else if self.patch_export.is_some() {
             self.patch_export = None;
+        } else if self.conflicts_open {
+            self.conflicts_open = false;
+            self.inspected_conflict = None;
+            self.conflict_error = None;
         } else if self.sync_error.is_some() {
             self.sync_error = None;
         } else {
@@ -1516,6 +1628,141 @@ impl App {
         Vec::new()
     }
 
+    /// Starts confirmation for merging the highlighted reference into the
+    /// current branch (T-231/US-079 criterion 1: origin — the current
+    /// branch — destination and policy — a plain, non-force merge — are all
+    /// shown by the resulting confirmation prompt before anything runs).
+    /// Reuses exactly the Sidebar's branch search/selection mechanism
+    /// [`Self::request_checkout`] already uses, rather than a bespoke
+    /// picker. Unlike checkout, merging the current branch into itself is
+    /// left to Git's own harmless "Already up to date" handling rather than
+    /// refused as a no-op here.
+    fn request_merge(&mut self) {
+        if self.focus != Panel::Sidebar {
+            return;
+        }
+        let Some(branch) = self
+            .filtered_branches()
+            .get(self.sidebar_cursor)
+            .map(|b| (*b).clone())
+        else {
+            return;
+        };
+        self.last_merge_result = None;
+        self.operation.begin(OperationKind::Merge {
+            target: branch.name.as_str().to_string(),
+        });
+    }
+
+    /// Opens or closes the conflicts overlay (`M`, T-232/US-080 criterion 1;
+    /// T-233/US-081). A no-op to open when nothing currently has conflicted
+    /// files — there would be nothing to show.
+    fn toggle_conflicts_panel(&mut self) {
+        if self.conflicts_open {
+            self.conflicts_open = false;
+            self.inspected_conflict = None;
+            self.conflict_error = None;
+            return;
+        }
+        if !self.in_progress_operation.has_conflicts() {
+            return;
+        }
+        self.conflicts_open = true;
+        self.conflict_cursor = 0;
+        self.inspected_conflict = None;
+        self.conflict_error = None;
+    }
+
+    /// Loads the base/ours/theirs sides of the conflicted file under the
+    /// overlay's cursor (T-232/US-080 criterion 2).
+    fn inspect_conflict(&mut self) -> Vec<Command> {
+        let Some(session) = self.session.as_ref() else {
+            return Vec::new();
+        };
+        let Some(file) = self
+            .in_progress_operation
+            .conflicted_files()
+            .get(self.conflict_cursor)
+        else {
+            return Vec::new();
+        };
+        let repo = session.repository().clone();
+        let path = file.path.clone();
+        vec![Command::LoadConflictSides(repo, path)]
+    }
+
+    /// Marks the conflicted file under the overlay's cursor resolved by
+    /// staging its current working-tree content (T-232/US-080 criterion 3).
+    /// Dispatches immediately, without a confirmation step — this task's own
+    /// [`crate::operation::OperationKind`] scope deliberately does not model
+    /// this mutation as a confirmable operation (mirrors
+    /// [`Self::request_toggle_stage`]'s `Safe`-risk convention;
+    /// `gitsail_application::MutationKind::MarkConflictResolved` is
+    /// classified `Safe` for the same reason `git add` itself is).
+    fn request_mark_conflict_resolved(&mut self) -> Vec<Command> {
+        let Some(session) = self.session.as_ref() else {
+            return Vec::new();
+        };
+        let Some(file) = self
+            .in_progress_operation
+            .conflicted_files()
+            .get(self.conflict_cursor)
+        else {
+            return Vec::new();
+        };
+        let repo = session.repository().clone();
+        let path = file.path.clone();
+        vec![Command::MarkConflictResolved(repo, path)]
+    }
+
+    /// Resolves the conflicted file under the overlay's cursor by taking
+    /// `side` wholesale (T-232/US-080 criterion 3's documented
+    /// binary-conflict flow). Dispatches immediately, matching
+    /// [`Self::request_mark_conflict_resolved`]'s own reasoning.
+    fn request_take_conflict_side(&mut self, side: ConflictSide) -> Vec<Command> {
+        let Some(session) = self.session.as_ref() else {
+            return Vec::new();
+        };
+        let Some(file) = self
+            .in_progress_operation
+            .conflicted_files()
+            .get(self.conflict_cursor)
+        else {
+            return Vec::new();
+        };
+        let repo = session.repository().clone();
+        let path = file.path.clone();
+        vec![Command::TakeConflictSide(repo, path, side)]
+    }
+
+    /// Starts confirmation to continue the pending operation (T-233/US-081
+    /// criterion 1: only offered when actually supported). A no-op
+    /// otherwise — mirrors [`Self::request_checkout`]'s "no-op on the
+    /// current branch" convention for an action that would not make sense
+    /// right now.
+    fn request_continue_operation(&mut self) {
+        if !self
+            .in_progress_operation
+            .supports(OperationCapability::Continue)
+        {
+            return;
+        }
+        self.operation.begin(OperationKind::ContinueOperation);
+    }
+
+    /// Starts confirmation to abort the pending operation (T-233/US-081
+    /// criterion 1). A no-op when abort is not offered for whatever is
+    /// currently detected.
+    fn request_abort_operation(&mut self) {
+        if !self
+            .in_progress_operation
+            .supports(OperationCapability::Abort)
+        {
+            return;
+        }
+        self.operation.begin(OperationKind::AbortOperation);
+    }
+
     /// Starts T-163/US-030's apply-patch flow (`Y`, Diff panel only,
     /// mirroring [`Self::export_patch`]'s own `y`-gating): reads the
     /// clipboard and, if it has usable text, dispatches the non-mutating
@@ -1632,6 +1879,9 @@ impl App {
                 let patch_text = std::mem::take(&mut self.pending_patch_text).unwrap_or_default();
                 vec![Command::ApplyPatch(repo, patch_text)]
             }
+            OperationKind::Merge { target } => vec![Command::Merge(repo, target)],
+            OperationKind::ContinueOperation => vec![Command::ContinueOperation(repo)],
+            OperationKind::AbortOperation => vec![Command::AbortOperation(repo)],
         }
     }
 
@@ -1647,7 +1897,8 @@ impl App {
             Command::LoadBranches(generation, repo.clone()),
             Command::LoadTags(generation, repo.clone()),
             Command::LoadRemotes(generation, repo.clone()),
-            Command::LoadStashEntries(generation, repo),
+            Command::LoadStashEntries(generation, repo.clone()),
+            Command::LoadInProgressOperation(generation, repo),
         ]
     }
 
@@ -1683,6 +1934,12 @@ impl App {
                 self.last_pull_outcome = None;
                 self.patch_apply_outcome = None;
                 self.pending_patch_text = None;
+                self.in_progress_operation = InProgressOperation::None;
+                self.conflicts_open = false;
+                self.conflict_cursor = 0;
+                self.inspected_conflict = None;
+                self.conflict_error = None;
+                self.last_merge_result = None;
 
                 let mut commands = vec![
                     Command::RefreshStatus(ticket, repo.clone()),
@@ -1690,6 +1947,7 @@ impl App {
                     Command::LoadTags(generation, repo.clone()),
                     Command::LoadRemotes(generation, repo.clone()),
                     Command::LoadStashEntries(generation, repo.clone()),
+                    Command::LoadInProgressOperation(generation, repo.clone()),
                 ];
                 commands.extend(self.restart_commit_graph(CommitQuery::default()));
                 commands
@@ -1878,6 +2136,154 @@ impl App {
         if let Ok(stashes) = result {
             self.stashes = stashes;
             self.clamp_reference_cursor();
+        }
+    }
+
+    /// Handles [`crate::message::Message::InProgressOperationLoaded`]
+    /// (T-230/US-078, presentation side of T-231/T-233), matching
+    /// [`Self::on_tags_loaded`]'s staleness discipline. Never inferred from
+    /// GitSail's own last action — always this freshly re-read state (US-078
+    /// criterion 2; US-081 criterion 3) — so a merge/rebase/... started in
+    /// another terminal, or the real aftermath of a continue/abort this
+    /// session just ran, is always what ends up shown. Closes the conflicts
+    /// overlay and clamps its cursor once the underlying operation/conflict
+    /// list has actually changed, so it can never keep pointing past the end
+    /// of a shorter list or linger open once nothing is pending anymore.
+    pub fn on_in_progress_operation_loaded(
+        &mut self,
+        generation: u64,
+        result: Result<InProgressOperation, GitSailError>,
+    ) {
+        let Some(session) = self.session.as_ref() else {
+            return;
+        };
+        if session.generation() != generation {
+            return;
+        }
+        let Ok(operation) = result else {
+            return;
+        };
+        if operation.is_none() {
+            self.conflicts_open = false;
+            self.conflict_cursor = 0;
+            self.inspected_conflict = None;
+            self.conflict_error = None;
+        } else {
+            let len = operation.conflicted_files().len();
+            if len == 0 {
+                self.conflict_cursor = 0;
+            } else if self.conflict_cursor >= len {
+                self.conflict_cursor = len - 1;
+            }
+        }
+        self.in_progress_operation = operation;
+    }
+
+    /// Handles [`crate::message::Message::MergeFinished`] (T-231/US-079).
+    /// Success records the [`MergeResult`] (criterion 2: fast-forward,
+    /// merge-commit and conflict are always shown as three distinct,
+    /// explicit outcomes — never collapsed into a bare success, and a
+    /// conflict is never reported as one either) and refreshes, which is
+    /// also what picks up the resulting `InProgressOperation::Merge` when
+    /// the result was [`MergeResult::Conflict`] (criterion 3). A refused
+    /// merge (e.g. another operation already in progress, or local changes
+    /// that would be overwritten) moves to `Failed` with its message,
+    /// exactly like [`Self::on_pull_finished`].
+    pub fn on_merge_finished(&mut self, result: Result<MergeResult, GitSailError>) -> Vec<Command> {
+        match result {
+            Ok(outcome) => {
+                self.operation.succeed();
+                self.last_merge_result = Some(outcome);
+                self.refresh_commands_for(RefreshReason::AfterMutation)
+            }
+            Err(error) => {
+                self.operation.fail(error);
+                Vec::new()
+            }
+        }
+    }
+
+    /// Handles [`crate::message::Message::ConflictSidesLoaded`] (T-232/
+    /// US-080 criterion 2), discarding a result for a conflicted file no
+    /// longer under the cursor — mirrors [`Self::on_diff_loaded`]'s
+    /// staleness discipline, keyed by path (conflict inspection has no
+    /// monotonic request id of its own).
+    pub fn on_conflict_sides_loaded(
+        &mut self,
+        path: PathBuf,
+        result: Result<ConflictSides, GitSailError>,
+    ) {
+        let Some(current) = self
+            .in_progress_operation
+            .conflicted_files()
+            .get(self.conflict_cursor)
+        else {
+            return;
+        };
+        if current.path != path {
+            return;
+        }
+        match result {
+            Ok(sides) => {
+                self.inspected_conflict = Some(sides);
+                self.conflict_error = None;
+            }
+            Err(error) => {
+                self.conflict_error = Some(error);
+            }
+        }
+    }
+
+    /// Handles [`crate::message::Message::ConflictResolutionFinished`]
+    /// (T-232/US-080 criterion 3): a `MarkConflictResolved`/
+    /// `TakeConflictSide` [`Command`] completed. Success refreshes — which
+    /// re-reads the conflicted-file list, so a resolved file disappears from
+    /// the overlay only once Git's own index genuinely reports it resolved,
+    /// never presumed here. Failure is shown inline in the overlay rather
+    /// than through [`OperationState`] (these two mutations dispatch without
+    /// a confirmation step — see [`Self::request_mark_conflict_resolved`]'s
+    /// doc).
+    pub fn on_conflict_resolution_finished(
+        &mut self,
+        result: Result<(), GitSailError>,
+    ) -> Vec<Command> {
+        match result {
+            Ok(()) => {
+                self.inspected_conflict = None;
+                self.conflict_error = None;
+                self.refresh_commands_for(RefreshReason::AfterMutation)
+            }
+            Err(error) => {
+                self.conflict_error = Some(error);
+                Vec::new()
+            }
+        }
+    }
+
+    /// Handles [`crate::message::Message::OperationResolutionFinished`]
+    /// (T-233/US-081): a `ContinueOperation`/`AbortOperation` [`Command`]
+    /// completed. This message alone only means the Git command itself
+    /// exited successfully — it is never treated as "the operation is now
+    /// fully concluded" on its own; the refresh this triggers reloads
+    /// [`Self::in_progress_operation`] fresh, and *that* subsequent result is
+    /// what actually tells the overlay whether the operation is really gone
+    /// (US-081 criterion 3: "resultado real é reinspecionado"). A refused
+    /// continue (e.g. conflicts remain) or abort (e.g. nothing pending)
+    /// moves to `Failed` with its message, exactly like
+    /// [`Self::on_pull_finished`].
+    pub fn on_operation_resolution_finished(
+        &mut self,
+        result: Result<(), GitSailError>,
+    ) -> Vec<Command> {
+        match result {
+            Ok(()) => {
+                self.operation.succeed();
+                self.refresh_commands_for(RefreshReason::AfterMutation)
+            }
+            Err(error) => {
+                self.operation.fail(error);
+                Vec::new()
+            }
         }
     }
 
@@ -3634,5 +4040,389 @@ mod tests {
         }
         app.update(Action::Activate);
         assert!(!app.reference_details_open());
+    }
+
+    // -----------------------------------------------------------------
+    // EPIC-16/T-231..T-233: merge, conflicts, continue/abort.
+    // -----------------------------------------------------------------
+
+    fn sample_merge_operation(conflicted: Vec<gitsail_domain::ConflictedFile>) -> InProgressOperation {
+        InProgressOperation::Merge(gitsail_domain::MergeOperation {
+            heads: vec![CommitHash::new("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef").unwrap()],
+            conflicted_files: conflicted,
+            capabilities: vec![OperationCapability::Continue, OperationCapability::Abort],
+        })
+    }
+
+    fn sample_conflicted_file(path: &str) -> gitsail_domain::ConflictedFile {
+        gitsail_domain::ConflictedFile {
+            path: PathBuf::from(path),
+            stage: gitsail_domain::ConflictStage::BothModified,
+        }
+    }
+
+    #[test]
+    fn requesting_merge_from_the_sidebar_begins_confirmation_naming_the_selected_branch() {
+        let (mut app, _port) = new_app();
+        open_with_branches_and_remotes(
+            &mut app,
+            vec![sample_branch("main", true), sample_branch("develop", false)],
+            vec![],
+        );
+        app.update(Action::MoveDown); // highlight "develop"
+
+        app.update(Action::RequestMerge);
+
+        match app.operation() {
+            OperationState::Confirming(OperationKind::Merge { target }) => {
+                assert_eq!(target, "develop");
+            }
+            other => panic!("expected Confirming(Merge), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn confirming_a_merge_dispatches_the_merge_command_with_the_exact_target() {
+        let (mut app, _port) = new_app();
+        open_with_branches_and_remotes(
+            &mut app,
+            vec![sample_branch("main", true), sample_branch("develop", false)],
+            vec![],
+        );
+        app.update(Action::MoveDown);
+        app.update(Action::RequestMerge);
+
+        let commands = app.update(Action::Activate);
+        match commands.as_slice() {
+            [Command::Merge(_, target)] => assert_eq!(target, "develop"),
+            other => panic!("expected exactly one Merge command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_successful_fast_forward_merge_records_its_outcome_and_refreshes() {
+        let (mut app, _port) = new_app();
+        open_with_branches_and_remotes(
+            &mut app,
+            vec![sample_branch("main", true), sample_branch("develop", false)],
+            vec![],
+        );
+        app.update(Action::MoveDown);
+        app.update(Action::RequestMerge);
+        app.update(Action::Activate);
+
+        let new_head = CommitHash::new("cafef00dcafef00dcafef00dcafef00dcafef00").unwrap();
+        let commands = app.on_merge_finished(Ok(MergeResult::FastForwarded {
+            new_head: new_head.clone(),
+        }));
+
+        assert!(
+            commands
+                .iter()
+                .any(|c| matches!(c, Command::RefreshStatus(_, _))),
+            "a successful merge must refresh"
+        );
+        assert!(
+            commands
+                .iter()
+                .any(|c| matches!(c, Command::LoadInProgressOperation(_, _))),
+            "a successful merge must reinspect in-progress-operation state"
+        );
+        assert_eq!(
+            app.last_merge_result(),
+            Some(&MergeResult::FastForwarded { new_head })
+        );
+        assert!(matches!(app.operation(), OperationState::Succeeded(_)));
+    }
+
+    /// A conflict is a legitimate `Ok` outcome (US-079 criterion 2/3), never
+    /// collapsed into `on_merge_finished`'s error path — but it must still
+    /// be told apart from a plain merge by whatever renders
+    /// [`App::last_merge_result`], never presented as an unqualified
+    /// "success".
+    #[test]
+    fn a_conflicting_merge_is_reported_as_a_distinct_outcome_never_a_generic_failure() {
+        let (mut app, _port) = new_app();
+        open_with_branches_and_remotes(
+            &mut app,
+            vec![sample_branch("main", true), sample_branch("develop", false)],
+            vec![],
+        );
+        app.update(Action::MoveDown);
+        app.update(Action::RequestMerge);
+        app.update(Action::Activate);
+
+        let files = vec![sample_conflicted_file("f.txt")];
+        let commands = app.on_merge_finished(Ok(MergeResult::Conflict {
+            files: files.clone(),
+        }));
+
+        assert!(!commands.is_empty(), "a conflict result must still refresh");
+        match app.last_merge_result() {
+            Some(MergeResult::Conflict { files: got }) => assert_eq!(got, &files),
+            other => panic!("expected Some(Conflict), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_refused_merge_never_refreshes_or_records_an_outcome() {
+        let (mut app, _port) = new_app();
+        open_with_branches_and_remotes(
+            &mut app,
+            vec![sample_branch("main", true), sample_branch("develop", false)],
+            vec![],
+        );
+        app.update(Action::MoveDown);
+        app.update(Action::RequestMerge);
+        app.update(Action::Activate);
+
+        let commands = app.on_merge_finished(Err(GitSailError::new(
+            ErrorCode::OperationConflict,
+            "a rebase is already in progress",
+        )));
+
+        assert!(commands.is_empty(), "a refused merge must never refresh");
+        assert!(matches!(app.operation(), OperationState::Failed(_, _)));
+        assert!(app.last_merge_result().is_none());
+    }
+
+    #[test]
+    fn in_progress_operation_loaded_updates_state_and_clamps_a_shrunk_conflict_cursor() {
+        let (mut app, _port) = new_app();
+        app.on_repository_opened(Ok(sample_repository()));
+        let generation = app.session().unwrap().generation();
+
+        let files = vec![sample_conflicted_file("a.txt"), sample_conflicted_file("b.txt")];
+        app.on_in_progress_operation_loaded(generation, Ok(sample_merge_operation(files)));
+        app.toggle_conflicts_panel();
+        app.move_cursor(1); // cursor at index 1 ("b.txt")
+        assert_eq!(app.conflict_cursor(), 1);
+
+        // A fresh load reports only one conflicted file left (the other was
+        // resolved) — the cursor must never keep pointing past the end.
+        let shrunk = vec![sample_conflicted_file("a.txt")];
+        app.on_in_progress_operation_loaded(generation, Ok(sample_merge_operation(shrunk)));
+        assert_eq!(app.conflict_cursor(), 0);
+
+        // Once nothing is pending, the overlay closes itself rather than
+        // linger open over an empty list.
+        app.on_in_progress_operation_loaded(generation, Ok(InProgressOperation::None));
+        assert!(!app.conflicts_open());
+    }
+
+    #[test]
+    fn toggle_conflicts_panel_is_a_no_op_without_any_conflicted_files() {
+        let (mut app, _port) = new_app();
+        app.on_repository_opened(Ok(sample_repository()));
+
+        app.toggle_conflicts_panel();
+
+        assert!(
+            !app.conflicts_open(),
+            "opening the overlay with nothing conflicted must be a no-op"
+        );
+    }
+
+    #[test]
+    fn toggle_conflicts_panel_opens_when_conflicts_exist_and_closes_on_dismiss() {
+        let (mut app, _port) = new_app();
+        app.on_repository_opened(Ok(sample_repository()));
+        let generation = app.session().unwrap().generation();
+        app.on_in_progress_operation_loaded(
+            generation,
+            Ok(sample_merge_operation(vec![sample_conflicted_file("a.txt")])),
+        );
+
+        app.toggle_conflicts_panel();
+        assert!(app.conflicts_open());
+
+        app.update(Action::Dismiss);
+        assert!(!app.conflicts_open());
+    }
+
+    #[test]
+    fn requesting_mark_conflict_resolved_dispatches_for_the_file_under_the_cursor() {
+        let (mut app, _port) = new_app();
+        app.on_repository_opened(Ok(sample_repository()));
+        let generation = app.session().unwrap().generation();
+        app.on_in_progress_operation_loaded(
+            generation,
+            Ok(sample_merge_operation(vec![
+                sample_conflicted_file("a.txt"),
+                sample_conflicted_file("b.txt"),
+            ])),
+        );
+        app.toggle_conflicts_panel();
+        app.move_cursor(1);
+
+        let commands = app.update(Action::MarkConflictResolved);
+
+        match commands.as_slice() {
+            [Command::MarkConflictResolved(_, path)] => assert_eq!(path, &PathBuf::from("b.txt")),
+            other => panic!("expected exactly one MarkConflictResolved command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn requesting_take_conflict_side_dispatches_the_exact_side_for_the_cursor() {
+        let (mut app, _port) = new_app();
+        app.on_repository_opened(Ok(sample_repository()));
+        let generation = app.session().unwrap().generation();
+        app.on_in_progress_operation_loaded(
+            generation,
+            Ok(sample_merge_operation(vec![sample_conflicted_file("img.bin")])),
+        );
+        app.toggle_conflicts_panel();
+
+        let commands = app.update(Action::TakeConflictSideTheirs);
+
+        match commands.as_slice() {
+            [Command::TakeConflictSide(_, path, side)] => {
+                assert_eq!(path, &PathBuf::from("img.bin"));
+                assert_eq!(*side, ConflictSide::Theirs);
+            }
+            other => panic!("expected exactly one TakeConflictSide command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn conflict_resolution_success_refreshes_and_clears_the_inspected_sides() {
+        let (mut app, _port) = new_app();
+        app.on_repository_opened(Ok(sample_repository()));
+        let generation = app.session().unwrap().generation();
+        app.on_in_progress_operation_loaded(
+            generation,
+            Ok(sample_merge_operation(vec![sample_conflicted_file("a.txt")])),
+        );
+        app.on_conflict_sides_loaded(
+            PathBuf::from("a.txt"),
+            Ok(ConflictSides {
+                path: PathBuf::from("a.txt"),
+                base: gitsail_domain::ConflictSideContent::Text("base".into()),
+                ours: gitsail_domain::ConflictSideContent::Text("ours".into()),
+                theirs: gitsail_domain::ConflictSideContent::Text("theirs".into()),
+            }),
+        );
+        assert!(app.inspected_conflict().is_some());
+
+        let commands = app.on_conflict_resolution_finished(Ok(()));
+
+        assert!(app.inspected_conflict().is_none());
+        assert!(commands
+            .iter()
+            .any(|c| matches!(c, Command::LoadInProgressOperation(_, _))));
+    }
+
+    #[test]
+    fn conflict_resolution_failure_is_shown_inline_without_refreshing() {
+        let (mut app, _port) = new_app();
+        app.on_repository_opened(Ok(sample_repository()));
+
+        let commands = app.on_conflict_resolution_finished(Err(GitSailError::new(
+            ErrorCode::InvalidRepositoryState,
+            "path is not currently conflicted",
+        )));
+
+        assert!(commands.is_empty());
+        assert!(app.conflict_error().is_some());
+    }
+
+    #[test]
+    fn request_continue_operation_refuses_when_the_detected_operation_does_not_support_it() {
+        let (mut app, _port) = new_app();
+        app.on_repository_opened(Ok(sample_repository()));
+        let generation = app.session().unwrap().generation();
+        // A bisect run supports Skip/Abort but never Continue (mirrors
+        // `gitsail-git`'s own real detection).
+        app.on_in_progress_operation_loaded(
+            generation,
+            Ok(InProgressOperation::BisectRun(gitsail_domain::BisectOperation {
+                conflicted_files: vec![],
+                capabilities: vec![OperationCapability::Skip, OperationCapability::Abort],
+            })),
+        );
+
+        app.request_continue_operation();
+
+        assert!(
+            app.operation().is_idle(),
+            "continue must never be offered when the detected operation does not support it"
+        );
+    }
+
+    #[test]
+    fn request_continue_and_abort_begin_confirmation_when_supported() {
+        let (mut app, _port) = new_app();
+        app.on_repository_opened(Ok(sample_repository()));
+        let generation = app.session().unwrap().generation();
+        app.on_in_progress_operation_loaded(
+            generation,
+            Ok(sample_merge_operation(vec![])),
+        );
+
+        app.request_continue_operation();
+        assert!(matches!(
+            app.operation(),
+            OperationState::Confirming(OperationKind::ContinueOperation)
+        ));
+        let commands = app.update(Action::Activate);
+        assert!(matches!(commands.as_slice(), [Command::ContinueOperation(_)]));
+
+        app.operation.cancel();
+        app.request_abort_operation();
+        assert!(matches!(
+            app.operation(),
+            OperationState::Confirming(OperationKind::AbortOperation)
+        ));
+        let commands = app.update(Action::Activate);
+        assert!(matches!(commands.as_slice(), [Command::AbortOperation(_)]));
+    }
+
+    #[test]
+    fn operation_resolution_never_presumes_success_the_next_load_is_what_tells_the_truth() {
+        let (mut app, _port) = new_app();
+        app.on_repository_opened(Ok(sample_repository()));
+        let generation = app.session().unwrap().generation();
+        app.on_in_progress_operation_loaded(generation, Ok(sample_merge_operation(vec![])));
+        app.request_continue_operation();
+        app.update(Action::Activate);
+
+        let commands = app.on_operation_resolution_finished(Ok(()));
+        assert!(commands
+            .iter()
+            .any(|c| matches!(c, Command::LoadInProgressOperation(_, _))));
+        // Still whatever was last loaded — `on_operation_resolution_finished`
+        // itself never assumes the merge is gone.
+        assert!(matches!(
+            app.in_progress_operation(),
+            InProgressOperation::Merge(_)
+        ));
+
+        // The real state, once reinspected, is what actually clears it —
+        // against the *new* generation `refresh_commands_for` (triggered by
+        // `on_operation_resolution_finished` above) bumped to, exactly like
+        // a stale result for an older generation must be discarded
+        // elsewhere in this module.
+        let latest_generation = app.session().unwrap().generation();
+        app.on_in_progress_operation_loaded(latest_generation, Ok(InProgressOperation::None));
+        assert!(app.in_progress_operation().is_none());
+    }
+
+    #[test]
+    fn a_refused_continue_or_abort_fails_without_refreshing() {
+        let (mut app, _port) = new_app();
+        app.on_repository_opened(Ok(sample_repository()));
+        let generation = app.session().unwrap().generation();
+        app.on_in_progress_operation_loaded(generation, Ok(sample_merge_operation(vec![])));
+        app.request_continue_operation();
+        app.update(Action::Activate);
+
+        let commands = app.on_operation_resolution_finished(Err(GitSailError::new(
+            ErrorCode::OperationConflict,
+            "unresolved conflicted files remain",
+        )));
+
+        assert!(commands.is_empty());
+        assert!(matches!(app.operation(), OperationState::Failed(_, _)));
     }
 }

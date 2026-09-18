@@ -20,18 +20,19 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use gitsail_application::{
-    ApplyPatchResult, BlameRequest, CommitQuery, DiffRequest, LineHistoryRequest, Page,
-    PatchPreview, Precondition, PullOutcome, RepositoryReadPort, RepositoryWritePort,
+    ApplyPatchResult, BlameRequest, CommitQuery, DiffRequest, LineHistoryRequest, MergeResult,
+    Page, PatchPreview, Precondition, PullOutcome, RepositoryReadPort, RepositoryWritePort,
     StashApplyOutcome, StashScope, TagAnnotation, WorktreeBranchSpec,
 };
 use gitsail_domain::{
     BisectOperation, Blame, BlameLine, BlameOrigin, Branch, BranchKind, BranchName, ChangeType,
-    Commit, CommitHash, ConflictStage, ConflictedFile, Decoration, Diff, DiffHunk, DiffLine,
-    DiffLineOrigin, ErrorCode, FileChange, FileContentAtRevision, FileContentKind, FileDiff,
-    FileStatusCode, GitSailError, GitTimestamp, HeadState, InProgressOperation, LineHistory,
-    LineHistoryEntry, MergeOperation, OperationCapability, RebaseOperation, Remote, RemoteUrl,
-    Repository, RepositoryId, RepositoryStatus, SequencerOperation, ShortHash, Signature, Stash,
-    Tag, TagKind, Worktree, WorktreeHead,
+    Commit, CommitHash, ConflictSide, ConflictSideContent, ConflictSides, ConflictStage,
+    ConflictedFile, Decoration, Diff, DiffHunk, DiffLine, DiffLineOrigin, ErrorCode, FileChange,
+    FileContentAtRevision, FileContentKind, FileDiff, FileStatusCode, GitSailError, GitTimestamp,
+    HeadState, InProgressOperation, LineHistory, LineHistoryEntry, MergeOperation,
+    OperationCapability, RebaseOperation, Remote, RemoteUrl, Repository, RepositoryId,
+    RepositoryStatus, SequencerOperation, ShortHash, Signature, Stash, Tag, TagKind, Worktree,
+    WorktreeHead,
 };
 
 use crate::runner::{CancellationToken, GitProcessRunner, ProcessOutput, ProcessRequest};
@@ -273,6 +274,27 @@ impl GitCliProvider {
                 })
             })
             .collect()
+    }
+
+    /// Reads one index stage (1: base, 2: ours, 3: theirs) of `path` via
+    /// `git show :<stage>:<path>` (T-232/US-080 criterion 2). See
+    /// [`RepositoryReadPort::conflict_sides`] for the full contract.
+    fn read_conflict_stage(
+        &self,
+        repo: &Repository,
+        stage: u8,
+        path: &Path,
+    ) -> Result<ConflictSideContent, GitSailError> {
+        let object = format!(":{stage}:{}", path.to_string_lossy());
+        let args = vec!["show".to_string(), object];
+        Ok(match self.try_run(args, &repo.root_path)? {
+            None => ConflictSideContent::Absent,
+            Some(output) => match classify_file_content(&output.stdout) {
+                FileContentKind::Text(text) => ConflictSideContent::Text(text),
+                FileContentKind::Binary => ConflictSideContent::Binary,
+                FileContentKind::Missing => ConflictSideContent::Absent,
+            },
+        })
     }
 }
 
@@ -962,6 +984,26 @@ impl RepositoryReadPort for GitCliProvider {
 
         Ok(InProgressOperation::None)
     }
+
+    /// Reads `path`'s three conflict sides via `git show :1:<path>`/
+    /// `:2:<path>`/`:3:<path>` (T-232/US-080 criterion 2) — Git's own index
+    /// stage numbering for the common ancestor, "ours", and "theirs"
+    /// respectively. A stage that does not exist for this file (e.g. no
+    /// base for a file added independently on both sides) exits non-zero and
+    /// is reported as [`ConflictSideContent::Absent`], mirroring
+    /// [`Self::file_content`]'s "a non-zero exit only ever means the path is
+    /// missing at that point" convention. Binary vs. text classification
+    /// reuses [`classify_file_content`], the exact same heuristic
+    /// `file_content` already applies.
+    fn conflict_sides(&self, repo: &Repository, path: &Path) -> Result<ConflictSides, GitSailError> {
+        require_worktree(repo, "read conflict sides")?;
+        Ok(ConflictSides {
+            path: path.to_path_buf(),
+            base: self.read_conflict_stage(repo, 1, path)?,
+            ours: self.read_conflict_stage(repo, 2, path)?,
+            theirs: self.read_conflict_stage(repo, 3, path)?,
+        })
+    }
 }
 
 impl RepositoryWritePort for GitCliProvider {
@@ -1636,6 +1678,242 @@ impl RepositoryWritePort for GitCliProvider {
         Ok(ApplyPatchResult {
             applied_files: preview.affected_files,
         })
+    }
+
+    /// See [`RepositoryWritePort::merge`]. Refuses up front when another
+    /// [`InProgressOperation`] is already pending (T-230/US-078 criterion 3),
+    /// re-reading real `.git/` state rather than trusting any cached flag —
+    /// exactly like every other precondition check in this adapter
+    /// ([`Self::amend_commit`]'s HEAD revalidation,
+    /// [`Self::revalidate_stash_identity`]). `target_revision` is resolved to
+    /// a concrete commit *before* merging so a bad target fails with the
+    /// same clear [`ErrorCode::RepositoryNotFound`]
+    /// [`RepositoryReadPort::resolve_revision`] already gives, rather than
+    /// whatever opaque message `git merge` itself would produce for it.
+    ///
+    /// Fast-forward vs. merge-commit is distinguished structurally — by
+    /// comparing the resulting `HEAD` against the target's commit resolved
+    /// *before* merging — never by parsing `git merge`'s own (potentially
+    /// locale-sensitive) "Fast-forward" text (US-079 criterion 2). A
+    /// target that was already an ancestor of `HEAD` ("Already up to date")
+    /// is reported as [`MergeResult::FastForwarded`] too, at the same
+    /// (unchanged) `HEAD` — a degenerate but still accurate case: `HEAD` is,
+    /// and remains, at the target.
+    ///
+    /// A conflict is never reported as a generic [`ErrorCode::ProcessFailure`]
+    /// (US-079 criterion 2/3): when `git merge` exits non-zero, this
+    /// re-inspects real `.git/` state via
+    /// [`RepositoryReadPort::detect_in_progress_operation`] — mirroring this
+    /// task's own "never presume, always re-check" discipline — and reports
+    /// [`MergeResult::Conflict`] only when that confirms a pending merge with
+    /// actual unmerged files; any other failure (e.g. local changes that
+    /// would be overwritten) is classified by [`classify_merge_failure`]
+    /// instead.
+    fn merge(&self, repo: &Repository, target_revision: &str) -> Result<MergeResult, GitSailError> {
+        require_worktree(repo, "merge")?;
+
+        let existing = RepositoryReadPort::detect_in_progress_operation(self, repo)?;
+        if !existing.is_none() {
+            return Err(GitSailError::new(
+                ErrorCode::OperationConflict,
+                format!(
+                    "a {} is already in progress",
+                    existing.kind_label().unwrap_or("operation")
+                ),
+            )
+            .with_remediation(
+                "continue or abort the in-progress operation before starting a new merge",
+            ));
+        }
+
+        let target_before = RepositoryReadPort::resolve_revision(self, repo, target_revision)?;
+
+        // `-c core.editor=true` (a global option, must precede the
+        // subcommand): a merge that needs a commit (a real merge commit, not
+        // a fast-forward) would otherwise try to open an interactive editor
+        // for the message, which a headless process has no terminal to
+        // satisfy — mirrors `create_commit`/`amend_commit`'s own always-
+        // explicit `-m`. `--no-edit` accepts Git's default merge message
+        // outright (harmless, and a no-op, for a fast-forward). `--end-of-
+        // options` (matching `pull`'s own `git merge --ff-only` call) ends
+        // option parsing before `target_revision`, a caller-controlled
+        // value that must never be parsed as a flag.
+        let args = vec![
+            "-c".to_string(),
+            "core.editor=true".to_string(),
+            "merge".to_string(),
+            "--no-edit".to_string(),
+            "--end-of-options".to_string(),
+            target_revision.to_string(),
+        ];
+
+        match self.run(args, &repo.root_path) {
+            Ok(_) => {
+                let head_after = RepositoryReadPort::resolve_revision(self, repo, "HEAD")?;
+                if head_after == target_before {
+                    Ok(MergeResult::FastForwarded { new_head: head_after })
+                } else {
+                    Ok(MergeResult::MergeCommitCreated { hash: head_after })
+                }
+            }
+            Err(err) => {
+                if err.code() == ErrorCode::ProcessFailure {
+                    if let InProgressOperation::Merge(merge_op) =
+                        RepositoryReadPort::detect_in_progress_operation(self, repo)?
+                    {
+                        if !merge_op.conflicted_files.is_empty() {
+                            return Ok(MergeResult::Conflict {
+                                files: merge_op.conflicted_files,
+                            });
+                        }
+                    }
+                }
+                Err(classify_merge_failure(err))
+            }
+        }
+    }
+
+    /// See [`RepositoryWritePort::mark_conflict_resolved`]. A plain `git add
+    /// -- <path>` (T-232/US-080 criterion 3): since Git 2.0, this also
+    /// correctly stages a *deletion* for a previously-tracked path now
+    /// missing from the working tree (the resolution a person chooses by
+    /// deleting a conflicted file outright, e.g. for a delete/modify
+    /// conflict), not only a content update — so this one call covers both
+    /// "keep this content" and "keep it deleted" resolutions without
+    /// needing to special-case `git rm`.
+    fn mark_conflict_resolved(&self, repo: &Repository, path: &Path) -> Result<(), GitSailError> {
+        require_worktree(repo, "mark conflict resolved")?;
+        let args = vec![
+            "add".to_string(),
+            "--".to_string(),
+            path.to_string_lossy().into_owned(),
+        ];
+        self.run(args, &repo.root_path)?;
+        Ok(())
+    }
+
+    /// See [`RepositoryWritePort::take_conflict_side`]. `git checkout
+    /// --ours`/`--theirs -- <path>` replaces the working-tree content with
+    /// that side wholesale, then [`Self::mark_conflict_resolved`] stages it
+    /// — the documented binary-conflict flow (T-232/US-080 criterion 3).
+    fn take_conflict_side(
+        &self,
+        repo: &Repository,
+        path: &Path,
+        side: ConflictSide,
+    ) -> Result<(), GitSailError> {
+        require_worktree(repo, "take conflict side")?;
+        let flag = match side {
+            ConflictSide::Ours => "--ours",
+            ConflictSide::Theirs => "--theirs",
+        };
+        let args = vec![
+            "checkout".to_string(),
+            flag.to_string(),
+            "--".to_string(),
+            path.to_string_lossy().into_owned(),
+        ];
+        self.run(args, &repo.root_path)
+            .map_err(classify_take_conflict_side_failure)?;
+        RepositoryWritePort::mark_conflict_resolved(self, repo, path)
+    }
+
+    /// See [`RepositoryWritePort::continue_operation`]. Dispatches on
+    /// whatever [`RepositoryReadPort::detect_in_progress_operation`]
+    /// currently detects — generic across merge/rebase/cherry-pick/revert
+    /// (T-233/US-081), refusing up front when nothing is pending, the
+    /// detected operation's own [`OperationCapability`] set does not offer
+    /// `Continue` (e.g. a bisect run), or conflicted files still remain
+    /// (US-081 criterion 2). `-c core.editor=true` avoids ever opening an
+    /// interactive editor for the resulting commit message, matching
+    /// [`Self::merge`]'s own rationale.
+    fn continue_operation(&self, repo: &Repository) -> Result<(), GitSailError> {
+        require_worktree(repo, "continue operation")?;
+        let current = RepositoryReadPort::detect_in_progress_operation(self, repo)?;
+        if current.is_none() {
+            return Err(GitSailError::new(
+                ErrorCode::InvalidRepositoryState,
+                "no merge, rebase, cherry-pick, or revert is currently in progress",
+            )
+            .with_remediation("there is nothing to continue"));
+        }
+        if !current.supports(OperationCapability::Continue) {
+            return Err(GitSailError::new(
+                ErrorCode::InvalidRepositoryState,
+                format!(
+                    "a {} in progress does not support continue",
+                    current.kind_label().unwrap_or("operation")
+                ),
+            ));
+        }
+        if current.has_conflicts() {
+            return Err(GitSailError::new(
+                ErrorCode::OperationConflict,
+                format!(
+                    "{} conflicted file(s) still need to be resolved",
+                    current.conflicted_files().len()
+                ),
+            )
+            .with_remediation("mark every conflicted file resolved, then retry"));
+        }
+
+        let subcommand = match &current {
+            InProgressOperation::Merge(_) => "merge",
+            InProgressOperation::Rebase(_) => "rebase",
+            InProgressOperation::CherryPick(_) => "cherry-pick",
+            InProgressOperation::Revert(_) => "revert",
+            InProgressOperation::BisectRun(_) | InProgressOperation::None => {
+                unreachable!("already refused above: no Continue capability / nothing pending")
+            }
+        };
+        let args = vec![
+            "-c".to_string(),
+            "core.editor=true".to_string(),
+            subcommand.to_string(),
+            "--continue".to_string(),
+        ];
+        self.run(args, &repo.root_path)
+            .map_err(classify_continue_failure)?;
+        Ok(())
+    }
+
+    /// See [`RepositoryWritePort::abort_operation`]. Dispatches on whatever
+    /// is currently detected, matching [`Self::continue_operation`]'s own
+    /// rationale; `git bisect reset` is the bisect-specific equivalent of
+    /// `--abort` for every other operation kind.
+    fn abort_operation(&self, repo: &Repository) -> Result<(), GitSailError> {
+        require_worktree(repo, "abort operation")?;
+        let current = RepositoryReadPort::detect_in_progress_operation(self, repo)?;
+        if current.is_none() {
+            return Err(GitSailError::new(
+                ErrorCode::InvalidRepositoryState,
+                "no merge, rebase, cherry-pick, or revert is currently in progress",
+            )
+            .with_remediation("there is nothing to abort"));
+        }
+        if !current.supports(OperationCapability::Abort) {
+            return Err(GitSailError::new(
+                ErrorCode::InvalidRepositoryState,
+                format!(
+                    "a {} in progress does not support abort",
+                    current.kind_label().unwrap_or("operation")
+                ),
+            ));
+        }
+
+        let args: Vec<String> = match &current {
+            InProgressOperation::Merge(_) => vec!["merge".to_string(), "--abort".to_string()],
+            InProgressOperation::Rebase(_) => vec!["rebase".to_string(), "--abort".to_string()],
+            InProgressOperation::CherryPick(_) => {
+                vec!["cherry-pick".to_string(), "--abort".to_string()]
+            }
+            InProgressOperation::Revert(_) => vec!["revert".to_string(), "--abort".to_string()],
+            InProgressOperation::BisectRun(_) => vec!["bisect".to_string(), "reset".to_string()],
+            InProgressOperation::None => unreachable!("already refused above"),
+        };
+        self.run(args, &repo.root_path)
+            .map_err(classify_abort_failure)?;
+        Ok(())
     }
 }
 
@@ -2583,6 +2861,111 @@ fn classify_force_push_failure(err: GitSailError) -> GitSailError {
         .with_remediation(
             "fetch the remote's current state, review what changed, and retry only if you still intend to overwrite it",
         )
+        .with_source(err)
+    } else {
+        err
+    }
+}
+
+/// Reclassifies a failed `git merge` (T-231/US-079) into a clear
+/// [`ErrorCode::OperationConflict`] for the genuine (non-conflict) refusals
+/// Git can give: local changes that would be overwritten, or unrelated
+/// histories. A real conflict never reaches this function at all — the
+/// caller ([`GitCliProvider::merge`]) intercepts that case first by
+/// re-inspecting `.git/` state. Any other failure passes through unchanged.
+fn classify_merge_failure(err: GitSailError) -> GitSailError {
+    if err.code() != ErrorCode::ProcessFailure {
+        return err;
+    }
+    let diagnostic_text = err.diagnostic().map(|d| d.to_string()).unwrap_or_default();
+    if diagnostic_text.contains("Your local changes to the following files would be overwritten")
+        || diagnostic_text.contains("Please commit your changes or stash them")
+    {
+        GitSailError::new(
+            ErrorCode::OperationConflict,
+            "local changes would be overwritten by this merge",
+        )
+        .with_remediation("commit or stash your local changes first, then retry")
+        .with_source(err)
+    } else if diagnostic_text.contains("refusing to merge unrelated histories") {
+        GitSailError::new(
+            ErrorCode::OperationConflict,
+            "the target has no common history with the current branch",
+        )
+        .with_remediation("verify this is the reference you intend to merge")
+        .with_source(err)
+    } else {
+        err
+    }
+}
+
+/// Reclassifies a failed `git checkout --ours`/`--theirs -- <path>` (T-232/
+/// US-080's binary-conflict flow) as [`ErrorCode::InvalidRepositoryState`]
+/// when `path` is not actually conflicted (so has no such stage to take
+/// from). Any other failure passes through unchanged.
+fn classify_take_conflict_side_failure(err: GitSailError) -> GitSailError {
+    if err.code() != ErrorCode::ProcessFailure {
+        return err;
+    }
+    let diagnostic_text = err.diagnostic().map(|d| d.to_string()).unwrap_or_default();
+    if diagnostic_text.contains("did not match any file")
+        || diagnostic_text.contains("no such path in the working tree")
+    {
+        GitSailError::new(
+            ErrorCode::InvalidRepositoryState,
+            "the path is not currently conflicted",
+        )
+        .with_remediation("refresh the conflict list and retry against a currently conflicted path")
+        .with_source(err)
+    } else {
+        err
+    }
+}
+
+/// Reclassifies a failed `git <op> --continue` (T-233/US-081) as
+/// [`ErrorCode::OperationConflict`] when Git itself still finds unresolved
+/// conflicts (defense in depth: [`GitCliProvider::continue_operation`]
+/// already checks this before ever invoking Git) or an empty resulting
+/// commit. Any other failure passes through unchanged.
+fn classify_continue_failure(err: GitSailError) -> GitSailError {
+    if err.code() != ErrorCode::ProcessFailure {
+        return err;
+    }
+    let diagnostic_text = err.diagnostic().map(|d| d.to_string()).unwrap_or_default();
+    if diagnostic_text.contains("unmerged")
+        || diagnostic_text.contains("You must edit all merge conflicts")
+        || diagnostic_text.contains("fix conflicts")
+    {
+        GitSailError::new(
+            ErrorCode::OperationConflict,
+            "unresolved conflicted files remain",
+        )
+        .with_remediation("mark every conflicted file resolved, then retry")
+        .with_source(err)
+    } else {
+        err
+    }
+}
+
+/// Reclassifies a failed `git <op> --abort`/`git bisect reset` (T-233/
+/// US-081) as [`ErrorCode::InvalidRepositoryState`] when there is nothing to
+/// abort. Any other failure passes through unchanged.
+fn classify_abort_failure(err: GitSailError) -> GitSailError {
+    if err.code() != ErrorCode::ProcessFailure {
+        return err;
+    }
+    let diagnostic_text = err.diagnostic().map(|d| d.to_string()).unwrap_or_default();
+    if diagnostic_text.contains("no operation in progress")
+        || diagnostic_text.contains("There is no merge to abort")
+        || diagnostic_text.contains("no rebase in progress")
+        || diagnostic_text.contains("no cherry-pick in progress")
+        || diagnostic_text.contains("no revert in progress")
+    {
+        GitSailError::new(
+            ErrorCode::InvalidRepositoryState,
+            "no operation is currently in progress",
+        )
+        .with_remediation("there is nothing to abort")
         .with_source(err)
     } else {
         err

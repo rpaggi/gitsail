@@ -2,10 +2,12 @@
 //! a terminal input event or the outcome of a background [`crate::worker::Command`]
 //! (SAD §18: "... return typed messages/events").
 
-use gitsail_application::{ApplyPatchResult, Page, PatchPreview, PullOutcome, RefreshTicket};
+use gitsail_application::{
+    ApplyPatchResult, MergeResult, Page, PatchPreview, PullOutcome, RefreshTicket,
+};
 use gitsail_domain::{
-    Blame, Branch, Commit, CommitHash, Diff, GitSailError, Remote, Repository, RepositoryStatus,
-    Stash, Tag,
+    Blame, Branch, Commit, CommitHash, ConflictSides, Diff, GitSailError, InProgressOperation,
+    Remote, Repository, RepositoryStatus, Stash, Tag,
 };
 
 #[derive(Debug)]
@@ -71,4 +73,32 @@ pub enum Message {
     /// [`Self::OperationFinished`] so the exact applied files can be shown,
     /// mirroring [`Self::PullFinished`]'s own reasoning.
     PatchApplied(Result<ApplyPatchResult, GitSailError>),
+    /// [`crate::worker::Command::LoadInProgressOperation`] completed
+    /// (T-230/US-078, presentation side of T-231/T-233). Tagged with the
+    /// session generation active when it was requested, matching
+    /// [`Self::TagsLoaded`]. Loaded after every refresh (and after a merge/
+    /// continue/abort mutation) so a merge/conflict/rebase/... started in
+    /// another terminal is always picked up (US-078 criterion 2).
+    InProgressOperationLoaded(u64, Result<InProgressOperation, GitSailError>),
+    /// [`crate::worker::Command::Merge`] completed (T-231/US-079). Carries
+    /// the [`MergeResult`] on success — distinct from
+    /// [`Self::OperationFinished`] so fast-forward/merge-commit/conflict are
+    /// always three distinct, explicit outcomes (US-079 criterion 2), never
+    /// collapsed into a bare success/failure.
+    MergeFinished(Result<MergeResult, GitSailError>),
+    /// [`crate::worker::Command::LoadConflictSides`] completed (T-232/
+    /// US-080 criterion 2), tagged with the conflicted path it was requested
+    /// for, so a result for a since-abandoned selection can be discarded.
+    ConflictSidesLoaded(std::path::PathBuf, Result<ConflictSides, GitSailError>),
+    /// [`crate::worker::Command::MarkConflictResolved`]/
+    /// [`crate::worker::Command::TakeConflictSide`] completed (T-232/US-080
+    /// criterion 3).
+    ConflictResolutionFinished(Result<(), GitSailError>),
+    /// [`crate::worker::Command::ContinueOperation`]/
+    /// [`crate::worker::Command::AbortOperation`] completed (T-233/US-081).
+    /// The real resulting state is always reinspected afterward via a fresh
+    /// [`Self::InProgressOperationLoaded`] (US-081 criterion 3) — this
+    /// message only carries whether the Git command itself exited
+    /// successfully, never a presumption that the operation fully concluded.
+    OperationResolutionFinished(Result<(), GitSailError>),
 }

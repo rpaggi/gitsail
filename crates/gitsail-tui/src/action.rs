@@ -113,4 +113,39 @@ pub enum Action {
     /// what actually dispatches [`crate::worker::Command::ApplyPatch`]
     /// (US-030 criterion 1).
     RequestApplyPatch,
+
+    // -- EPIC-16/T-231..T-233: merge, conflicts, continue/abort -----------
+    /// Requests confirmation to merge the highlighted reference into the
+    /// current branch (`m`, Sidebar only — reuses the same branch
+    /// search/selection mechanism [`Action::RequestCheckout`] already uses;
+    /// T-231/US-079 criterion 1: origin, destination and policy are shown
+    /// before executing).
+    RequestMerge,
+    /// Opens or closes the conflicts overlay (`M`) — a no-op when no
+    /// operation with conflicts is currently pending (T-232/US-080
+    /// criterion 1).
+    ToggleConflictsPanel,
+    /// Loads the base/ours/theirs sides of the conflicted file under the
+    /// conflicts overlay's cursor (Enter, T-232/US-080 criterion 2).
+    InspectConflict,
+    /// Marks the conflicted file under the cursor resolved by staging its
+    /// current working-tree content (`r`, T-232/US-080 criterion 3) — only
+    /// ever this explicit action, never inferred.
+    MarkConflictResolved,
+    /// Resolves the conflicted file under the cursor by taking "ours"
+    /// wholesale (`o`) — the documented binary-conflict flow (T-232/US-080
+    /// criterion 3), equally usable for a text file.
+    TakeConflictSideOurs,
+    /// Resolves the conflicted file under the cursor by taking "theirs"
+    /// wholesale (`t` within the conflicts overlay).
+    TakeConflictSideTheirs,
+    /// Requests confirmation to continue the pending operation (`c` within
+    /// the conflicts overlay, T-233/US-081) — only offered when
+    /// [`gitsail_domain::OperationCapability::Continue`] is supported by
+    /// whatever is currently detected.
+    RequestContinueOperation,
+    /// Requests confirmation to abort the pending operation (`a` within the
+    /// conflicts overlay, T-233/US-081) — only offered when
+    /// [`gitsail_domain::OperationCapability::Abort`] is supported.
+    RequestAbortOperation,
 }

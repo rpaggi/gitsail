@@ -106,6 +106,13 @@ pub fn run() {
             commands::fetch,
             commands::pull,
             commands::push,
+            commands::detect_in_progress_operation,
+            commands::merge,
+            commands::get_conflict_sides,
+            commands::mark_conflict_resolved,
+            commands::take_conflict_side,
+            commands::continue_operation,
+            commands::abort_operation,
         ])
         .run(tauri::generate_context!())
         .expect("error while running the GitSail Desktop application");

@@ -38,8 +38,9 @@ pub use graph::{CommitGraph, GraphCommit, GraphEdge, GraphRow, OpenLane};
 pub use ids::{BranchName, CommitHash, ShortHash};
 pub use line_history::{LineHistory, LineHistoryEntry};
 pub use operation::{
-    BisectOperation, ConflictStage, ConflictedFile, InProgressOperation, MergeOperation,
-    OperationCapability, RebaseOperation, SequencerOperation,
+    BisectOperation, ConflictSide, ConflictSideContent, ConflictSides, ConflictStage,
+    ConflictedFile, InProgressOperation, MergeOperation, OperationCapability, RebaseOperation,
+    SequencerOperation,
 };
 pub use remote::{Remote, RemoteUrl};
 pub use repository::{HeadState, Repository, RepositoryId};

@@ -17,12 +17,13 @@ pub use compat::{parse_envelope, EnvelopeDecodeError, SUPPORTED_SCHEMA_VERSIONS}
 pub use dto::{
     AmendPreviewDto, ApplyPatchResultDto, BlameDto, BlameLineDto, BlameOriginDto, BranchDto,
     BranchKindDto, ChangeTypeDto, CommitDiffDto, CommitDto, CommitGraphPageDto,
-    CommitGraphRowDto, CommitResultDto, DecorationDto, DiffDto, DiffHunkDto, DiffLineDto,
+    CommitGraphRowDto, CommitResultDto, ConflictSideContentDto, ConflictSidesDto,
+    ConflictStageDto, ConflictedFileDto, DecorationDto, DiffDto, DiffHunkDto, DiffLineDto,
     DiffLineOriginDto, FileChangeDto, FileContentDto, FileDiffDto, FileStatusCodeDto,
-    GitTimestampDto, GraphEdgeDto, HeadStateDto, LineHistoryDto, LineHistoryEntryDto,
-    LineRangeDto, PatchExportDto, PatchPreviewDto, PullOutcomeDto, PullResultDto,
-    RecentRepositoryDto, RemoteDto, RepositoryDto, RepositoryStatusDto, SignatureDto,
-    SyncTargetDto,
+    GitTimestampDto, GraphEdgeDto, HeadStateDto, InProgressOperationDto, LineHistoryDto,
+    LineHistoryEntryDto, LineRangeDto, MergeResultDto, OperationCapabilityDto, PatchExportDto,
+    PatchPreviewDto, PullOutcomeDto, PullResultDto, RecentRepositoryDto, RemoteDto, RepositoryDto,
+    RepositoryStatusDto, SignatureDto, SyncTargetDto,
 };
 pub use envelope::{Envelope, Page, SCHEMA_VERSION};
 pub use error::ErrorPayload;

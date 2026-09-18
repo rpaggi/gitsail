@@ -21,12 +21,14 @@ use std::sync::Arc;
 use std::thread;
 
 use gitsail_application::{
-    ApplyPatch, BlameRequest, CommitQuery, CreateBranch, CreateCommit, DeleteBranch, DiffRequest,
-    Fetch, GetCommitHistory, GetDiff, GetFileBlame, GetRepositoryStatus, ListBranches,
-    OpenRepository, PreviewPatchApplication, Pull, Push, RefreshTicket, RenameBranch,
-    RepositoryReadPort, RepositoryWritePort, StageFiles, SwitchBranch, UnstageFiles,
+    AbortOperation, ApplyPatch, BlameRequest, CommitQuery, ContinueOperation, CreateBranch,
+    CreateCommit, DeleteBranch, DetectInProgressOperation, DiffRequest, Fetch, GetCommitHistory,
+    GetConflictSides, GetDiff, GetFileBlame, GetRepositoryStatus, ListBranches,
+    MarkConflictResolved, Merge, OpenRepository, PreviewPatchApplication, Pull, Push,
+    RefreshTicket, RenameBranch, RepositoryReadPort, RepositoryWritePort, StageFiles,
+    SwitchBranch, TakeConflictSide, UnstageFiles,
 };
-use gitsail_domain::{BranchName, CancellationToken, CommitHash, Repository};
+use gitsail_domain::{BranchName, CancellationToken, CommitHash, ConflictSide, Repository};
 
 use crate::message::Message;
 
@@ -85,6 +87,26 @@ pub enum Command {
     /// Applies a previously previewed, now-confirmed patch to the working
     /// tree (T-163/US-030).
     ApplyPatch(Repository, String),
+    /// Detects a merge/rebase/cherry-pick/revert/bisect currently in
+    /// progress (T-230/US-078, presentation side of T-231/T-233), tagged
+    /// with the session generation active when it was requested, matching
+    /// [`Self::LoadTags`]. `Safe`, so `App` dispatches this immediately
+    /// without a confirmation step, exactly like [`Self::LoadStashEntries`].
+    LoadInProgressOperation(u64, Repository),
+    /// Integrates `target_revision` into the current branch (T-231/US-079).
+    Merge(Repository, String),
+    /// Reads one conflicted file's base/ours/theirs sides (T-232/US-080
+    /// criterion 2), tagged with the exact path requested.
+    LoadConflictSides(Repository, PathBuf),
+    /// Stages a conflicted file as resolved (T-232/US-080 criterion 3).
+    MarkConflictResolved(Repository, PathBuf),
+    /// Resolves a conflicted file by taking one side wholesale — the
+    /// documented binary-conflict flow (T-232/US-080 criterion 3).
+    TakeConflictSide(Repository, PathBuf, ConflictSide),
+    /// Resumes whichever operation is currently pending (T-233/US-081).
+    ContinueOperation(Repository),
+    /// Abandons whichever operation is currently pending (T-233/US-081).
+    AbortOperation(Repository),
 }
 
 /// Spawns one background thread per command in `commands`, each reporting
@@ -205,6 +227,34 @@ fn spawn_one(
             Command::ApplyPatch(repo, patch_text) => {
                 let result = ApplyPatch::new(write_port).execute(&repo, &patch_text);
                 Message::PatchApplied(result)
+            }
+            Command::LoadInProgressOperation(generation, repo) => {
+                let result = DetectInProgressOperation::new(read_port).execute(&repo);
+                Message::InProgressOperationLoaded(generation, result)
+            }
+            Command::Merge(repo, target_revision) => {
+                let result = Merge::new(write_port).execute(&repo, &target_revision);
+                Message::MergeFinished(result)
+            }
+            Command::LoadConflictSides(repo, path) => {
+                let result = GetConflictSides::new(read_port).execute(&repo, &path);
+                Message::ConflictSidesLoaded(path, result)
+            }
+            Command::MarkConflictResolved(repo, path) => {
+                let result = MarkConflictResolved::new(write_port).execute(&repo, &path);
+                Message::ConflictResolutionFinished(result)
+            }
+            Command::TakeConflictSide(repo, path, side) => {
+                let result = TakeConflictSide::new(write_port).execute(&repo, &path, side);
+                Message::ConflictResolutionFinished(result)
+            }
+            Command::ContinueOperation(repo) => {
+                let result = ContinueOperation::new(write_port).execute(&repo);
+                Message::OperationResolutionFinished(result)
+            }
+            Command::AbortOperation(repo) => {
+                let result = AbortOperation::new(write_port).execute(&repo);
+                Message::OperationResolutionFinished(result)
             }
         };
         // The receiving end only disappears once the app is shutting down

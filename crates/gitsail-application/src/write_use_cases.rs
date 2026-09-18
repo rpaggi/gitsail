@@ -7,13 +7,14 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use gitsail_domain::{
-    BranchName, CancellationToken, CommitHash, FileDiff, GitSailError, Repository, Stash, Worktree,
+    BranchName, CancellationToken, CommitHash, ConflictSide, FileDiff, GitSailError, Repository,
+    Stash, Worktree,
 };
 
 use crate::mutation::Precondition;
 use crate::write_ports::{
-    ApplyPatchResult, PatchPreview, PullOutcome, RepositoryWritePort, StashApplyOutcome,
-    StashScope, TagAnnotation, WorktreeBranchSpec,
+    ApplyPatchResult, MergeResult, PatchPreview, PullOutcome, RepositoryWritePort,
+    StashApplyOutcome, StashScope, TagAnnotation, WorktreeBranchSpec,
 };
 
 pub struct StageFiles {
@@ -450,6 +451,90 @@ impl ApplyPatch {
     }
 }
 
+/// Integrates a reference into the current branch (T-231/US-079). See
+/// [`RepositoryWritePort::merge`] for the fast-forward/merge-commit/conflict
+/// contract this delegates to unchanged.
+pub struct Merge {
+    port: Arc<dyn RepositoryWritePort>,
+}
+
+impl Merge {
+    pub fn new(port: Arc<dyn RepositoryWritePort>) -> Self {
+        Self { port }
+    }
+
+    pub fn execute(&self, repo: &Repository, target_revision: &str) -> Result<MergeResult, GitSailError> {
+        self.port.merge(repo, target_revision)
+    }
+}
+
+/// Marks one conflicted file resolved by staging it (T-232/US-080). See
+/// [`RepositoryWritePort::mark_conflict_resolved`] — always an explicit
+/// caller action, never inferred.
+pub struct MarkConflictResolved {
+    port: Arc<dyn RepositoryWritePort>,
+}
+
+impl MarkConflictResolved {
+    pub fn new(port: Arc<dyn RepositoryWritePort>) -> Self {
+        Self { port }
+    }
+
+    pub fn execute(&self, repo: &Repository, path: &Path) -> Result<(), GitSailError> {
+        self.port.mark_conflict_resolved(repo, path)
+    }
+}
+
+/// Resolves a conflict by taking one side wholesale (T-232/US-080's
+/// documented binary-conflict flow). See
+/// [`RepositoryWritePort::take_conflict_side`].
+pub struct TakeConflictSide {
+    port: Arc<dyn RepositoryWritePort>,
+}
+
+impl TakeConflictSide {
+    pub fn new(port: Arc<dyn RepositoryWritePort>) -> Self {
+        Self { port }
+    }
+
+    pub fn execute(&self, repo: &Repository, path: &Path, side: ConflictSide) -> Result<(), GitSailError> {
+        self.port.take_conflict_side(repo, path, side)
+    }
+}
+
+/// Resumes whichever operation is currently pending (T-233/US-081). See
+/// [`RepositoryWritePort::continue_operation`] for the capability/
+/// remaining-conflicts revalidation this delegates to unchanged.
+pub struct ContinueOperation {
+    port: Arc<dyn RepositoryWritePort>,
+}
+
+impl ContinueOperation {
+    pub fn new(port: Arc<dyn RepositoryWritePort>) -> Self {
+        Self { port }
+    }
+
+    pub fn execute(&self, repo: &Repository) -> Result<(), GitSailError> {
+        self.port.continue_operation(repo)
+    }
+}
+
+/// Abandons whichever operation is currently pending (T-233/US-081). See
+/// [`RepositoryWritePort::abort_operation`].
+pub struct AbortOperation {
+    port: Arc<dyn RepositoryWritePort>,
+}
+
+impl AbortOperation {
+    pub fn new(port: Arc<dyn RepositoryWritePort>) -> Self {
+        Self { port }
+    }
+
+    pub fn execute(&self, repo: &Repository) -> Result<(), GitSailError> {
+        self.port.abort_operation(repo)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -497,6 +582,12 @@ mod tests {
         patch_preview: PatchPreview,
         received_apply_patch: Mutex<Option<String>>,
         apply_patch_result: ApplyPatchResult,
+        received_merge: Mutex<Option<String>>,
+        merge_result: MergeResult,
+        received_mark_conflict_resolved: Mutex<Option<PathBuf>>,
+        received_continue_operation: Mutex<bool>,
+        received_abort_operation: Mutex<bool>,
+        received_take_conflict_side: Mutex<Option<(PathBuf, ConflictSide)>>,
     }
 
     fn sample_stash() -> Stash {
@@ -566,6 +657,14 @@ mod tests {
                 apply_patch_result: ApplyPatchResult {
                     applied_files: vec![PathBuf::from("a.txt")],
                 },
+                received_merge: Mutex::new(None),
+                merge_result: MergeResult::FastForwarded {
+                    new_head: CommitHash::new("cafef00dcafef00dcafef00dcafef00dcafef00").unwrap(),
+                },
+                received_mark_conflict_resolved: Mutex::new(None),
+                received_continue_operation: Mutex::new(false),
+                received_abort_operation: Mutex::new(false),
+                received_take_conflict_side: Mutex::new(None),
             }
         }
 
@@ -925,6 +1024,66 @@ mod tests {
                 ));
             }
             Ok(self.apply_patch_result.clone())
+        }
+
+        fn merge(&self, _repo: &Repository, target_revision: &str) -> Result<MergeResult, GitSailError> {
+            *self.received_merge.lock().unwrap() = Some(target_revision.to_string());
+            if self.fail {
+                return Err(GitSailError::new(
+                    ErrorCode::OperationConflict,
+                    "a merge is already in progress",
+                ));
+            }
+            Ok(self.merge_result.clone())
+        }
+
+        fn mark_conflict_resolved(&self, _repo: &Repository, path: &Path) -> Result<(), GitSailError> {
+            *self.received_mark_conflict_resolved.lock().unwrap() = Some(path.to_path_buf());
+            if self.fail {
+                return Err(GitSailError::new(
+                    ErrorCode::InvalidRepositoryState,
+                    "path is not currently conflicted",
+                ));
+            }
+            Ok(())
+        }
+
+        fn continue_operation(&self, _repo: &Repository) -> Result<(), GitSailError> {
+            *self.received_continue_operation.lock().unwrap() = true;
+            if self.fail {
+                return Err(GitSailError::new(
+                    ErrorCode::OperationConflict,
+                    "unresolved conflicted files remain",
+                ));
+            }
+            Ok(())
+        }
+
+        fn abort_operation(&self, _repo: &Repository) -> Result<(), GitSailError> {
+            *self.received_abort_operation.lock().unwrap() = true;
+            if self.fail {
+                return Err(GitSailError::new(
+                    ErrorCode::InvalidRepositoryState,
+                    "no operation is currently in progress",
+                ));
+            }
+            Ok(())
+        }
+
+        fn take_conflict_side(
+            &self,
+            _repo: &Repository,
+            path: &Path,
+            side: ConflictSide,
+        ) -> Result<(), GitSailError> {
+            *self.received_take_conflict_side.lock().unwrap() = Some((path.to_path_buf(), side));
+            if self.fail {
+                return Err(GitSailError::new(
+                    ErrorCode::InvalidRepositoryState,
+                    "path is not currently conflicted",
+                ));
+            }
+            Ok(())
         }
     }
 
@@ -1605,5 +1764,154 @@ mod tests {
             .unwrap_err();
 
         assert_eq!(err.code(), ErrorCode::OperationConflict);
+    }
+
+    // -----------------------------------------------------------------
+    // EPIC-16/T-231..T-233: merge, mark-conflict-resolved, continue/abort.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn merge_delegates_to_port_with_the_target_revision_and_returns_its_result() {
+        let port = Arc::new(FakeWritePort::new());
+        let use_case = Merge::new(port.clone());
+
+        let result = use_case.execute(&sample_repository(), "feature/x").unwrap();
+
+        assert_eq!(result, port.merge_result);
+        assert_eq!(
+            *port.received_merge.lock().unwrap(),
+            Some("feature/x".to_string())
+        );
+    }
+
+    #[test]
+    fn merge_can_report_a_merge_commit_or_a_conflict_as_distinct_results() {
+        let mut fake = FakeWritePort::new();
+        fake.merge_result = MergeResult::MergeCommitCreated {
+            hash: CommitHash::new("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef").unwrap(),
+        };
+        let use_case = Merge::new(Arc::new(fake));
+        let commit_result = use_case.execute(&sample_repository(), "feature/x").unwrap();
+        assert!(matches!(commit_result, MergeResult::MergeCommitCreated { .. }));
+
+        let mut fake = FakeWritePort::new();
+        fake.merge_result = MergeResult::Conflict {
+            files: vec![gitsail_domain::ConflictedFile {
+                path: PathBuf::from("a.txt"),
+                stage: gitsail_domain::ConflictStage::BothModified,
+            }],
+        };
+        let use_case = Merge::new(Arc::new(fake));
+        let conflict_result = use_case.execute(&sample_repository(), "feature/x").unwrap();
+        match conflict_result {
+            MergeResult::Conflict { files } => assert_eq!(files.len(), 1),
+            other => panic!("expected Conflict, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn merge_propagates_an_already_in_progress_conflict_without_a_false_success() {
+        let port = Arc::new(FakeWritePort::failing());
+        let use_case = Merge::new(port);
+
+        let err = use_case
+            .execute(&sample_repository(), "feature/x")
+            .unwrap_err();
+
+        assert_eq!(err.code(), ErrorCode::OperationConflict);
+    }
+
+    #[test]
+    fn mark_conflict_resolved_delegates_to_port_with_the_exact_path() {
+        let port = Arc::new(FakeWritePort::new());
+        let use_case = MarkConflictResolved::new(port.clone());
+
+        use_case
+            .execute(&sample_repository(), Path::new("a.txt"))
+            .unwrap();
+
+        assert_eq!(
+            *port.received_mark_conflict_resolved.lock().unwrap(),
+            Some(PathBuf::from("a.txt"))
+        );
+    }
+
+    #[test]
+    fn mark_conflict_resolved_propagates_port_error_without_a_false_success() {
+        let port = Arc::new(FakeWritePort::failing());
+        let use_case = MarkConflictResolved::new(port);
+
+        let err = use_case
+            .execute(&sample_repository(), Path::new("a.txt"))
+            .unwrap_err();
+
+        assert_eq!(err.code(), ErrorCode::InvalidRepositoryState);
+    }
+
+    #[test]
+    fn continue_operation_delegates_to_port() {
+        let port = Arc::new(FakeWritePort::new());
+        let use_case = ContinueOperation::new(port.clone());
+
+        use_case.execute(&sample_repository()).unwrap();
+
+        assert!(*port.received_continue_operation.lock().unwrap());
+    }
+
+    #[test]
+    fn continue_operation_propagates_a_remaining_conflicts_error_without_a_false_success() {
+        let port = Arc::new(FakeWritePort::failing());
+        let use_case = ContinueOperation::new(port);
+
+        let err = use_case.execute(&sample_repository()).unwrap_err();
+
+        assert_eq!(err.code(), ErrorCode::OperationConflict);
+    }
+
+    #[test]
+    fn abort_operation_delegates_to_port() {
+        let port = Arc::new(FakeWritePort::new());
+        let use_case = AbortOperation::new(port.clone());
+
+        use_case.execute(&sample_repository()).unwrap();
+
+        assert!(*port.received_abort_operation.lock().unwrap());
+    }
+
+    #[test]
+    fn abort_operation_propagates_a_nothing_to_abort_error_without_a_false_success() {
+        let port = Arc::new(FakeWritePort::failing());
+        let use_case = AbortOperation::new(port);
+
+        let err = use_case.execute(&sample_repository()).unwrap_err();
+
+        assert_eq!(err.code(), ErrorCode::InvalidRepositoryState);
+    }
+
+    #[test]
+    fn take_conflict_side_delegates_to_port_with_the_path_and_side() {
+        let port = Arc::new(FakeWritePort::new());
+        let use_case = TakeConflictSide::new(port.clone());
+
+        use_case
+            .execute(&sample_repository(), Path::new("image.png"), ConflictSide::Theirs)
+            .unwrap();
+
+        assert_eq!(
+            *port.received_take_conflict_side.lock().unwrap(),
+            Some((PathBuf::from("image.png"), ConflictSide::Theirs))
+        );
+    }
+
+    #[test]
+    fn take_conflict_side_propagates_port_error_without_a_false_success() {
+        let port = Arc::new(FakeWritePort::failing());
+        let use_case = TakeConflictSide::new(port);
+
+        let err = use_case
+            .execute(&sample_repository(), Path::new("image.png"), ConflictSide::Ours)
+            .unwrap_err();
+
+        assert_eq!(err.code(), ErrorCode::InvalidRepositoryState);
     }
 }

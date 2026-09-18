@@ -208,6 +208,88 @@ export interface PullResultDto {
   outcome: PullOutcomeDto;
 }
 
+// -- EPIC-16/T-231..T-233: merge, in-progress-operation, conflicts ---------
+//
+// Mirrors `crates/gitsail-protocol/src/dto.rs`'s own merge/conflicts
+// section one-to-one, so Desktop and `gitsail-tui` never drift on what a
+// conflict/capability/merge outcome means.
+
+export type ConflictStageDto =
+  | "bothModified"
+  | "bothAdded"
+  | "bothDeleted"
+  | "addedByUs"
+  | "addedByThem"
+  | "deletedByUs"
+  | "deletedByThem";
+
+export interface ConflictedFileDto {
+  path: string;
+  stage: ConflictStageDto;
+}
+
+export type OperationCapabilityDto = "continue" | "skip" | "abort";
+
+/** Which multi-step Git operation, if any, is currently in progress
+ * (T-230/US-078) — `"none"` is its own explicit variant rather than `null`,
+ * so "nothing pending" is exactly as explicit on the wire as every other
+ * state. */
+export type InProgressOperationDto =
+  | { kind: "none" }
+  | {
+      kind: "merge";
+      heads: string[];
+      conflictedFiles: ConflictedFileDto[];
+      capabilities: OperationCapabilityDto[];
+    }
+  | {
+      kind: "rebase";
+      interactive: boolean;
+      onto: string | null;
+      conflictedFiles: ConflictedFileDto[];
+      capabilities: OperationCapabilityDto[];
+    }
+  | {
+      kind: "cherryPick";
+      target: string | null;
+      conflictedFiles: ConflictedFileDto[];
+      capabilities: OperationCapabilityDto[];
+    }
+  | {
+      kind: "revert";
+      target: string | null;
+      conflictedFiles: ConflictedFileDto[];
+      capabilities: OperationCapabilityDto[];
+    }
+  | {
+      kind: "bisectRun";
+      conflictedFiles: ConflictedFileDto[];
+      capabilities: OperationCapabilityDto[];
+    };
+
+/** A merge's exact outcome (T-231/US-079 criterion 2): fast-forward, a new
+ * merge commit, and a conflict are always three distinct, explicit
+ * variants — a conflict is never collapsed into a bare success. */
+export type MergeResultDto =
+  | { outcome: "fastForwarded"; newHead: string }
+  | { outcome: "mergeCommitCreated"; hash: string }
+  | { outcome: "conflict"; conflictedFiles: ConflictedFileDto[] };
+
+/** One conflict side's content (T-232/US-080 criterion 2) — `"absent"` is a
+ * legitimate, expected outcome (e.g. no common ancestor for a file added
+ * independently on both sides), never an error. */
+export type ConflictSideContentDto =
+  | { kind: "text"; text: string }
+  | { kind: "binary" }
+  | { kind: "absent" };
+
+export interface ConflictSidesDto {
+  path: string;
+  base: ConflictSideContentDto;
+  ours: ConflictSideContentDto;
+  theirs: ConflictSideContentDto;
+}
+
 // -- Diffs (US-057/US-058): mirrors `gitsail_protocol::dto`'s diff
 // section. `FileDiffDto` travels both ways — read from `get_diff`,
 // trimmed down and echoed back to `stage_hunks`/`unstage_hunks` for a

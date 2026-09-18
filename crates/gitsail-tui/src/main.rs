@@ -165,6 +165,21 @@ fn run(
                 Vec::new()
             }
             Message::PatchApplied(result) => app.on_patch_applied(result),
+            Message::InProgressOperationLoaded(generation, result) => {
+                app.on_in_progress_operation_loaded(generation, result);
+                Vec::new()
+            }
+            Message::MergeFinished(result) => app.on_merge_finished(result),
+            Message::ConflictSidesLoaded(path, result) => {
+                app.on_conflict_sides_loaded(path, result);
+                Vec::new()
+            }
+            Message::ConflictResolutionFinished(result) => {
+                app.on_conflict_resolution_finished(result)
+            }
+            Message::OperationResolutionFinished(result) => {
+                app.on_operation_resolution_finished(result)
+            }
         };
         worker::dispatch(commands, &read_port, &write_port, &tx);
 

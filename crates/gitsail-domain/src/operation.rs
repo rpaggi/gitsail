@@ -88,6 +88,48 @@ pub struct ConflictedFile {
     pub stage: ConflictStage,
 }
 
+/// The content of a single Git index stage during a conflict (T-232/US-080
+/// criterion 2). `Absent` is a legitimate, expected outcome rather than an
+/// error — mirroring [`crate::FileContentKind::Missing`]'s convention —
+/// since not every [`ConflictStage`] has all three stages populated: e.g.
+/// [`ConflictStage::BothAdded`] has no base (stage 1) at all, and
+/// [`ConflictStage::DeletedByThem`] has no "theirs" (stage 3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConflictSideContent {
+    Text(String),
+    Binary,
+    /// This stage does not exist for this file.
+    Absent,
+}
+
+/// A choosable side of a conflict, for taking one side's content wholesale
+/// rather than editing textually (T-232/US-080 criterion 3's documented
+/// binary-conflict flow: a binary file has no meaningful textual merge, so
+/// choosing "ours" or "theirs" in full is the resolution). Never `Base`: the
+/// common ancestor is context for a person reviewing the conflict, never
+/// itself a resolution choice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ConflictSide {
+    Ours,
+    Theirs,
+}
+
+/// The three sides of one conflicted file, read from the index's unmerged
+/// stages (T-232/US-080 criterion 2) — Git's own stage numbering (1: common
+/// ancestor, 2: current branch/"ours", 3: incoming/"theirs"), exposed here by
+/// name so a caller never has to remember which number means what. Read via
+/// `git show :1:<path>`/`:2:<path>`/`:3:<path>` against the index, which is
+/// why this is distinct from [`crate::FileContentAtRevision`]: that type
+/// always reads a *committed* revision, while a conflict's stages exist only
+/// in the index while the conflict is unresolved.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConflictSides {
+    pub path: PathBuf,
+    pub base: ConflictSideContent,
+    pub ours: ConflictSideContent,
+    pub theirs: ConflictSideContent,
+}
+
 /// A merge in progress (`.git/MERGE_HEAD` present).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MergeOperation {
@@ -298,6 +340,35 @@ mod tests {
         assert_eq!(cherry_pick.kind_label(), Some("cherry-pick"));
         assert_eq!(revert.kind_label(), Some("revert"));
         assert_ne!(cherry_pick, revert);
+    }
+
+    #[test]
+    fn conflict_sides_distinguishes_text_binary_and_absent_stages() {
+        let sides = ConflictSides {
+            path: "a.txt".into(),
+            base: ConflictSideContent::Text("base\n".to_string()),
+            ours: ConflictSideContent::Text("ours\n".to_string()),
+            theirs: ConflictSideContent::Binary,
+        };
+        assert_eq!(sides.base, ConflictSideContent::Text("base\n".to_string()));
+        assert_eq!(sides.theirs, ConflictSideContent::Binary);
+
+        let added_by_both = ConflictSides {
+            path: "b.txt".into(),
+            base: ConflictSideContent::Absent,
+            ours: ConflictSideContent::Text("ours\n".to_string()),
+            theirs: ConflictSideContent::Text("theirs\n".to_string()),
+        };
+        assert_eq!(
+            added_by_both.base,
+            ConflictSideContent::Absent,
+            "a file added on both sides independently has no common-ancestor stage"
+        );
+    }
+
+    #[test]
+    fn conflict_side_has_exactly_ours_and_theirs_never_base() {
+        assert_ne!(ConflictSide::Ours, ConflictSide::Theirs);
     }
 
     #[test]

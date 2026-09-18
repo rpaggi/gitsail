@@ -6,8 +6,11 @@
 //! reaching a widget (SAD §33) — this module is the render boundary that
 //! rule applies at; `App` itself always holds the raw value.
 
-use gitsail_application::PullOutcome;
-use gitsail_domain::{BlameOrigin, BranchKind, Commit, DiffLineOrigin, GitTimestamp, TagKind};
+use gitsail_application::{MergeResult, PullOutcome};
+use gitsail_domain::{
+    BlameOrigin, BranchKind, Commit, ConflictSideContent, ConflictStage, DiffLineOrigin,
+    GitTimestamp, TagKind,
+};
 use crate::graph_view;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -642,6 +645,14 @@ fn render_shortcuts(frame: &mut Frame, rect: Rect, app: &App) {
         "Esc/q closes commit details".to_string()
     } else if app.reference_details_open() {
         "Esc/q closes reference details".to_string()
+    } else if app.conflicts_open() {
+        "j/k select · Enter inspects · r resolves · o/t take ours/theirs · c continue · a abort · Esc closes"
+            .to_string()
+    } else if app.in_progress_operation().has_conflicts() {
+        format!(
+            "{} conflicted file(s) — press 'M' to resolve them",
+            app.in_progress_operation().conflicted_files().len()
+        )
     } else if app.commit_search().is_some() {
         "Type message/author:/branch:/hash · Enter searches · Esc cancels".to_string()
     } else if app.search().is_some() {
@@ -674,6 +685,8 @@ fn render_overlays(frame: &mut Frame, area: Rect, app: &App) {
         render_commit_composer(frame, area, app);
     } else if !app.operation().is_idle() {
         render_operation_overlay(frame, area, app);
+    } else if app.conflicts_open() {
+        render_conflicts_overlay(frame, area, app);
     } else if app.branch_input().is_some() {
         render_branch_name_prompt(frame, area, app);
     } else if app.sync_error().is_some() {
@@ -916,6 +929,31 @@ fn render_operation_overlay(frame: &mut Frame, area: Rect, app: &App) {
         }
     }
 
+    // T-231/US-079 criterion 2/3: fast-forward, a new merge commit, and a
+    // conflict are always three distinct, explicit lines — a conflict is
+    // never left to be inferred from a bare "Done" (`status_line` above
+    // already says so unconditionally, but this line is what actually
+    // tells the two apart at a glance) and never silently treated the same
+    // as either of the other two outcomes.
+    if matches!(kind, OperationKind::Merge { .. }) {
+        if let Some(outcome) = app.last_merge_result() {
+            let text = match outcome {
+                MergeResult::FastForwarded { new_head } => {
+                    format!("fast-forwarded to {}", new_head.to_short(8).as_str())
+                }
+                MergeResult::MergeCommitCreated { hash } => {
+                    format!("merge commit {} created", hash.to_short(8).as_str())
+                }
+                MergeResult::Conflict { files } => format!(
+                    "CONFLICT — {} file{} need resolution (press 'M' once dismissed)",
+                    files.len(),
+                    if files.len() == 1 { "" } else { "s" }
+                ),
+            };
+            lines.push(Line::from(text));
+        }
+    }
+
     if let Some(error) = error_line {
         lines.push(Line::from(error));
     }
@@ -930,6 +968,105 @@ fn render_operation_overlay(frame: &mut Frame, area: Rect, app: &App) {
             .block(Block::default().title("Operation").borders(Borders::ALL)),
         popup,
     );
+}
+
+/// Shows the conflicts overlay (T-232/US-080; T-233/US-081): every
+/// conflicted file [`gitsail_domain::InProgressOperation::conflicted_files`]
+/// reports, the highlighted one's base/ours/theirs sides once inspected
+/// (`Enter`), and the continue/abort actions
+/// [`gitsail_domain::InProgressOperation::capabilities`] actually offers for
+/// whatever operation is detected — never a fixed continue/abort pair
+/// assumed for every kind (a bisect run, for instance, offers neither here).
+fn render_conflicts_overlay(frame: &mut Frame, area: Rect, app: &App) {
+    let operation = app.in_progress_operation();
+    let files = operation.conflicted_files();
+
+    let mut lines = vec![Line::from(format!(
+        "{} — {} conflicted file{}",
+        operation.kind_label().unwrap_or("operation"),
+        files.len(),
+        if files.len() == 1 { "" } else { "s" }
+    ))];
+    lines.push(Line::from(""));
+
+    if files.is_empty() {
+        lines.push(Line::from("No conflicted files remain."));
+    }
+    for (index, file) in files.iter().enumerate() {
+        let marker = if index == app.conflict_cursor() { '>' } else { ' ' };
+        lines.push(Line::from(format!(
+            "{marker} {} ({})",
+            sanitize::safe_line(&file.path.to_string_lossy()),
+            conflict_stage_label(file.stage)
+        )));
+    }
+
+    lines.push(Line::from(""));
+    if let Some(error) = app.conflict_error() {
+        lines.push(Line::from(sanitize::safe_line(error.message())));
+        lines.push(Line::from(""));
+    }
+
+    match app.inspected_conflict() {
+        Some(sides) => {
+            lines.push(Line::from(format!(
+                "base:   {}",
+                conflict_side_label(&sides.base)
+            )));
+            lines.push(Line::from(format!(
+                "ours:   {}",
+                conflict_side_label(&sides.ours)
+            )));
+            lines.push(Line::from(format!(
+                "theirs: {}",
+                conflict_side_label(&sides.theirs)
+            )));
+        }
+        None => lines.push(Line::from("Enter inspects the highlighted file's sides.")),
+    }
+
+    lines.push(Line::from(""));
+    let mut actions = vec!["r resolves".to_string(), "o/t take ours/theirs".to_string()];
+    if operation.supports(gitsail_domain::OperationCapability::Continue) {
+        actions.push("c continues".to_string());
+    }
+    if operation.supports(gitsail_domain::OperationCapability::Abort) {
+        actions.push("a aborts".to_string());
+    }
+    actions.push("Esc/q closes".to_string());
+    lines.push(Line::from(actions.join(" · ")));
+
+    let popup = centered_rect(70, 70, area);
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: true })
+            .block(Block::default().title("Conflicts").borders(Borders::ALL)),
+        popup,
+    );
+}
+
+fn conflict_stage_label(stage: ConflictStage) -> &'static str {
+    match stage {
+        ConflictStage::BothModified => "both modified",
+        ConflictStage::BothAdded => "both added",
+        ConflictStage::BothDeleted => "both deleted",
+        ConflictStage::AddedByUs => "added by us",
+        ConflictStage::AddedByThem => "added by them",
+        ConflictStage::DeletedByUs => "deleted by us",
+        ConflictStage::DeletedByThem => "deleted by them",
+    }
+}
+
+fn conflict_side_label(content: &ConflictSideContent) -> String {
+    match content {
+        ConflictSideContent::Text(text) => {
+            let first_line = text.lines().next().unwrap_or("");
+            format!("{} ({} line(s))", sanitize::safe_line(first_line), text.lines().count())
+        }
+        ConflictSideContent::Binary => "<binary content>".to_string(),
+        ConflictSideContent::Absent => "<absent>".to_string(),
+    }
 }
 
 fn render_branch_name_prompt(frame: &mut Frame, area: Rect, app: &App) {

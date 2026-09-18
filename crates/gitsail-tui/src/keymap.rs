@@ -37,6 +37,11 @@ pub enum InputContext {
     /// The reference-details overlay is open (Enter on the References
     /// panel, US-050 criterion 2), mirroring [`Self::CommitDetails`].
     ReferenceDetails,
+    /// The conflicts overlay is open (`M`, T-232/US-080/T-233/US-081) —
+    /// unlike [`Self::CommitDetails`]/[`Self::ReferenceDetails`], this
+    /// overlay is itself navigable (multiple conflicted files) and offers
+    /// resolution/continue/abort actions, not just dismiss.
+    Conflicts,
     /// No overlay is active; the panels and shortcuts bar are live.
     Normal,
 }
@@ -91,6 +96,18 @@ pub fn action_for(key: KeyEvent, ctx: InputContext) -> Option<Action> {
             KeyCode::Char('q') | KeyCode::Esc => Some(Action::Dismiss),
             _ => None,
         },
+        InputContext::Conflicts => match key.code {
+            KeyCode::Char('q') | KeyCode::Esc => Some(Action::Dismiss),
+            KeyCode::Up | KeyCode::Char('k') => Some(Action::MoveUp),
+            KeyCode::Down | KeyCode::Char('j') => Some(Action::MoveDown),
+            KeyCode::Enter => Some(Action::InspectConflict),
+            KeyCode::Char('r') => Some(Action::MarkConflictResolved),
+            KeyCode::Char('o') => Some(Action::TakeConflictSideOurs),
+            KeyCode::Char('t') => Some(Action::TakeConflictSideTheirs),
+            KeyCode::Char('c') => Some(Action::RequestContinueOperation),
+            KeyCode::Char('a') => Some(Action::RequestAbortOperation),
+            _ => None,
+        },
         InputContext::Normal => match key.code {
             KeyCode::Tab => Some(Action::FocusNext),
             KeyCode::BackTab => Some(Action::FocusPrev),
@@ -117,6 +134,8 @@ pub fn action_for(key: KeyEvent, ctx: InputContext) -> Option<Action> {
             KeyCode::Char('p') => Some(Action::RequestPull),
             KeyCode::Char('P') => Some(Action::RequestPush),
             KeyCode::Char('t') => Some(Action::CycleReferenceView),
+            KeyCode::Char('m') => Some(Action::RequestMerge),
+            KeyCode::Char('M') => Some(Action::ToggleConflictsPanel),
             _ => None,
         },
     }
@@ -320,6 +339,58 @@ mod tests {
         );
         assert_eq!(
             action_for(press(KeyCode::Esc), InputContext::RenameBranch),
+            Some(Action::Dismiss)
+        );
+    }
+
+    #[test]
+    fn merge_and_toggle_conflicts_keys_map_in_the_normal_context() {
+        assert_eq!(
+            action_for(press(KeyCode::Char('m')), InputContext::Normal),
+            Some(Action::RequestMerge)
+        );
+        assert_eq!(
+            action_for(press(KeyCode::Char('M')), InputContext::Normal),
+            Some(Action::ToggleConflictsPanel)
+        );
+    }
+
+    #[test]
+    fn conflicts_context_routes_navigation_and_resolution_keys() {
+        assert_eq!(
+            action_for(press(KeyCode::Char('j')), InputContext::Conflicts),
+            Some(Action::MoveDown)
+        );
+        assert_eq!(
+            action_for(press(KeyCode::Char('k')), InputContext::Conflicts),
+            Some(Action::MoveUp)
+        );
+        assert_eq!(
+            action_for(press(KeyCode::Enter), InputContext::Conflicts),
+            Some(Action::InspectConflict)
+        );
+        assert_eq!(
+            action_for(press(KeyCode::Char('r')), InputContext::Conflicts),
+            Some(Action::MarkConflictResolved)
+        );
+        assert_eq!(
+            action_for(press(KeyCode::Char('o')), InputContext::Conflicts),
+            Some(Action::TakeConflictSideOurs)
+        );
+        assert_eq!(
+            action_for(press(KeyCode::Char('t')), InputContext::Conflicts),
+            Some(Action::TakeConflictSideTheirs)
+        );
+        assert_eq!(
+            action_for(press(KeyCode::Char('c')), InputContext::Conflicts),
+            Some(Action::RequestContinueOperation)
+        );
+        assert_eq!(
+            action_for(press(KeyCode::Char('a')), InputContext::Conflicts),
+            Some(Action::RequestAbortOperation)
+        );
+        assert_eq!(
+            action_for(press(KeyCode::Esc), InputContext::Conflicts),
             Some(Action::Dismiss)
         );
     }

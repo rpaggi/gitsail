@@ -13,14 +13,16 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use gitsail_application::{
-    AmendPreview, ApplyPatchResult, CommitDiff, PatchExport, PatchPreview, PullOutcome,
+    AmendPreview, ApplyPatchResult, CommitDiff, MergeResult, PatchExport, PatchPreview, PullOutcome,
     RecentRepositoryEntry,
 };
 use gitsail_domain::{
-    Blame, BlameLine, BlameOrigin, Branch, BranchKind, ChangeType, Commit, CommitHash, Decoration,
-    Diff, DiffHunk, DiffLine, DiffLineOrigin, FileChange, FileContentAtRevision, FileContentKind,
-    FileDiff, FileStatusCode, GitTimestamp, GraphEdge, GraphRow, HeadState, LineHistory,
-    LineHistoryEntry, LineRange, Remote, Repository, RepositoryStatus, Signature,
+    Blame, BlameLine, BlameOrigin, Branch, BranchKind, ChangeType, Commit, CommitHash,
+    ConflictSideContent, ConflictSides, ConflictStage, ConflictedFile, Decoration, Diff, DiffHunk,
+    DiffLine, DiffLineOrigin, FileChange, FileContentAtRevision, FileContentKind, FileDiff,
+    FileStatusCode, GitTimestamp, GraphEdge, GraphRow, HeadState, InProgressOperation, LineHistory,
+    LineHistoryEntry, LineRange, OperationCapability, Remote, Repository, RepositoryStatus,
+    Signature,
 };
 
 /// Converts a filesystem path to its wire representation.
@@ -517,6 +519,245 @@ pub struct PullResultDto {
     pub remote: String,
     pub branch: String,
     pub outcome: PullOutcomeDto,
+}
+
+// ---------------------------------------------------------------------
+// EPIC-16/T-231..T-233: merge, in-progress-operation detection, conflict
+// resolution, continue/abort. Mirrors `gitsail-tui`'s own rendering of the
+// same domain types one-to-one, so Desktop and TUI never drift on what a
+// conflict/capability/merge outcome means (see this module's own "wire
+// shape is this crate's contract" doc).
+// ---------------------------------------------------------------------
+
+/// Mirrors [`ConflictStage`] exactly — Git's own seven unmerged `XY` status
+/// codes, named rather than left as raw letters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ConflictStageDto {
+    BothModified,
+    BothAdded,
+    BothDeleted,
+    AddedByUs,
+    AddedByThem,
+    DeletedByUs,
+    DeletedByThem,
+}
+
+impl From<ConflictStage> for ConflictStageDto {
+    fn from(stage: ConflictStage) -> Self {
+        match stage {
+            ConflictStage::BothModified => Self::BothModified,
+            ConflictStage::BothAdded => Self::BothAdded,
+            ConflictStage::BothDeleted => Self::BothDeleted,
+            ConflictStage::AddedByUs => Self::AddedByUs,
+            ConflictStage::AddedByThem => Self::AddedByThem,
+            ConflictStage::DeletedByUs => Self::DeletedByUs,
+            ConflictStage::DeletedByThem => Self::DeletedByThem,
+        }
+    }
+}
+
+/// One conflicted path plus its [`ConflictStageDto`] (T-230/US-078
+/// criterion 1; T-232/US-080 criterion 1).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConflictedFileDto {
+    pub path: String,
+    pub stage: ConflictStageDto,
+}
+
+impl From<&ConflictedFile> for ConflictedFileDto {
+    fn from(file: &ConflictedFile) -> Self {
+        Self {
+            path: path_to_string(&file.path),
+            stage: ConflictStageDto::from(file.stage),
+        }
+    }
+}
+
+/// Mirrors [`OperationCapability`] — which continue/skip/abort actions make
+/// sense to offer right now for whatever [`InProgressOperationDto`] is
+/// detected (T-230/US-078's own design note: never a fixed continue/abort
+/// pair assumed uniformly for every operation kind).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum OperationCapabilityDto {
+    Continue,
+    Skip,
+    Abort,
+}
+
+impl From<OperationCapability> for OperationCapabilityDto {
+    fn from(capability: OperationCapability) -> Self {
+        match capability {
+            OperationCapability::Continue => Self::Continue,
+            OperationCapability::Skip => Self::Skip,
+            OperationCapability::Abort => Self::Abort,
+        }
+    }
+}
+
+fn conflicted_files_dto(files: &[ConflictedFile]) -> Vec<ConflictedFileDto> {
+    files.iter().map(ConflictedFileDto::from).collect()
+}
+
+fn capabilities_dto(capabilities: &[OperationCapability]) -> Vec<OperationCapabilityDto> {
+    capabilities.iter().map(|c| OperationCapabilityDto::from(*c)).collect()
+}
+
+/// Which multi-step Git operation, if any, is currently in progress
+/// (T-230/US-078), mirroring [`InProgressOperation`] one-to-one — including
+/// `None` as its own explicit variant rather than an `Option`, so "nothing
+/// pending" is exactly as explicit on the wire as every other state (SAD
+/// §14's own "no implicit states" convention, matching
+/// [`RepositoryStatusDto`]'s treatment of an empty file list).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum InProgressOperationDto {
+    None,
+    Merge {
+        heads: Vec<String>,
+        #[serde(rename = "conflictedFiles")]
+        conflicted_files: Vec<ConflictedFileDto>,
+        capabilities: Vec<OperationCapabilityDto>,
+    },
+    Rebase {
+        interactive: bool,
+        onto: Option<String>,
+        #[serde(rename = "conflictedFiles")]
+        conflicted_files: Vec<ConflictedFileDto>,
+        capabilities: Vec<OperationCapabilityDto>,
+    },
+    CherryPick {
+        target: Option<String>,
+        #[serde(rename = "conflictedFiles")]
+        conflicted_files: Vec<ConflictedFileDto>,
+        capabilities: Vec<OperationCapabilityDto>,
+    },
+    Revert {
+        target: Option<String>,
+        #[serde(rename = "conflictedFiles")]
+        conflicted_files: Vec<ConflictedFileDto>,
+        capabilities: Vec<OperationCapabilityDto>,
+    },
+    BisectRun {
+        #[serde(rename = "conflictedFiles")]
+        conflicted_files: Vec<ConflictedFileDto>,
+        capabilities: Vec<OperationCapabilityDto>,
+    },
+}
+
+impl From<&InProgressOperation> for InProgressOperationDto {
+    fn from(operation: &InProgressOperation) -> Self {
+        match operation {
+            InProgressOperation::None => Self::None,
+            InProgressOperation::Merge(op) => Self::Merge {
+                heads: op.heads.iter().map(|h| h.as_str().to_string()).collect(),
+                conflicted_files: conflicted_files_dto(&op.conflicted_files),
+                capabilities: capabilities_dto(&op.capabilities),
+            },
+            InProgressOperation::Rebase(op) => Self::Rebase {
+                interactive: op.interactive,
+                onto: op.onto.as_ref().map(|c| c.as_str().to_string()),
+                conflicted_files: conflicted_files_dto(&op.conflicted_files),
+                capabilities: capabilities_dto(&op.capabilities),
+            },
+            InProgressOperation::CherryPick(op) => Self::CherryPick {
+                target: op.target.as_ref().map(|c| c.as_str().to_string()),
+                conflicted_files: conflicted_files_dto(&op.conflicted_files),
+                capabilities: capabilities_dto(&op.capabilities),
+            },
+            InProgressOperation::Revert(op) => Self::Revert {
+                target: op.target.as_ref().map(|c| c.as_str().to_string()),
+                conflicted_files: conflicted_files_dto(&op.conflicted_files),
+                capabilities: capabilities_dto(&op.capabilities),
+            },
+            InProgressOperation::BisectRun(op) => Self::BisectRun {
+                conflicted_files: conflicted_files_dto(&op.conflicted_files),
+                capabilities: capabilities_dto(&op.capabilities),
+            },
+        }
+    }
+}
+
+/// A merge's exact outcome (T-231/US-079 criterion 2): fast-forward, a new
+/// merge commit, and a conflict are always three distinct, explicit
+/// variants — a conflict is never collapsed into a bare success or a
+/// generic error. Mirrors [`MergeResult`] one-to-one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "outcome", rename_all = "camelCase")]
+pub enum MergeResultDto {
+    FastForwarded {
+        #[serde(rename = "newHead")]
+        new_head: String,
+    },
+    MergeCommitCreated {
+        hash: String,
+    },
+    Conflict {
+        #[serde(rename = "conflictedFiles")]
+        conflicted_files: Vec<ConflictedFileDto>,
+    },
+}
+
+impl From<&MergeResult> for MergeResultDto {
+    fn from(result: &MergeResult) -> Self {
+        match result {
+            MergeResult::FastForwarded { new_head } => Self::FastForwarded {
+                new_head: new_head.as_str().to_string(),
+            },
+            MergeResult::MergeCommitCreated { hash } => Self::MergeCommitCreated {
+                hash: hash.as_str().to_string(),
+            },
+            MergeResult::Conflict { files } => Self::Conflict {
+                conflicted_files: conflicted_files_dto(files),
+            },
+        }
+    }
+}
+
+/// One conflict side's content (T-232/US-080 criterion 2), mirroring
+/// [`ConflictSideContent`]: `Absent` is a legitimate, expected outcome
+/// (e.g. no common ancestor for a file added independently on both sides),
+/// never an error.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum ConflictSideContentDto {
+    Text { text: String },
+    Binary,
+    Absent,
+}
+
+impl From<&ConflictSideContent> for ConflictSideContentDto {
+    fn from(content: &ConflictSideContent) -> Self {
+        match content {
+            ConflictSideContent::Text(text) => Self::Text { text: text.clone() },
+            ConflictSideContent::Binary => Self::Binary,
+            ConflictSideContent::Absent => Self::Absent,
+        }
+    }
+}
+
+/// The three sides of one conflicted file (T-232/US-080 criterion 2),
+/// mirroring [`ConflictSides`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConflictSidesDto {
+    pub path: String,
+    pub base: ConflictSideContentDto,
+    pub ours: ConflictSideContentDto,
+    pub theirs: ConflictSideContentDto,
+}
+
+impl From<&ConflictSides> for ConflictSidesDto {
+    fn from(sides: &ConflictSides) -> Self {
+        Self {
+            path: path_to_string(&sides.path),
+            base: ConflictSideContentDto::from(&sides.base),
+            ours: ConflictSideContentDto::from(&sides.ours),
+            theirs: ConflictSideContentDto::from(&sides.theirs),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------
@@ -1414,5 +1655,94 @@ mod tests {
         let round_tripped = FileDiff::from(&dto);
 
         assert_eq!(round_tripped, original, "a hunk-selection DTO must survive the trip back into domain shape unchanged");
+    }
+
+    // -----------------------------------------------------------------
+    // EPIC-16/T-231..T-233: merge, in-progress-operation, conflicts.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn in_progress_operation_dto_tags_none_explicitly_rather_than_an_implicit_absence() {
+        let dto = InProgressOperationDto::from(&InProgressOperation::None);
+        let json = serde_json::to_value(&dto).unwrap();
+        assert_eq!(json["kind"], "none");
+    }
+
+    #[test]
+    fn in_progress_operation_dto_maps_a_merge_with_its_conflicted_files_and_capabilities() {
+        let operation = InProgressOperation::Merge(gitsail_domain::MergeOperation {
+            heads: vec![CommitHash::new("a".repeat(40)).unwrap()],
+            conflicted_files: vec![ConflictedFile {
+                path: PathBuf::from("f.txt"),
+                stage: ConflictStage::BothModified,
+            }],
+            capabilities: vec![OperationCapability::Continue, OperationCapability::Abort],
+        });
+
+        let dto = InProgressOperationDto::from(&operation);
+        let json = serde_json::to_value(&dto).unwrap();
+
+        assert_eq!(json["kind"], "merge");
+        assert_eq!(json["heads"][0], "a".repeat(40));
+        assert_eq!(json["conflictedFiles"][0]["path"], "f.txt");
+        assert_eq!(json["conflictedFiles"][0]["stage"], "bothModified");
+        assert_eq!(json["capabilities"], serde_json::json!(["continue", "abort"]));
+        // A merge never offers `skip` — there is no further step to skip
+        // past (mirrors `gitsail_domain::operation`'s own doc/tests).
+        assert!(!json["capabilities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c == "skip"));
+    }
+
+    #[test]
+    fn merge_result_dto_distinguishes_fast_forward_merge_commit_and_conflict() {
+        let ff = MergeResultDto::from(&MergeResult::FastForwarded {
+            new_head: CommitHash::new("a".repeat(40)).unwrap(),
+        });
+        let commit = MergeResultDto::from(&MergeResult::MergeCommitCreated {
+            hash: CommitHash::new("b".repeat(40)).unwrap(),
+        });
+        let conflict = MergeResultDto::from(&MergeResult::Conflict {
+            files: vec![ConflictedFile {
+                path: PathBuf::from("f.txt"),
+                stage: ConflictStage::BothModified,
+            }],
+        });
+
+        let ff_json = serde_json::to_value(&ff).unwrap();
+        let commit_json = serde_json::to_value(&commit).unwrap();
+        let conflict_json = serde_json::to_value(&conflict).unwrap();
+
+        assert_eq!(ff_json["outcome"], "fastForwarded");
+        assert_eq!(ff_json["newHead"], "a".repeat(40));
+        assert_eq!(commit_json["outcome"], "mergeCommitCreated");
+        assert_eq!(commit_json["hash"], "b".repeat(40));
+        assert_eq!(conflict_json["outcome"], "conflict");
+        assert_eq!(conflict_json["conflictedFiles"][0]["path"], "f.txt");
+        assert_ne!(
+            ff_json["outcome"], conflict_json["outcome"],
+            "a conflict must never be tagged the same as a fast-forward"
+        );
+    }
+
+    #[test]
+    fn conflict_sides_dto_distinguishes_text_binary_and_absent() {
+        let sides = ConflictSides {
+            path: PathBuf::from("f.txt"),
+            base: ConflictSideContent::Absent,
+            ours: ConflictSideContent::Text("ours\n".to_string()),
+            theirs: ConflictSideContent::Binary,
+        };
+
+        let dto = ConflictSidesDto::from(&sides);
+        let json = serde_json::to_value(&dto).unwrap();
+
+        assert_eq!(json["path"], "f.txt");
+        assert_eq!(json["base"]["kind"], "absent");
+        assert_eq!(json["ours"]["kind"], "text");
+        assert_eq!(json["ours"]["text"], "ours\n");
+        assert_eq!(json["theirs"]["kind"], "binary");
     }
 }

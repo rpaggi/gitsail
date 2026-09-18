@@ -33,16 +33,18 @@ pub use recent_repositories::{
 pub use session::{RefreshReason, RefreshTicket, RepositorySession, Selection};
 pub use use_cases::{
     AmendPreview, CommitDiff, CompareRevisions, DetectInProgressOperation, GetCommit,
-    GetCommitDiff, GetCommitHistory, GetDiff, GetFileBlame, GetFileContent, GetLineHistory,
-    GetRepositoryStatus, ListBranches, OpenRepository, PreviewAmend, RevisionComparison,
+    GetCommitDiff, GetCommitHistory, GetConflictSides, GetDiff, GetFileBlame, GetFileContent,
+    GetLineHistory, GetRepositoryStatus, ListBranches, OpenRepository, PreviewAmend,
+    RevisionComparison,
 };
 pub use write_ports::{
-    ApplyPatchResult, PatchPreview, PullOutcome, RepositoryWritePort, StashApplyOutcome,
-    StashScope, TagAnnotation, WorktreeBranchSpec,
+    ApplyPatchResult, MergeResult, PatchPreview, PullOutcome, RepositoryWritePort,
+    StashApplyOutcome, StashScope, TagAnnotation, WorktreeBranchSpec,
 };
 pub use write_use_cases::{
-    AmendCommit, ApplyPatch, ApplyStash, CreateBranch, CreateCommit, CreateStash, CreateTag,
-    CreateWorktree, DeleteBranch, DeleteTag, DropStash, Fetch, ForcePushWithLease, PopStash,
-    PreviewPatchApplication, Pull, Push, RemoveWorktree, RenameBranch, StageFiles, StageHunks,
-    SwitchBranch, UnstageFiles, UnstageHunks,
+    AbortOperation, AmendCommit, ApplyPatch, ApplyStash, ContinueOperation, CreateBranch,
+    CreateCommit, CreateStash, CreateTag, CreateWorktree, DeleteBranch, DeleteTag, DropStash,
+    Fetch, ForcePushWithLease, MarkConflictResolved, Merge, PopStash, PreviewPatchApplication,
+    Pull, Push, RemoveWorktree, RenameBranch, StageFiles, StageHunks, SwitchBranch,
+    TakeConflictSide, UnstageFiles, UnstageHunks,
 };

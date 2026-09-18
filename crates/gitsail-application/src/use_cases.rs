@@ -6,8 +6,9 @@ use std::path::Path;
 use std::sync::Arc;
 
 use gitsail_domain::{
-    Blame, Branch, CancellationToken, Commit, CommitHash, Diff, FileContentAtRevision,
-    GitSailError, InProgressOperation, LineHistory, Repository, RepositoryStatus,
+    Blame, Branch, CancellationToken, Commit, CommitHash, ConflictSides, Diff,
+    FileContentAtRevision, GitSailError, InProgressOperation, LineHistory, Repository,
+    RepositoryStatus,
 };
 
 use crate::blame_cache::{BlameCache, BlameCacheKey};
@@ -64,6 +65,24 @@ impl DetectInProgressOperation {
 
     pub fn execute(&self, repo: &Repository) -> Result<InProgressOperation, GitSailError> {
         self.port.detect_in_progress_operation(repo)
+    }
+}
+
+/// Reads one conflicted file's base/ours/theirs sides (T-232/US-080
+/// criterion 2) — a thin wrapper over
+/// [`RepositoryReadPort::conflict_sides`], mirroring
+/// [`DetectInProgressOperation`]'s own shape.
+pub struct GetConflictSides {
+    port: Arc<dyn RepositoryReadPort>,
+}
+
+impl GetConflictSides {
+    pub fn new(port: Arc<dyn RepositoryReadPort>) -> Self {
+        Self { port }
+    }
+
+    pub fn execute(&self, repo: &Repository, path: &Path) -> Result<ConflictSides, GitSailError> {
+        self.port.conflict_sides(repo, path)
     }
 }
 

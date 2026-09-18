@@ -7,9 +7,9 @@
 use std::path::{Path, PathBuf};
 
 use gitsail_domain::{
-    Blame, Branch, BranchName, CancellationToken, Commit, CommitHash, Diff, FileContentAtRevision,
-    GitSailError, InProgressOperation, LineHistory, LineRange, Remote, Repository,
-    RepositoryStatus, Stash, Tag, Worktree,
+    Blame, Branch, BranchName, CancellationToken, Commit, CommitHash, ConflictSideContent,
+    ConflictSides, Diff, FileContentAtRevision, GitSailError, InProgressOperation, LineHistory,
+    LineRange, Remote, Repository, RepositoryStatus, Stash, Tag, Worktree,
 };
 
 /// A single page of results plus continuation metadata (SAD §25).
@@ -271,5 +271,32 @@ pub trait RepositoryReadPort: Send + Sync {
     ) -> Result<InProgressOperation, GitSailError> {
         let _ = repo;
         Ok(InProgressOperation::None)
+    }
+
+    // -------------------------------------------------------------------
+    // T-232/US-080: inspecting a conflicted file's ours/theirs/base sides.
+    // -------------------------------------------------------------------
+
+    /// Reads `path`'s three conflict sides (common ancestor, ours, theirs)
+    /// from the index's unmerged stages (T-232/US-080 criterion 2), via
+    /// `git show :1:<path>`/`:2:<path>`/`:3:<path>`. A stage a given
+    /// [`gitsail_domain::ConflictStage`] does not carry (e.g. no base for a
+    /// file added independently on both sides) reports
+    /// [`ConflictSideContent::Absent`] rather than an error.
+    ///
+    /// Default: every stage reported [`ConflictSideContent::Absent`] —
+    /// correct for any test double/adapter that predates this story,
+    /// mirroring [`Self::detect_in_progress_operation`]'s own "empty is a
+    /// legitimate default" convention. [`crate::ports::RepositoryReadPort`]'s
+    /// only real implementation (`gitsail_git::GitCliProvider`) overrides
+    /// this with a real index read.
+    fn conflict_sides(&self, repo: &Repository, path: &Path) -> Result<ConflictSides, GitSailError> {
+        let _ = repo;
+        Ok(ConflictSides {
+            path: path.to_path_buf(),
+            base: ConflictSideContent::Absent,
+            ours: ConflictSideContent::Absent,
+            theirs: ConflictSideContent::Absent,
+        })
     }
 }

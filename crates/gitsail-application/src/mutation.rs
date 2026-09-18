@@ -29,7 +29,7 @@
 use std::fmt;
 use std::path::PathBuf;
 
-use gitsail_domain::{ErrorCode, GitSailError};
+use gitsail_domain::{ConflictSide, ErrorCode, GitSailError};
 
 /// Risk tier for a mutating operation, per SAD §20's exact three-tier
 /// taxonomy ("Safe: fetch, stage, unstage"; "Moderate: commit, checkout,
@@ -173,6 +173,30 @@ pub enum MutationKind {
     ApplyPatch {
         affected_file_count: usize,
     },
+    /// EPIC-16/T-231 (US-079): `RepositoryWritePort::merge`. Carries the
+    /// target revision so a confirmation prompt names it explicitly, never a
+    /// generic "merge" (US-079 criterion 1: origin, destination and policy
+    /// are shown before executing).
+    Merge {
+        target: String,
+    },
+    /// EPIC-16/T-233 (US-081): `RepositoryWritePort::continue_operation`.
+    /// Generic across merge/rebase/cherry-pick/revert (the port method
+    /// itself dispatches on whatever `InProgressOperation` is actually
+    /// detected), so this carries no per-kind data of its own.
+    ContinueOperation,
+    /// EPIC-16/T-233 (US-081): `RepositoryWritePort::abort_operation`.
+    AbortOperation,
+    /// EPIC-16/T-232 (US-080): `RepositoryWritePort::mark_conflict_resolved`.
+    MarkConflictResolved {
+        path: PathBuf,
+    },
+    /// EPIC-16/T-232 (US-080): `RepositoryWritePort::take_conflict_side`
+    /// (the documented binary-conflict flow).
+    TakeConflictSide {
+        path: PathBuf,
+        side: ConflictSide,
+    },
 }
 
 impl MutationKind {
@@ -287,6 +311,40 @@ impl MutationKind {
             // HEAD, only working-tree file content. Hence `Moderate`, per
             // this task's own scope note (T-163/US-030).
             MutationKind::ApplyPatch { .. } => RiskLevel::Moderate,
+            // SAD §20's own named `Moderate` example ("Moderate: commit,
+            // checkout, merge"). A merge mutates the working tree/index and
+            // history, but confirmed/deliberate merges (fast-forward or a
+            // clean merge commit) are the ordinary, expected case; a
+            // conflict is never silently lost work either — it lands in
+            // `MergeResult::Conflict`, fully recoverable via continue/abort
+            // (T-232/T-233), not a "hard to reverse" `Destructive` outcome.
+            MutationKind::Merge { .. } => RiskLevel::Moderate,
+            // Resuming a merge/rebase/cherry-pick/revert once conflicts are
+            // resolved is the deliberate conclusion of an already-confirmed
+            // operation — the same character `CreateCommit`/`Merge` already
+            // have.
+            MutationKind::ContinueOperation => RiskLevel::Moderate,
+            // Aborting discards the in-progress operation's own changes
+            // (e.g. a merge's conflict resolutions in progress) — not
+            // "hard to reverse" the way a force push or `reset --hard` on
+            // arbitrary history is (Git restores the pre-operation state),
+            // but real, confirmed work in the index/working tree is thrown
+            // away, so this task's own scope note classifies it
+            // `Destructive` rather than `Moderate`, requiring reinforced
+            // confirmation.
+            MutationKind::AbortOperation => RiskLevel::Destructive,
+            // `git add`, the same tier `StageFiles` already occupies (SAD
+            // §20's own named `Safe` example) — this only records that a
+            // conflict's current working-tree content is the resolution, it
+            // never itself discards or overwrites anything.
+            MutationKind::MarkConflictResolved { .. } => RiskLevel::Safe,
+            // Overwrites the file's working-tree content with one whole
+            // side, discarding whatever it held before — the same "mutates,
+            // but not irreversibly" character `ApplyPatch`/`CreateStash`
+            // already have (the conflict's other side remains inspectable
+            // via `conflict_sides` until continue/abort concludes the
+            // operation), hence `Moderate` rather than `Destructive`.
+            MutationKind::TakeConflictSide { .. } => RiskLevel::Moderate,
         }
     }
 
@@ -331,6 +389,19 @@ impl MutationKind {
                     "{affected_file_count} file{} affected by the patch",
                     if *affected_file_count == 1 { "" } else { "s" }
                 )
+            }
+            MutationKind::Merge { target } => format!("merging '{target}' into the current branch"),
+            MutationKind::ContinueOperation => "the in-progress operation".to_string(),
+            MutationKind::AbortOperation => "the in-progress operation".to_string(),
+            MutationKind::MarkConflictResolved { path } => {
+                format!("'{}' as resolved", path.display())
+            }
+            MutationKind::TakeConflictSide { path, side } => {
+                let side_label = match side {
+                    ConflictSide::Ours => "ours",
+                    ConflictSide::Theirs => "theirs",
+                };
+                format!("'{}' (take {side_label})", path.display())
             }
         }
     }
@@ -607,6 +678,48 @@ mod tests {
         let label = kind.target_label();
         assert!(label.contains("old-name"));
         assert!(label.contains("new-name"));
+    }
+
+    /// EPIC-16/T-231/T-233: `Merge`/`ContinueOperation` classify `Moderate`
+    /// (SAD §20's own named `Moderate` example includes merge) while
+    /// `AbortOperation` classifies `Destructive` (it discards the
+    /// in-progress operation's own changes) per this task's scope note, and
+    /// `Merge`'s label always names the concrete target revision.
+    #[test]
+    fn merge_and_continue_classify_moderate_while_abort_classifies_destructive() {
+        let merge = MutationKind::Merge {
+            target: "feature/x".into(),
+        };
+        assert_eq!(merge.risk(), RiskLevel::Moderate);
+        assert!(!merge.risk().requires_reinforced_confirmation());
+        assert!(merge.target_label().contains("feature/x"));
+
+        assert_eq!(MutationKind::ContinueOperation.risk(), RiskLevel::Moderate);
+        assert!(MutationKind::AbortOperation
+            .risk()
+            .requires_reinforced_confirmation());
+    }
+
+    /// EPIC-16/T-232: `MarkConflictResolved` classifies `Safe` (it is `git
+    /// add`, mirroring `StageFiles`), while `TakeConflictSide` classifies
+    /// `Moderate` (it overwrites working-tree content, but the discarded
+    /// side remains recoverable via `conflict_sides` until the operation
+    /// concludes), and both labels name the exact conflicted path.
+    #[test]
+    fn mark_conflict_resolved_classifies_safe_and_take_conflict_side_classifies_moderate() {
+        let mark = MutationKind::MarkConflictResolved {
+            path: PathBuf::from("a.txt"),
+        };
+        assert!(mark.risk().skips_confirmation());
+        assert!(mark.target_label().contains("a.txt"));
+
+        let take_ours = MutationKind::TakeConflictSide {
+            path: PathBuf::from("image.png"),
+            side: gitsail_domain::ConflictSide::Ours,
+        };
+        assert_eq!(take_ours.risk(), RiskLevel::Moderate);
+        assert!(take_ours.target_label().contains("image.png"));
+        assert!(take_ours.target_label().contains("ours"));
     }
 
     #[test]

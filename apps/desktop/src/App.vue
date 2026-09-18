@@ -6,6 +6,7 @@ import BranchPanel from "./components/BranchPanel.vue";
 import CommitGraph from "./components/CommitGraph.vue";
 import ConfirmationDialog from "./components/ConfirmationDialog.vue";
 import DiffViewer from "./components/DiffViewer.vue";
+import MergePanel from "./components/MergePanel.vue";
 import RecentRepositories from "./components/RecentRepositories.vue";
 import RepositoryOpener from "./components/RepositoryOpener.vue";
 import SearchPalette from "./components/SearchPalette.vue";
@@ -74,6 +75,7 @@ onBeforeUnmount(() => {
         <SearchPalette />
         <BranchPanel />
         <SyncPanel />
+        <MergePanel />
         <AmendPanel />
       </aside>
       <div class="workspace__main">

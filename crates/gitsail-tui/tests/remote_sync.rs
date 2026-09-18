@@ -110,6 +110,13 @@ fn run_mutation(app: &mut App, commands: Vec<Command>) {
                 app.on_stash_entries_loaded(generation, read.list_stash_entries(&repo));
                 Vec::new()
             }
+            Command::LoadInProgressOperation(generation, repo) => {
+                app.on_in_progress_operation_loaded(
+                    generation,
+                    read.detect_in_progress_operation(&repo),
+                );
+                Vec::new()
+            }
             other => panic!("unexpected command: {other:?}"),
         };
         queue.extend(follow_up);

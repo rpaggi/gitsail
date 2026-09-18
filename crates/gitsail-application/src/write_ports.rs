@@ -17,8 +17,8 @@
 use std::path::{Path, PathBuf};
 
 use gitsail_domain::{
-    BranchName, CancellationToken, CommitHash, ErrorCode, FileDiff, GitSailError, Repository,
-    Stash, Worktree,
+    BranchName, CancellationToken, CommitHash, ConflictSide, ConflictedFile, ErrorCode, FileDiff,
+    GitSailError, Repository, Stash, Worktree,
 };
 
 use crate::mutation::Precondition;
@@ -157,6 +157,32 @@ pub enum PullOutcome {
     AlreadyUpToDate,
     /// The current branch fast-forwarded to `new_head`.
     FastForwarded { new_head: CommitHash },
+}
+
+/// Outcome of [`RepositoryWritePort::merge`] (T-231/US-079 criterion 2):
+/// fast-forward, a new merge commit, and a conflict are always reported as
+/// three distinct, explicit results — never collapsed into one another, and
+/// a conflict is never reported as a completed success (History Editing
+/// Rules #1).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MergeResult {
+    /// The current branch had no divergent work of its own: HEAD simply
+    /// moved forward to the target's commit, with no new commit object
+    /// created. Also reported when the target was already the current
+    /// branch's ancestor (Git's own "Already up to date") — HEAD ends at
+    /// `new_head` either way, just without having moved in that
+    /// degenerate case.
+    FastForwarded { new_head: CommitHash },
+    /// Both sides had diverged, non-conflicting work: Git created a new
+    /// two-parent merge commit, `hash`.
+    MergeCommitCreated { hash: CommitHash },
+    /// The merge could not be completed automatically: `files` are left
+    /// unmerged in the index, exactly as
+    /// [`crate::ports::RepositoryReadPort::detect_in_progress_operation`]
+    /// would also report them, and the repository is left with a pending
+    /// merge (`InProgressOperation::Merge`) for T-232/T-233's continue/abort
+    /// flow to pick up.
+    Conflict { files: Vec<ConflictedFile> },
 }
 
 /// The error every new-in-EPIC-18 mutation method below defaults to when a
@@ -567,5 +593,99 @@ pub trait RepositoryWritePort: Send + Sync {
     ) -> Result<ApplyPatchResult, GitSailError> {
         let _ = (repo, patch_text);
         Err(unsupported("apply_patch"))
+    }
+
+    // -------------------------------------------------------------------
+    // EPIC-16/T-231..T-233 (US-079..081): merge, conflict resolution, and
+    // continue/abort of a pending operation. Defaulted the same way as the
+    // EPIC-18/19 batches above, for the same reason (existing
+    // `RepositoryWritePort` implementers predating this epic keep compiling
+    // unchanged). [`gitsail_git::GitCliProvider`] overrides every one of
+    // these with a real `git` implementation.
+
+    /// Integrates `target_revision` (a branch, tag, or other Git revision
+    /// expression — mirrors
+    /// [`crate::ports::RepositoryReadPort::resolve_revision`]'s own
+    /// `revision: &str`) into the current branch via `git merge` (T-231/
+    /// US-079). Refuses up front when another [`gitsail_domain::InProgressOperation`]
+    /// is already pending (T-230/US-078 criterion 3) rather than starting a
+    /// second one on top of it. Never opens an interactive editor for the
+    /// merge commit message (a headless process has no terminal to satisfy
+    /// one). See [`MergeResult`] for why fast-forward/merge-commit/conflict
+    /// are always reported as three distinct outcomes (US-079 criterion 2),
+    /// never a generic error for the conflict case.
+    fn merge(&self, repo: &Repository, target_revision: &str) -> Result<MergeResult, GitSailError> {
+        let _ = (repo, target_revision);
+        Err(unsupported("merge"))
+    }
+
+    /// Stages `path`'s currently-conflicted content into the index via
+    /// `git add -- <path>` (T-232/US-080 criterion 3), marking it resolved.
+    /// Only ever called on the caller's own explicit action — this port
+    /// itself never infers that a conflict "looks resolved" and calls this
+    /// automatically; that judgment call belongs entirely to the
+    /// presentation layer (US-080 criterion 3: "nunca automaticamente").
+    /// Works identically whether the file's current content was produced by
+    /// editing inside GitSail or resolved externally (another editor) and
+    /// then merely observed on the next refresh (US-080 criterion 2) — `git
+    /// add` only ever looks at the working tree's current content, not at
+    /// how it got there.
+    fn mark_conflict_resolved(&self, repo: &Repository, path: &Path) -> Result<(), GitSailError> {
+        let _ = (repo, path);
+        Err(unsupported("mark_conflict_resolved"))
+    }
+
+    /// Resolves `path`'s conflict by taking `side`'s content wholesale
+    /// (`git checkout --ours`/`--theirs -- <path>`), then stages it exactly
+    /// like [`Self::mark_conflict_resolved`] (T-232/US-080 criterion 3's
+    /// documented binary-conflict flow — a binary file has no meaningful
+    /// textual merge, so choosing one side in full *is* the resolution).
+    /// Equally usable for a text file a person simply wants to resolve by
+    /// taking one side outright, without editing it.
+    fn take_conflict_side(
+        &self,
+        repo: &Repository,
+        path: &Path,
+        side: ConflictSide,
+    ) -> Result<(), GitSailError> {
+        let _ = (repo, path, side);
+        Err(unsupported("take_conflict_side"))
+    }
+
+    /// Resumes whichever multi-step operation
+    /// [`crate::ports::RepositoryReadPort::detect_in_progress_operation`]
+    /// currently detects (`git <op> --continue`) — merge, rebase,
+    /// cherry-pick, or revert (T-233/US-081; generic across all four so
+    /// T-235+/T-238/T-239 reuse this unchanged, even though only merge calls
+    /// it today). Refuses, rather than guessing, when: no operation is
+    /// pending; the detected operation's own
+    /// [`gitsail_domain::OperationCapability`] set does not offer `Continue`
+    /// (US-081 criterion 1 — e.g. a bisect run, which has no `Continue` of
+    /// this shape); or conflicted files still remain (US-081 criterion 2).
+    /// Never presumes success: a caller re-inspects
+    /// `detect_in_progress_operation` afterward to see the real resulting
+    /// state (US-081 criterion 3), this method's own `Ok(())` only means
+    /// "the command exited successfully", not "the operation is now fully
+    /// concluded and no other issue turned up".
+    fn continue_operation(&self, repo: &Repository) -> Result<(), GitSailError> {
+        let _ = repo;
+        Err(unsupported("continue_operation"))
+    }
+
+    /// Abandons whichever multi-step operation
+    /// [`crate::ports::RepositoryReadPort::detect_in_progress_operation`]
+    /// currently detects (`git <op> --abort`), restoring the pre-operation
+    /// state as far as Git itself guarantees — e.g. for a merge, HEAD before
+    /// the merge started, discarding the merge's own in-progress changes,
+    /// but never touching unrelated work (T-233/US-081 criterion 3). Generic
+    /// across merge/rebase/cherry-pick/revert/bisect, matching
+    /// [`Self::continue_operation`]'s own reuse rationale. Refuses when no
+    /// operation is pending or the detected operation's
+    /// [`gitsail_domain::OperationCapability`] set does not offer `Abort`.
+    /// Never presumes success: a caller re-inspects
+    /// `detect_in_progress_operation` afterward (US-081 criterion 3).
+    fn abort_operation(&self, repo: &Repository) -> Result<(), GitSailError> {
+        let _ = repo;
+        Err(unsupported("abort_operation"))
     }
 }
