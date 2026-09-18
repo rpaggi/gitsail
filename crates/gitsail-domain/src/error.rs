@@ -25,11 +25,18 @@ pub enum ErrorCode {
     Cancelled,
     ProtocolMismatch,
     Internal,
+    /// Another Git process already holds a lock GitSail's own mutation
+    /// needs (typically `.git/index.lock`, but any Git lock file matches
+    /// the same shape) — SAD §26; T-227/US-116 criterion 1: a mutation that
+    /// loses this race must give a clear, actionable error instead of
+    /// hanging or corrupting repository state. GitSail never waits for or
+    /// removes another process's lock file itself.
+    RepositoryLocked,
 }
 
 impl ErrorCode {
     /// All categories defined by SAD §19, in document order.
-    pub const ALL: [ErrorCode; 14] = [
+    pub const ALL: [ErrorCode; 15] = [
         ErrorCode::RepositoryNotFound,
         ErrorCode::GitNotInstalled,
         ErrorCode::UnsupportedGitVersion,
@@ -44,6 +51,7 @@ impl ErrorCode {
         ErrorCode::Cancelled,
         ErrorCode::ProtocolMismatch,
         ErrorCode::Internal,
+        ErrorCode::RepositoryLocked,
     ];
 
     /// Stable machine-readable identifier, suitable for protocol payloads
@@ -64,6 +72,7 @@ impl ErrorCode {
             Self::Cancelled => "cancelled",
             Self::ProtocolMismatch => "protocol_mismatch",
             Self::Internal => "internal",
+            Self::RepositoryLocked => "repository_locked",
         }
     }
 }

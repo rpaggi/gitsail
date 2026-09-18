@@ -5,6 +5,9 @@
 #![forbid(unsafe_code)]
 
 pub mod blame_cache;
+pub mod cache;
+pub mod concurrency;
+pub mod graph_cache;
 pub mod mutation;
 pub mod patch;
 pub mod ports;
@@ -16,6 +19,9 @@ pub mod write_ports;
 pub mod write_use_cases;
 
 pub use blame_cache::{BlameCache, BlameCacheKey, BlameQueryTicket};
+pub use cache::{GenerationCache, GenerationTicket};
+pub use concurrency::{global_lock_registry, Invalidatable, RepositoryLockRegistry};
+pub use graph_cache::{GraphCache, GraphPageKey, DEFAULT_GRAPH_CACHE_CAPACITY};
 pub use mutation::{MutationKind, Precondition, RiskLevel};
 pub use patch::{export_patch, render_unified_diff, PatchExport};
 pub use privacy::{CrashReportConsent, TelemetryPreference};

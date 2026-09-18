@@ -175,4 +175,23 @@ pub trait RepositoryReadPort: Send + Sync {
         revision: &CommitHash,
         path: &Path,
     ) -> Result<FileContentAtRevision, GitSailError>;
+
+    /// The key GitSail's own mutation-serialization lock uses to identify
+    /// "the same physical repository" (SAD §26; T-227/US-116 criterion 1),
+    /// so two sessions opened against the same repository — even via two
+    /// different linked worktrees, which share one object database/refs but
+    /// each report a distinct [`Repository::root_path`] — are still
+    /// serialized against each other rather than only against themselves.
+    ///
+    /// Defaults to `repo.root_path`: correct for a plain repository (the
+    /// common case, and every test double that does not override this), but
+    /// coalesces incorrectly across linked worktrees. An adapter that can
+    /// resolve the real shared Git directory (`gitsail-git`'s
+    /// [`crate::ports::RepositoryReadPort`] implementation resolves it via
+    /// `git rev-parse --git-common-dir`) overrides this to return that
+    /// instead. See ADR-019 for why the lock is keyed this way rather than
+    /// per-worktree.
+    fn lock_key(&self, repo: &Repository) -> Result<PathBuf, GitSailError> {
+        Ok(repo.root_path.clone())
+    }
 }

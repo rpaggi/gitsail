@@ -103,7 +103,9 @@ impl GitCliProvider {
         cancel: &CancellationToken,
     ) -> Result<ProcessOutput, GitSailError> {
         let request = ProcessRequest::new(args, cwd.to_path_buf()).with_env(Self::locale_env());
-        self.runner.run(request, cancel)
+        self.runner
+            .run(request, cancel)
+            .map_err(classify_index_lock_conflict)
     }
 
     /// Runs `args`, treating a non-zero exit as an expected "false"
@@ -433,7 +435,7 @@ impl RepositoryReadPort for GitCliProvider {
 
         let output = self.run_cancellable(args, &repo.root_path, cancel)?;
         let stdout = Self::stdout_string(&output)?;
-        parse_diff(&stdout)
+        parse_diff(&stdout, cancel)
     }
 
     fn resolve_revision(
@@ -524,7 +526,7 @@ impl RepositoryReadPort for GitCliProvider {
                 .map_err(classify_blame_failure)?,
         };
         let stdout = Self::stdout_string(&output)?;
-        let lines = parse_blame(&stdout)?;
+        let lines = parse_blame(&stdout, cancel)?;
         Ok(Blame {
             file: request.file.clone(),
             revision: request.revision.clone(),
@@ -629,6 +631,47 @@ impl RepositoryReadPort for GitCliProvider {
             revision: revision.clone(),
             kind,
         })
+    }
+
+    /// Resolves the real, shared `.git` directory via `git rev-parse
+    /// --git-common-dir` (ADR-019; T-227/US-116 criterion 1), so two linked
+    /// worktrees of the same repository — which report distinct
+    /// [`Repository::root_path`]s but share one object database/refs/index
+    /// lock namespace — resolve to the same mutation-serialization lock key
+    /// instead of two independent ones. Falls back to `--absolute-git-dir`
+    /// for older Git versions that lack `--git-common-dir` (added in Git
+    /// 2.5), which is at least correct for a repository with no linked
+    /// worktrees (the common case).
+    fn lock_key(&self, repo: &Repository) -> Result<PathBuf, GitSailError> {
+        let cwd = repo.worktree_path.as_deref().unwrap_or(&repo.root_path);
+        let args = vec![
+            "rev-parse".to_string(),
+            "--path-format=absolute".to_string(),
+            "--git-common-dir".to_string(),
+        ];
+        let output = match self.try_run(args, cwd)? {
+            Some(output) => output,
+            None => self.try_run(
+                vec![
+                    "rev-parse".to_string(),
+                    "--path-format=absolute".to_string(),
+                    "--absolute-git-dir".to_string(),
+                ],
+                cwd,
+            )?
+            .ok_or_else(|| {
+                GitSailError::new(
+                    ErrorCode::RepositoryNotFound,
+                    "could not resolve the repository's Git directory",
+                )
+            })?,
+        };
+        let stdout = Self::stdout_string(&output)?;
+        let path = stdout
+            .lines()
+            .next()
+            .ok_or_else(|| parse_err("git rev-parse did not report a Git common directory"))?;
+        Ok(PathBuf::from(path))
     }
 }
 
@@ -1191,6 +1234,36 @@ fn classify_delete_branch_failure(err: GitSailError) -> GitSailError {
     }
 }
 
+/// Reclassifies *any* failed Git invocation as [`ErrorCode::RepositoryLocked`]
+/// when it failed because another Git process already holds `.git/
+/// index.lock` (or another Git lock file) on this repository (SAD §26;
+/// T-227/US-116 criterion 1: "uma mutação que falha porque outro processo
+/// Git já segura o lock deve dar um erro claro, não travar nem corromper").
+/// Applied centrally in [`GitCliProvider::run_cancellable`] rather than at
+/// each individual mutation call site, so every command this adapter runs —
+/// present or future — gets the same reclassification without needing its
+/// own `map_err`. GitSail never waits for or removes another process's lock
+/// file itself: doing so could corrupt state a still-live process is
+/// writing. Any other failure passes through unchanged.
+fn classify_index_lock_conflict(err: GitSailError) -> GitSailError {
+    if err.code() != ErrorCode::ProcessFailure {
+        return err;
+    }
+    let diagnostic_text = err.diagnostic().map(|d| d.to_string()).unwrap_or_default();
+    if diagnostic_text.contains(".lock': File exists")
+        || diagnostic_text.contains("Another git process seems to be running")
+    {
+        GitSailError::new(
+            ErrorCode::RepositoryLocked,
+            "another Git process is currently using this repository",
+        )
+        .with_remediation("wait for the other Git operation to finish, then retry")
+        .with_source(err)
+    } else {
+        err
+    }
+}
+
 // ---------------------------------------------------------------------
 // Unified diff patch rendering for hunk-level stage/unstage (US-013).
 // ---------------------------------------------------------------------
@@ -1684,12 +1757,36 @@ fn parse_ahead_behind(track: &str) -> Result<(u32, u32), GitSailError> {
 /// instead, rather than parsing partial/misleading hunk data.
 const MAX_FILE_DIFF_BYTES: usize = 512 * 1024;
 
-fn parse_diff(raw: &str) -> Result<Diff, GitSailError> {
-    let files = split_diff_blocks(raw)
-        .into_iter()
-        .map(parse_diff_block)
-        .collect::<Result<Vec<_>, _>>()?;
+/// Progress-check stride for cooperative cancellation during parsing
+/// (T-226/US-115 criterion 2): the process-level check in
+/// `GitProcessRunner` only covers the Git subprocess's own lifetime — once
+/// it has exited, parsing its captured output is pure Rust-side work with
+/// no process to poll. A very large diff (many files, or one file with many
+/// hunks) or blame result can make that parsing itself the slow part, so
+/// [`parse_diff`]/[`parse_diff_block`]/[`parse_blame`] all check
+/// periodically during their own loops, not only once at the start.
+const CANCEL_CHECK_STRIDE: usize = 256;
+
+fn parse_diff(raw: &str, cancel: &CancellationToken) -> Result<Diff, GitSailError> {
+    let mut files = Vec::new();
+    for block in split_diff_blocks(raw) {
+        if cancel.is_cancelled() {
+            return Err(cancelled_during_parse());
+        }
+        files.push(parse_diff_block(block, cancel)?);
+    }
     Ok(Diff { files })
+}
+
+/// A parse loop's own cancellation error (T-226/US-115 criterion 2/3):
+/// categorically an `Err`, exactly like a subprocess-level cancellation
+/// (`ErrorCode::Cancelled`), never a partial `Ok` — a cancelled parse must
+/// never be mistaken for "complete, no changes" (criterion 3).
+fn cancelled_during_parse() -> GitSailError {
+    GitSailError::new(
+        ErrorCode::Cancelled,
+        "operation was cancelled while parsing the result",
+    )
 }
 
 /// Splits `raw` on `\n` without stripping a preceding `\r`, unlike
@@ -1720,7 +1817,7 @@ fn split_diff_blocks(raw: &str) -> Vec<Vec<&str>> {
     blocks
 }
 
-fn parse_diff_block(lines: Vec<&str>) -> Result<FileDiff, GitSailError> {
+fn parse_diff_block(lines: Vec<&str>, cancel: &CancellationToken) -> Result<FileDiff, GitSailError> {
     let header = *lines
         .first()
         .ok_or_else(|| parse_err("empty diff block"))?;
@@ -1743,6 +1840,9 @@ fn parse_diff_block(lines: Vec<&str>) -> Result<FileDiff, GitSailError> {
 
     let mut i = 1;
     while i < lines.len() {
+        if i % CANCEL_CHECK_STRIDE == 0 && cancel.is_cancelled() {
+            return Err(cancelled_during_parse());
+        }
         let line = lines[i];
         if let Some(rest) = line.strip_prefix("rename from ") {
             previous_path = Some(PathBuf::from(rest));
@@ -1963,7 +2063,7 @@ fn parse_diff_hunk_range(range: &str, sigil: char) -> Result<(u32, u32), GitSail
 // `git blame --porcelain` parsing.
 // ---------------------------------------------------------------------
 
-fn parse_blame(raw: &str) -> Result<Vec<BlameLine>, GitSailError> {
+fn parse_blame(raw: &str, cancel: &CancellationToken) -> Result<Vec<BlameLine>, GitSailError> {
     let mut metadata: HashMap<String, (Signature, GitTimestamp)> = HashMap::new();
     let mut lines_out = Vec::new();
 
@@ -1976,7 +2076,10 @@ fn parse_blame(raw: &str) -> Result<Vec<BlameLine>, GitSailError> {
     let mut pending_author_time: Option<i64> = None;
     let mut pending_author_tz: Option<i32> = None;
 
-    for line in raw.split('\n') {
+    for (index, line) in raw.split('\n').enumerate() {
+        if index % CANCEL_CHECK_STRIDE == 0 && cancel.is_cancelled() {
+            return Err(cancelled_during_parse());
+        }
         if line.is_empty() {
             continue;
         }
@@ -2359,5 +2462,79 @@ mod tests {
             patch,
             "--- a/a.txt\n+++ b/a.txt\n@@ -1,2 +1,2 @@\n one\n-two\n+TWO\n\\ No newline at end of file\n"
         );
+    }
+
+    /// T-227/US-116 criterion 1: a mutation losing the race against another
+    /// Git process already holding `.git/index.lock` must surface a clear,
+    /// classified error, never a generic process failure a caller cannot
+    /// distinguish from any other unrelated `git` exit code.
+    #[test]
+    fn classifies_an_index_lock_conflict_as_repository_locked() {
+        let err = process_failure(
+            "fatal: Unable to create '/repo/.git/index.lock': File exists.\n\nAnother git process seems to be running in this repository, e.g.\nan editor opened by 'git commit'. Please make sure all processes\nare terminated then try again.\n",
+        );
+
+        let classified = classify_index_lock_conflict(err);
+
+        assert_eq!(classified.code(), ErrorCode::RepositoryLocked);
+        assert!(classified.remediation().unwrap().contains("retry"));
+        assert!(classified.diagnostic().is_some(), "original diagnostic must be preserved");
+    }
+
+    #[test]
+    fn leaves_an_unrelated_process_failure_unclassified_by_the_lock_check() {
+        let err = process_failure("fatal: not a git repository\n");
+
+        let classified = classify_index_lock_conflict(err);
+
+        assert_eq!(classified.code(), ErrorCode::ProcessFailure);
+    }
+
+    /// T-226/US-115 criterion 2: cancellation during diff/blame parsing
+    /// (i.e. after the Git subprocess has already exited) must be checked
+    /// periodically, not only once, and must surface as a distinct `Err`
+    /// rather than silently returning a truncated-but-`Ok` result
+    /// (criterion 3).
+    #[test]
+    fn parse_diff_is_cancelled_responsively_across_many_files() {
+        let mut raw = String::new();
+        for i in 0..(CANCEL_CHECK_STRIDE * 3) {
+            raw.push_str(&format!(
+                "diff --git a/f{i}.txt b/f{i}.txt\nnew file mode 100644\n--- /dev/null\n+++ b/f{i}.txt\n@@ -0,0 +1,1 @@\n+line\n"
+            ));
+        }
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+
+        let err = parse_diff(&raw, &cancel).unwrap_err();
+
+        assert_eq!(err.code(), ErrorCode::Cancelled);
+    }
+
+    #[test]
+    fn parse_diff_succeeds_fully_when_never_cancelled() {
+        let raw = "diff --git a/f.txt b/f.txt\nnew file mode 100644\n--- /dev/null\n+++ b/f.txt\n@@ -0,0 +1,1 @@\n+line\n";
+        let cancel = CancellationToken::new();
+
+        let diff = parse_diff(raw, &cancel).unwrap();
+
+        assert_eq!(diff.files.len(), 1);
+    }
+
+    #[test]
+    fn parse_blame_is_cancelled_responsively_across_many_lines() {
+        let mut raw = String::new();
+        for i in 0..(CANCEL_CHECK_STRIDE * 3) {
+            raw.push_str(&format!(
+                "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef {n} {n} 1\nauthor Ada Lovelace\nauthor-mail <ada@example.com>\nauthor-time 0\nauthor-tz +0000\n\tline {n}\n",
+                n = i + 1
+            ));
+        }
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+
+        let err = parse_blame(&raw, &cancel).unwrap_err();
+
+        assert_eq!(err.code(), ErrorCode::Cancelled);
     }
 }

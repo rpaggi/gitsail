@@ -23,7 +23,9 @@ pub fn exit_code_for(code: ErrorCode) -> i32 {
     match code {
         ErrorCode::RepositoryNotFound => EXIT_REPOSITORY_NOT_FOUND,
         ErrorCode::GitNotInstalled | ErrorCode::UnsupportedGitVersion => EXIT_GIT_UNAVAILABLE,
-        ErrorCode::InvalidRepositoryState | ErrorCode::OperationConflict => EXIT_REPOSITORY_STATE,
+        ErrorCode::InvalidRepositoryState
+        | ErrorCode::OperationConflict
+        | ErrorCode::RepositoryLocked => EXIT_REPOSITORY_STATE,
         ErrorCode::AuthenticationRequired | ErrorCode::PermissionDenied => EXIT_ACCESS_DENIED,
         ErrorCode::NetworkFailure => EXIT_NETWORK_FAILURE,
         ErrorCode::Timeout => EXIT_TIMEOUT,
