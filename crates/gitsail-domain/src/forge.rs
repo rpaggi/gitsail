@@ -294,6 +294,32 @@ pub fn build_web_url(forge: ForgeKind, remote_url: &RemoteUrl, path: ForgePath) 
     Some(url)
 }
 
+/// Resolves `remote_url`'s forge host and repository path segments (owner,
+/// any GitLab subgroups, repo — `.git` suffix already stripped), once the
+/// caller already knows (via [`detect_forge`]) that `remote_url` belongs to
+/// `forge`.
+///
+/// This is the same validated parse [`build_web_url`] uses internally,
+/// exposed directly for callers that need the raw host/path rather than a
+/// browser URL — e.g. T-245/US-103's PR/MR listing, which needs to build a
+/// forge *API* URL (`api.github.com/repos/<owner>/<repo>/...`, `<host>/api/
+/// v4/projects/<path>/...`), not a web UI link. Kept in this module (rather
+/// than duplicated in `gitsail-forge`) so there is exactly one place that
+/// parses a remote URL's authority/path and validates it against a claimed
+/// [`ForgeKind`] (see this module's top doc comment for why that parse is
+/// itself the security-sensitive part).
+///
+/// Returns `None` under the exact same conditions as [`build_web_url`]:
+/// `remote_url` cannot be parsed as a remote at all, or it resolves to a
+/// *different* forge than `forge` asserts.
+pub fn repository_location(forge: ForgeKind, remote_url: &RemoteUrl) -> Option<(String, Vec<String>)> {
+    let location = parse_remote(remote_url)?;
+    if forge_for_host(&location.host)? != forge {
+        return None;
+    }
+    Some((location.host, location.segments))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -580,5 +606,36 @@ mod tests {
     #[test]
     fn all_forge_kinds_have_distinct_variants() {
         assert_ne!(ForgeKind::GitHub, ForgeKind::GitLab);
+    }
+
+    // -- repository_location (T-245/US-103) -------------------------------
+
+    #[test]
+    fn repository_location_resolves_host_and_segments_for_github() {
+        let remote = url("git@github.com:org/repo.git");
+        let (host, segments) = repository_location(ForgeKind::GitHub, &remote).unwrap();
+        assert_eq!(host, "github.com");
+        assert_eq!(segments, vec!["org".to_string(), "repo".to_string()]);
+    }
+
+    #[test]
+    fn repository_location_resolves_nested_subgroups_for_gitlab() {
+        let remote = url("https://gitlab.example.com/group/subgroup/repo.git");
+        let (host, segments) = repository_location(ForgeKind::GitLab, &remote).unwrap();
+        assert_eq!(host, "gitlab.example.com");
+        assert_eq!(
+            segments,
+            vec!["group".to_string(), "subgroup".to_string(), "repo".to_string()]
+        );
+    }
+
+    #[test]
+    fn repository_location_is_none_for_mismatched_or_unrecognized_forge() {
+        let remote = url("https://gitlab.com/group/repo.git");
+        assert!(repository_location(ForgeKind::GitHub, &remote).is_none());
+
+        let unrecognized = url("https://example.com/some/path.git");
+        assert!(repository_location(ForgeKind::GitHub, &unrecognized).is_none());
+        assert!(repository_location(ForgeKind::GitLab, &unrecognized).is_none());
     }
 }

@@ -8,6 +8,7 @@ import ConfirmationDialog from "./components/ConfirmationDialog.vue";
 import DiffViewer from "./components/DiffViewer.vue";
 import HistoryEditingPanel from "./components/HistoryEditingPanel.vue";
 import MergePanel from "./components/MergePanel.vue";
+import PullRequestsPanel from "./components/PullRequestsPanel.vue";
 import RecentRepositories from "./components/RecentRepositories.vue";
 import RepositoryOpener from "./components/RepositoryOpener.vue";
 import SearchPalette from "./components/SearchPalette.vue";
@@ -81,6 +82,7 @@ onBeforeUnmount(() => {
         <SyncPanel />
         <MergePanel />
         <AmendPanel />
+        <PullRequestsPanel />
       </aside>
       <div class="workspace__main">
         <section class="graph-section">

@@ -22,6 +22,11 @@ tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 dirs = "6"
+# T-245/US-103: parses a PR/MR's own URL (untrusted forge API content) to
+# validate its scheme/host before ever opening it — see
+# `commands::open_pull_request_link_impl`'s doc comment. Same `url` crate
+# `gitsail-domain` already depends on for `build_web_url`.
+url = "2"
 
 [lints]
 workspace = true

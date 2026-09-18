@@ -42,8 +42,8 @@
 use std::sync::{Arc, Mutex};
 
 use gitsail_application::{
-    ForgeCredentialPort, RecentRepositoriesPort, RepositoryReadPort, RepositorySession,
-    RepositoryWritePort,
+    ForgeCredentialPort, PullRequestQueryPort, RecentRepositoriesPort, RepositoryReadPort,
+    RepositorySession, RepositoryWritePort,
 };
 use gitsail_domain::{CommitGraph, ErrorCode, GitSailError, GraphCommit, GraphRow, Repository};
 
@@ -96,6 +96,11 @@ pub struct AppState {
     /// lives in `gitsail-forge`; `AppState` only depends on the port,
     /// matching [`Self::recent_repositories`]'s own pattern.
     forge_credentials: Arc<dyn ForgeCredentialPort>,
+    /// Queries GitHub/GitLab for PR/MR listing (T-245/US-103). Desktop's
+    /// concrete adapter (`gitsail-forge`'s `CompositePullRequestQueryPort`,
+    /// dispatching to a real HTTP-backed adapter per forge) lives outside
+    /// this crate, matching every other port `AppState` holds.
+    pull_request_query: Arc<dyn PullRequestQueryPort>,
     /// The startup intent parsed from `--repo`/`--commit` (see this
     /// module's own `StartupIntent` doc). `take` semantics (via
     /// `Mutex<Option<_>>`) rather than a plain field: consumed exactly
@@ -111,6 +116,7 @@ impl AppState {
         write_port: Arc<dyn RepositoryWritePort>,
         recent_repositories: Arc<dyn RecentRepositoriesPort>,
         forge_credentials: Arc<dyn ForgeCredentialPort>,
+        pull_request_query: Arc<dyn PullRequestQueryPort>,
     ) -> Self {
         Self {
             port,
@@ -119,6 +125,7 @@ impl AppState {
             commit_graph: Mutex::new(CommitGraph::new()),
             recent_repositories,
             forge_credentials,
+            pull_request_query,
             startup_intent: Mutex::new(None),
         }
     }
@@ -137,6 +144,10 @@ impl AppState {
 
     pub fn forge_credentials(&self) -> Arc<dyn ForgeCredentialPort> {
         self.forge_credentials.clone()
+    }
+
+    pub fn pull_request_query(&self) -> Arc<dyn PullRequestQueryPort> {
+        self.pull_request_query.clone()
     }
 
     /// Records the startup intent parsed from argv (`lib.rs::run`, once,
@@ -412,6 +423,7 @@ mod tests {
             Arc::new(UnimplementedWritePort),
             Arc::new(InMemoryRecents::new()),
             Arc::new(gitsail_forge::InMemoryForgeCredentialStore::new()),
+            Arc::new(gitsail_forge::FakePullRequestQueryPort::default()),
         )
     }
 

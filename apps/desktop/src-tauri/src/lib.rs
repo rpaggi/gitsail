@@ -15,7 +15,8 @@ mod state;
 use std::sync::Arc;
 
 use gitsail_application::{
-    ForgeCredentialPort, RecentRepositoriesPort, RepositoryReadPort, RepositoryWritePort,
+    ForgeCredentialPort, PullRequestQueryPort, RecentRepositoriesPort, RepositoryReadPort,
+    RepositoryWritePort,
 };
 use gitsail_git::{GitCliProvider, GitProcessRunner, GitProcessRunnerConfig};
 
@@ -77,7 +78,19 @@ pub fn run() {
     let forge_credentials: Arc<dyn ForgeCredentialPort> =
         Arc::new(gitsail_forge::KeyringForgeCredentialStore::new());
 
-    let app_state = AppState::new(port, write_port, recent_repositories, forge_credentials);
+    // T-245/US-103: PR/MR listing, dispatched per detected forge (GitHub vs
+    // GitLab) — see `gitsail-forge`'s crate docs for the HTTP client
+    // choice (`ureq`) and why this is not a complete PR/MR client.
+    let pull_request_query: Arc<dyn PullRequestQueryPort> =
+        Arc::new(gitsail_forge::CompositePullRequestQueryPort::production());
+
+    let app_state = AppState::new(
+        port,
+        write_port,
+        recent_repositories,
+        forge_credentials,
+        pull_request_query,
+    );
     app_state.set_startup_intent(parse_startup_args(std::env::args()));
 
     tauri::Builder::default()
@@ -116,6 +129,8 @@ pub fn run() {
             commands::forge_connection_status,
             commands::connect_forge_account,
             commands::disconnect_forge_account,
+            commands::list_pull_requests,
+            commands::open_pull_request_link,
             commands::resolve_sync_target,
             commands::fetch,
             commands::pull,

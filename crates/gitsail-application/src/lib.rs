@@ -14,6 +14,7 @@ pub mod mutation;
 pub mod patch;
 pub mod ports;
 pub mod privacy;
+pub mod pull_requests;
 pub mod recent_repositories;
 pub mod session;
 pub mod use_cases;
@@ -32,6 +33,10 @@ pub use graph_cache::{GraphCache, GraphPageKey, DEFAULT_GRAPH_CACHE_CAPACITY};
 pub use mutation::{MutationKind, Precondition, RiskLevel};
 pub use patch::{export_patch, render_unified_diff, PatchExport};
 pub use privacy::{CrashReportConsent, TelemetryPreference};
+pub use pull_requests::{
+    ForgeRepositoryRef, ListPullRequests, ListPullRequestsOutcome, PullRequestPage,
+    PullRequestQueryError, PullRequestQueryPort, PullRequestState, PullRequestSummary,
+};
 pub use ports::{BlameRequest, CommitQuery, DiffRequest, LineHistoryRequest, Page, RepositoryReadPort};
 pub use recent_repositories::{
     ForgetRecentRepository, ListRecentRepositories, RecentRepositories, RecentRepositoriesPort,

@@ -14,8 +14,9 @@ use serde::{Deserialize, Serialize};
 
 use gitsail_application::{
     AmendPreview, ApplyPatchResult, CherryPickResult, CommitDiff, ForgeAccountId,
-    ForgeConnectionStatus, MergeResult, PatchExport, PatchPreview, PullOutcome, RebaseAction,
-    RebasePlan, RebasePlanEntry, RebaseResult, RecentRepositoryEntry, RevertResult,
+    ForgeConnectionStatus, ListPullRequestsOutcome, MergeResult, PatchExport, PatchPreview,
+    PullOutcome, PullRequestPage, PullRequestState, PullRequestSummary, RebaseAction, RebasePlan,
+    RebasePlanEntry, RebaseResult, RecentRepositoryEntry, RevertResult,
 };
 use gitsail_domain::{
     Blame, BlameLine, BlameOrigin, Branch, BranchKind, BranchName, ChangeType, Commit, CommitHash,
@@ -1559,6 +1560,131 @@ impl From<ForgeConnectionStatus> for ForgeConnectionStatusDto {
     }
 }
 
+// ---------------------------------------------------------------------
+// Pull/Merge Request listing, in explicitly limited scope (T-245/US-103).
+//
+// `title`/`author`/`sourceBranch`/`targetBranch` are untrusted,
+// forge/repository-authored free text on the wire, exactly like
+// [`gitsail_application::PullRequestSummary`]'s own doc comment already
+// states — a presentation layer must escape them, never render them as
+// active Markdown/HTML, the same discipline already applied to a commit
+// subject/author (see this crate's own `CommitDto`/`SignatureDto`, and the
+// VS Code extension's `hoverSanitizer` module for the same principle
+// applied to hover Markdown).
+//
+// `ListPullRequestsOutcomeDto` mirrors
+// [`gitsail_application::ListPullRequestsOutcome`] variant-for-variant
+// (US-103 criterion 2): every failure mode a caller must render distinctly
+// is its own tagged variant, never collapsed into a single
+// `Result<PullRequestPageDto, ErrorPayload>` that could conflate "no
+// PRs/MRs" with "could not check".
+// ---------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PullRequestStateDto {
+    Open,
+    Closed,
+    Merged,
+}
+
+impl From<PullRequestState> for PullRequestStateDto {
+    fn from(state: PullRequestState) -> Self {
+        match state {
+            PullRequestState::Open => Self::Open,
+            PullRequestState::Closed => Self::Closed,
+            PullRequestState::Merged => Self::Merged,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PullRequestSummaryDto {
+    pub title: String,
+    pub state: PullRequestStateDto,
+    pub author: Option<String>,
+    pub source_branch: Option<String>,
+    pub target_branch: Option<String>,
+    pub url: String,
+}
+
+impl From<&PullRequestSummary> for PullRequestSummaryDto {
+    fn from(summary: &PullRequestSummary) -> Self {
+        Self {
+            title: summary.title.clone(),
+            state: summary.state.into(),
+            author: summary.author.clone(),
+            source_branch: summary.source_branch.clone(),
+            target_branch: summary.target_branch.clone(),
+            url: summary.url.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct PullRequestPageDto {
+    pub items: Vec<PullRequestSummaryDto>,
+    pub has_next_page: bool,
+}
+
+impl From<&PullRequestPage> for PullRequestPageDto {
+    fn from(page: &PullRequestPage) -> Self {
+        Self {
+            items: page.items.iter().map(PullRequestSummaryDto::from).collect(),
+            has_next_page: page.has_next_page,
+        }
+    }
+}
+
+/// Every state [`gitsail_application::ListPullRequestsOutcome`] defines,
+/// tagged so a TypeScript consumer gets a discriminated union (see
+/// `apps/desktop/src/services/dto.ts`'s hand-written mirror) rather than an
+/// ambiguous shape it would have to guess the variant of.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "camelCase")]
+pub enum ListPullRequestsOutcomeDto {
+    NoForgeDetected,
+    Page {
+        page: PullRequestPageDto,
+    },
+    AuthenticationRequired,
+    PermissionDenied,
+    // `rename_all` on an enum only renames variant names, not struct-variant
+    // field names (see `PullOutcomeDto::FastForwarded`'s own comment on this
+    // exact serde limitation) — spelled out explicitly so the wire field is
+    // `retryAfterSeconds`, matching every other DTO's camelCase convention.
+    RateLimited {
+        #[serde(rename = "retryAfterSeconds", skip_serializing_if = "Option::is_none", default)]
+        retry_after_seconds: Option<u64>,
+    },
+    Offline {
+        message: String,
+    },
+    Error {
+        error: crate::error::ErrorPayload,
+    },
+}
+
+impl From<ListPullRequestsOutcome> for ListPullRequestsOutcomeDto {
+    fn from(outcome: ListPullRequestsOutcome) -> Self {
+        match outcome {
+            ListPullRequestsOutcome::NoForgeDetected => Self::NoForgeDetected,
+            ListPullRequestsOutcome::Page(page) => Self::Page { page: PullRequestPageDto::from(&page) },
+            ListPullRequestsOutcome::AuthenticationRequired => Self::AuthenticationRequired,
+            ListPullRequestsOutcome::PermissionDenied => Self::PermissionDenied,
+            ListPullRequestsOutcome::RateLimited { retry_after_seconds } => {
+                Self::RateLimited { retry_after_seconds }
+            }
+            ListPullRequestsOutcome::Offline { message } => Self::Offline { message },
+            ListPullRequestsOutcome::Error(err) => {
+                Self::Error { error: crate::error::ErrorPayload::from(&err) }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2284,5 +2410,153 @@ mod tests {
                 ForgeConnectionStatus::NotConnected => assert_eq!(json, "notConnected"),
             }
         }
+    }
+
+    // -- T-245/US-103: PullRequestSummaryDto / PullRequestPageDto /
+    // ListPullRequestsOutcomeDto ------------------------------------------
+
+    fn sample_pull_request() -> PullRequestSummary {
+        PullRequestSummary {
+            title: "Fix the thing".to_string(),
+            state: PullRequestState::Open,
+            author: Some("octocat".to_string()),
+            source_branch: Some("feature/fix".to_string()),
+            target_branch: Some("main".to_string()),
+            url: "https://github.com/org/repo/pull/1".to_string(),
+        }
+    }
+
+    #[test]
+    fn pull_request_state_dto_round_trips_every_variant() {
+        for state in [PullRequestState::Open, PullRequestState::Closed, PullRequestState::Merged] {
+            let dto = PullRequestStateDto::from(state);
+            let json = serde_json::to_value(dto).unwrap();
+            match state {
+                PullRequestState::Open => assert_eq!(json, "open"),
+                PullRequestState::Closed => assert_eq!(json, "closed"),
+                PullRequestState::Merged => assert_eq!(json, "merged"),
+            }
+        }
+    }
+
+    #[test]
+    fn pull_request_summary_dto_maps_every_field_including_camel_case_wire_names() {
+        let dto = PullRequestSummaryDto::from(&sample_pull_request());
+        assert_eq!(dto.title, "Fix the thing");
+        assert_eq!(dto.state, PullRequestStateDto::Open);
+        assert_eq!(dto.author.as_deref(), Some("octocat"));
+        assert_eq!(dto.source_branch.as_deref(), Some("feature/fix"));
+        assert_eq!(dto.target_branch.as_deref(), Some("main"));
+
+        let json = serde_json::to_value(&dto).unwrap();
+        assert_eq!(json["sourceBranch"], "feature/fix");
+        assert_eq!(json["targetBranch"], "main");
+    }
+
+    #[test]
+    fn pull_request_summary_dto_preserves_a_null_author_distinctly_from_empty() {
+        let mut summary = sample_pull_request();
+        summary.author = None;
+        let dto = PullRequestSummaryDto::from(&summary);
+        assert_eq!(dto.author, None);
+
+        let json = serde_json::to_value(&dto).unwrap();
+        assert!(json["author"].is_null());
+    }
+
+    /// US-103 criterion 3 sentinel: HTML/Markdown-active content in a
+    /// title/author is carried through the DTO mapping completely
+    /// untouched — this crate never sanitizes or interprets it; that is
+    /// exclusively the presentation layer's job.
+    #[test]
+    fn pull_request_summary_dto_never_alters_untrusted_content() {
+        let mut summary = sample_pull_request();
+        summary.title = "<script>alert(1)</script>".to_string();
+        summary.author = Some("[click](javascript:alert(1))".to_string());
+
+        let dto = PullRequestSummaryDto::from(&summary);
+        assert_eq!(dto.title, "<script>alert(1)</script>");
+        assert_eq!(dto.author.as_deref(), Some("[click](javascript:alert(1))"));
+    }
+
+    #[test]
+    fn pull_request_page_dto_maps_items_and_has_next_page() {
+        let page = PullRequestPage { items: vec![sample_pull_request()], has_next_page: true };
+        let dto = PullRequestPageDto::from(&page);
+        assert_eq!(dto.items.len(), 1);
+        assert!(dto.has_next_page);
+
+        let json = serde_json::to_value(&dto).unwrap();
+        assert_eq!(json["hasNextPage"], true);
+    }
+
+    #[test]
+    fn list_pull_requests_outcome_dto_tags_every_variant_distinctly() {
+        let cases: Vec<(ListPullRequestsOutcome, &str)> = vec![
+            (ListPullRequestsOutcome::NoForgeDetected, "noForgeDetected"),
+            (
+                ListPullRequestsOutcome::Page(PullRequestPage::default()),
+                "page",
+            ),
+            (ListPullRequestsOutcome::AuthenticationRequired, "authenticationRequired"),
+            (ListPullRequestsOutcome::PermissionDenied, "permissionDenied"),
+            (
+                ListPullRequestsOutcome::RateLimited { retry_after_seconds: Some(30) },
+                "rateLimited",
+            ),
+            (
+                ListPullRequestsOutcome::Offline { message: "connection refused".to_string() },
+                "offline",
+            ),
+            (
+                ListPullRequestsOutcome::Error(gitsail_domain::GitSailError::new(
+                    gitsail_domain::ErrorCode::Internal,
+                    "boom",
+                )),
+                "error",
+            ),
+        ];
+
+        for (outcome, expected_tag) in cases {
+            let dto = ListPullRequestsOutcomeDto::from(outcome);
+            let json = serde_json::to_value(&dto).unwrap();
+            assert_eq!(json["state"], expected_tag);
+        }
+    }
+
+    #[test]
+    fn list_pull_requests_outcome_dto_carries_the_rate_limit_wait_time() {
+        let dto = ListPullRequestsOutcomeDto::from(ListPullRequestsOutcome::RateLimited {
+            retry_after_seconds: Some(42),
+        });
+        let json = serde_json::to_value(&dto).unwrap();
+        assert_eq!(json["retryAfterSeconds"], 42);
+    }
+
+    #[test]
+    fn list_pull_requests_outcome_dto_omits_the_wait_time_when_the_api_reported_none() {
+        let dto = ListPullRequestsOutcomeDto::from(ListPullRequestsOutcome::RateLimited {
+            retry_after_seconds: None,
+        });
+        let json = serde_json::to_value(&dto).unwrap();
+        assert!(json.get("retryAfterSeconds").is_none());
+    }
+
+    #[test]
+    fn list_pull_requests_outcome_dto_error_variant_never_carries_the_diagnostic_source() {
+        #[derive(Debug)]
+        struct Secret;
+        impl std::fmt::Display for Secret {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "super-secret-stderr-contents")
+            }
+        }
+        impl std::error::Error for Secret {}
+
+        let err = gitsail_domain::GitSailError::new(gitsail_domain::ErrorCode::NetworkFailure, "request failed")
+            .with_source(Secret);
+        let dto = ListPullRequestsOutcomeDto::from(ListPullRequestsOutcome::Error(err));
+        let json = serde_json::to_string(&dto).unwrap();
+        assert!(!json.contains("super-secret-stderr-contents"));
     }
 }

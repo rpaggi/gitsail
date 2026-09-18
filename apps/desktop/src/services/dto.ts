@@ -10,6 +10,8 @@
 // codegen tool (e.g. ts-rs/typeshare) instead of adding a third hand-written
 // copy.
 
+import type { ErrorPayload } from "./errors";
+
 export type HeadStateDto =
   | { state: "attached"; branch: string }
   | { state: "detached"; commit: string }
@@ -432,3 +434,42 @@ export interface ForgeAccountDto {
 }
 
 export type ForgeConnectionStatusDto = "connected" | "notConnected";
+
+// -- Pull/Merge Request listing, in explicitly limited scope (T-245/US-103) --
+//
+// Mirrors `crates/gitsail-protocol/src/dto.rs`'s pull-request section
+// exactly, including `ListPullRequestsOutcomeDto`'s `state`-tagged shape
+// (one variant per state US-103 criterion 2 requires to be rendered
+// distinctly — never a single `Result`, so "no PRs/MRs" and "could not
+// check" can never be conflated).
+//
+// `title`/`author`/`sourceBranch`/`targetBranch` are untrusted,
+// forge/repository-authored text: a consumer must escape them (Vue's
+// default `{{ }}` text interpolation already does this — never bind them
+// with `v-html`), the same discipline the VS Code extension's
+// `hoverSanitizer` module documents for commit hover content.
+
+export type PullRequestStateDto = "open" | "closed" | "merged";
+
+export interface PullRequestSummaryDto {
+  title: string;
+  state: PullRequestStateDto;
+  author: string | null;
+  sourceBranch: string | null;
+  targetBranch: string | null;
+  url: string;
+}
+
+export interface PullRequestPageDto {
+  items: PullRequestSummaryDto[];
+  hasNextPage: boolean;
+}
+
+export type ListPullRequestsOutcomeDto =
+  | { state: "noForgeDetected" }
+  | { state: "page"; page: PullRequestPageDto }
+  | { state: "authenticationRequired" }
+  | { state: "permissionDenied" }
+  | { state: "rateLimited"; retryAfterSeconds?: number }
+  | { state: "offline"; message: string }
+  | { state: "error"; error: ErrorPayload };

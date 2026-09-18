@@ -36,7 +36,7 @@ pub use commit::{Commit, Decoration, GitTimestamp, Signature};
 pub use diff::{Diff, DiffHunk, DiffLine, DiffLineOrigin, FileDiff};
 pub use error::{ErrorCode, GitSailError, OperationId};
 pub use file_content::{FileContentAtRevision, FileContentKind};
-pub use forge::{detect_forge, build_web_url, ForgeKind, ForgePath};
+pub use forge::{detect_forge, build_web_url, repository_location, ForgeKind, ForgePath};
 pub use graph::{CommitGraph, GraphCommit, GraphEdge, GraphRow, OpenLane};
 pub use ids::{BranchName, CommitHash, ShortHash};
 pub use line_history::{LineHistory, LineHistoryEntry};

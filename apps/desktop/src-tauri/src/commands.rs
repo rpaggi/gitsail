@@ -23,23 +23,24 @@ use gitsail_application::{
     ContinueOperation, CreateBranch, CreateCommit, DeleteBranch, DetectInProgressOperation,
     DiffRequest, DisconnectForgeAccount, ExecuteRebasePlan, Fetch, ForgeToken,
     ForgetRecentRepository, GetCommit, GetCommitHistory, GetConflictSides, GetDiff,
-    GetForgeConnectionStatus, GetForgeLink, ListBranches, ListRecentRepositories,
+    GetForgeConnectionStatus, GetForgeLink, ListBranches, ListPullRequests, ListRecentRepositories,
     MarkConflictResolved, Merge, MergeParentPolicy, OpenRepository, PlanRebase, PreviewAmend,
     PreviewPatchApplication, Pull, Push, Rebase, RebasePlan, RecordRecentRepository, RefreshReason,
     RenameBranch, Reset, ResetMode, Revert, SkipOperation, StageFiles, StageHunks, SwitchBranch,
     TakeConflictSide, UnstageFiles, UnstageHunks,
 };
 use gitsail_domain::{
-    Branch, BranchKind, BranchName, CancellationToken, CommitHash, ConflictSide, ErrorCode,
-    FileDiff, ForgePath, GitSailError, GraphCommit, Remote, Repository,
+    repository_location, Branch, BranchKind, BranchName, CancellationToken, CommitHash,
+    ConflictSide, ErrorCode, FileDiff, ForgePath, GitSailError, GraphCommit, Remote, Repository,
 };
 use gitsail_protocol::{
     AmendPreviewDto, ApplyPatchResultDto, BranchDto, CherryPickResultDto, CommitDto,
     CommitGraphPageDto, CommitGraphRowDto, CommitResultDto, ConflictSidesDto, DiffDto,
     ErrorPayload, FileDiffDto, ForgeAccountDto, ForgeConnectionStatusDto, ForgeLinkTargetDto,
-    InProgressOperationDto, MergeResultDto, PatchExportDto, PatchPreviewDto, PullOutcomeDto,
-    PullResultDto, RebasePlanDto, RebaseResultDto, RecentRepositoryDto, RemoteDto, RepositoryDto,
-    RepositoryStatusDto, RevertResultDto, SyncTargetDto,
+    InProgressOperationDto, ListPullRequestsOutcomeDto, MergeResultDto, PatchExportDto,
+    PatchPreviewDto, PullOutcomeDto, PullResultDto, RebasePlanDto, RebaseResultDto,
+    RecentRepositoryDto, RemoteDto, RepositoryDto, RepositoryStatusDto, RevertResultDto,
+    SyncTargetDto,
 };
 
 use crate::state::{AppState, StartupIntent};
@@ -873,6 +874,105 @@ fn disconnect_forge_account_impl(state: &AppState, account: &ForgeAccountDto) ->
     DisconnectForgeAccount::new(state.forge_credentials()).execute(&account.into())
 }
 
+// ---------------------------------------------------------------------
+// T-245/US-103: limited-scope PR/MR listing. See
+// `gitsail_application::pull_requests`'s module docs for the full scope
+// cut (no diffs/comments/CI status; listing only) and
+// `gitsail-forge`'s crate docs for the GitHub/GitLab adapters this
+// dispatches to.
+// ---------------------------------------------------------------------
+
+/// Lists one page of PRs/MRs for the current repository's detected forge
+/// remote (US-103 criterion 1). This command's own `Result::Err` is
+/// reserved for the same "no repository is open" precondition failure
+/// every other read command in this file reports — never for a forge-API
+/// failure. Every state US-103 criterion 2 requires (loading is a
+/// frontend-only state before this promise resolves; no
+/// token/insufficient permission; rate-limited with a wait time when
+/// reported; offline/network failure; a truly empty page) is its own
+/// [`ListPullRequestsOutcomeDto`] variant instead, so a caller can never
+/// mistake one for "this repository simply has no PRs/MRs".
+#[tauri::command]
+pub fn list_pull_requests(
+    page: u32,
+    state: tauri::State<AppState>,
+) -> Result<ListPullRequestsOutcomeDto, ErrorPayload> {
+    list_pull_requests_impl(&state, page).map_err(|err| ErrorPayload::from(&err))
+}
+
+fn list_pull_requests_impl(state: &AppState, page: u32) -> Result<ListPullRequestsOutcomeDto, GitSailError> {
+    let (repository, _epoch) = state.repository_with_epoch()?;
+    let remotes = state.port().list_remotes(&repository)?;
+    let outcome =
+        ListPullRequests::new(state.pull_request_query(), state.forge_credentials()).execute(&remotes, page);
+    Ok(ListPullRequestsOutcomeDto::from(outcome))
+}
+
+/// Opens a PR/MR's own web page in the browser (US-103 criterion 3: always
+/// an explicit user action — this is never called automatically, and the
+/// frontend never has any other way to open a URL from this data).
+///
+/// Unlike [`open_forge_link`], `url` here is not something
+/// [`gitsail_domain::forge::build_web_url`] constructed — it comes
+/// verbatim from the forge API's own JSON response
+/// ([`gitsail_application::PullRequestSummary::url`]), which this command
+/// treats as untrusted (US-103 criterion 3). Beyond
+/// [`crate::browser::open_url`]'s own https-only check, this additionally
+/// requires `url`'s host to match the currently detected forge remote's
+/// host *exactly* (case-insensitively) — so a forge response that somehow
+/// pointed elsewhere (a compromised/misconfigured forge, a MITM'd
+/// response, ...) can never cause GitSail to open a host other than the
+/// same one the repository's own remote already resolves to. Any mismatch,
+/// like an unrecognized remote, resolves to `Ok(false)` rather than an
+/// error — this is a "was it opened" signal, not a repository read that
+/// can meaningfully fail.
+#[tauri::command]
+pub fn open_pull_request_link(
+    url: String,
+    state: tauri::State<AppState>,
+) -> Result<bool, ErrorPayload> {
+    open_pull_request_link_impl(&state, &url).map_err(|err| ErrorPayload::from(&err))
+}
+
+fn open_pull_request_link_impl(state: &AppState, url: &str) -> Result<bool, GitSailError> {
+    match resolve_pull_request_link_impl(state, url)? {
+        Some(validated_url) => {
+            crate::browser::open_url(&validated_url)?;
+            Ok(true)
+        }
+        None => Ok(false),
+    }
+}
+
+/// The validation half of [`open_pull_request_link_impl`], split out (the
+/// same "resolve, then separately open" shape [`get_forge_link_impl`]/
+/// [`open_forge_link_impl`] already use) so this decision — never the
+/// actual browser-process spawn — is what this module's own tests
+/// exercise directly. `crate::browser::open_url`'s own spawn is a
+/// deliberately untested OS side effect everywhere else in this file too
+/// (see that module's doc comment); this keeps `open_pull_request_link`'s
+/// tests consistent with that, rather than launching a real (and, in a
+/// headless/CI sandbox, failing) browser-opener process as a side effect
+/// of a unit test.
+fn resolve_pull_request_link_impl(state: &AppState, url: &str) -> Result<Option<String>, GitSailError> {
+    let (repository, _epoch) = state.repository_with_epoch()?;
+    let remotes = state.port().list_remotes(&repository)?;
+    let Some((remote, kind)) = gitsail_application::forge_links::pick_forge_remote(&remotes) else {
+        return Ok(None);
+    };
+    let Some((host, _path_segments)) = repository_location(kind, &remote.fetch_url) else {
+        return Ok(None);
+    };
+    let Ok(parsed) = url::Url::parse(url) else {
+        return Ok(None);
+    };
+    let host_matches = parsed.host_str().map(|h| h.eq_ignore_ascii_case(&host)).unwrap_or(false);
+    if parsed.scheme() != "https" || !host_matches {
+        return Ok(None);
+    }
+    Ok(Some(url.to_string()))
+}
+
 /// Resolves which remote (and current branch) fetch/pull/push would target,
 /// without mutating anything (US-060 criterion 2: the remote/branch/
 /// upstream that would be affected is shown *before* running the
@@ -1348,7 +1448,8 @@ mod tests {
     use std::thread;
 
     use gitsail_application::{
-        BlameRequest, CommitQuery, DiffRequest, LineHistoryRequest, Page, RecentRepositories,
+        BlameRequest, CommitQuery, DiffRequest, LineHistoryRequest, Page, PullRequestPage,
+        PullRequestQueryError, PullRequestState, PullRequestSummary, RecentRepositories,
         RecentRepositoriesPort,
     };
     use gitsail_domain::{
@@ -1599,7 +1700,31 @@ mod tests {
     fn state_from_port_and_write_port(port: FakePort, write_port: FakeWritePort) -> AppState {
         let port: Arc<dyn gitsail_application::RepositoryReadPort> = Arc::new(port);
         let write_port: Arc<dyn gitsail_application::RepositoryWritePort> = Arc::new(write_port);
-        AppState::new(port, write_port, InMemoryRecents::shared(), test_forge_credentials())
+        AppState::new(
+            port,
+            write_port,
+            InMemoryRecents::shared(),
+            test_forge_credentials(),
+            Arc::new(gitsail_forge::FakePullRequestQueryPort::default()),
+        )
+    }
+
+    /// Like [`state_from_port_and_write_port`], but with a scripted
+    /// [`gitsail_application::PullRequestQueryPort`] result (T-245/US-103
+    /// tests) instead of the default empty-page fake.
+    fn state_from_port_and_pull_requests(
+        port: FakePort,
+        pull_requests: gitsail_forge::FakePullRequestQueryPort,
+    ) -> AppState {
+        let read_port: Arc<dyn gitsail_application::RepositoryReadPort> = Arc::new(port);
+        let write_port: Arc<dyn gitsail_application::RepositoryWritePort> = Arc::new(FakeWritePort::new());
+        AppState::new(
+            read_port,
+            write_port,
+            InMemoryRecents::shared(),
+            test_forge_credentials(),
+            Arc::new(pull_requests),
+        )
     }
 
     /// A `RepositoryWritePort` double recording exactly what each call
@@ -2680,6 +2805,219 @@ mod tests {
         assert!(!opened);
     }
 
+    // -- T-245/US-103: list_pull_requests / open_pull_request_link ---------
+
+    fn github_remote() -> Remote {
+        let mut remote = sample_remote("origin");
+        remote.fetch_url = gitsail_domain::RemoteUrl::new("https://github.com/org/repo.git");
+        remote.push_url = remote.fetch_url.clone();
+        remote
+    }
+
+    fn sample_pull_request() -> PullRequestSummary {
+        PullRequestSummary {
+            title: "Fix the thing".to_string(),
+            state: PullRequestState::Open,
+            author: Some("octocat".to_string()),
+            source_branch: Some("feature/fix".to_string()),
+            target_branch: Some("main".to_string()),
+            url: "https://github.com/org/repo/pull/1".to_string(),
+        }
+    }
+
+    fn state_with_pull_requests(
+        result: Result<PullRequestPage, PullRequestQueryError>,
+    ) -> AppState {
+        let state = state_from_port_and_pull_requests(
+            FakePort { remotes: vec![github_remote()], ..FakePort::default() },
+            gitsail_forge::FakePullRequestQueryPort::new(result),
+        );
+        open_repository_impl(&state, "/repo").unwrap();
+        state
+    }
+
+    #[test]
+    fn list_pull_requests_before_opening_a_repository_fails_with_invalid_repository_state() {
+        let state = state_from_port_and_pull_requests(
+            FakePort::default(),
+            gitsail_forge::FakePullRequestQueryPort::default(),
+        );
+        let err = list_pull_requests_impl(&state, 1).unwrap_err();
+        assert_eq!(err.code(), ErrorCode::InvalidRepositoryState);
+    }
+
+    #[test]
+    fn list_pull_requests_with_no_recognized_forge_remote_reports_no_forge_detected() {
+        let state = state_from_port_and_pull_requests(
+            FakePort { remotes: vec![sample_remote("origin")], ..FakePort::default() },
+            gitsail_forge::FakePullRequestQueryPort::default(),
+        );
+        open_repository_impl(&state, "/repo").unwrap();
+
+        let outcome = list_pull_requests_impl(&state, 1).unwrap();
+        assert_eq!(outcome, ListPullRequestsOutcomeDto::NoForgeDetected);
+    }
+
+    #[test]
+    fn list_pull_requests_maps_a_successful_page_including_a_truly_empty_one() {
+        let state = state_with_pull_requests(Ok(PullRequestPage::default()));
+
+        let outcome = list_pull_requests_impl(&state, 1).unwrap();
+        match outcome {
+            ListPullRequestsOutcomeDto::Page { page } => {
+                assert!(page.items.is_empty());
+                assert!(!page.has_next_page);
+            }
+            other => panic!("expected Page, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn list_pull_requests_maps_a_nonempty_page_preserving_every_field() {
+        let page = PullRequestPage { items: vec![sample_pull_request()], has_next_page: true };
+        let state = state_with_pull_requests(Ok(page));
+
+        let outcome = list_pull_requests_impl(&state, 1).unwrap();
+        match outcome {
+            ListPullRequestsOutcomeDto::Page { page } => {
+                assert_eq!(page.items.len(), 1);
+                assert!(page.has_next_page);
+                assert_eq!(page.items[0].title, "Fix the thing");
+                assert_eq!(page.items[0].author.as_deref(), Some("octocat"));
+            }
+            other => panic!("expected Page, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn list_pull_requests_distinguishes_401_from_403() {
+        let state = state_with_pull_requests(Err(PullRequestQueryError::AuthenticationRequired));
+        assert_eq!(
+            list_pull_requests_impl(&state, 1).unwrap(),
+            ListPullRequestsOutcomeDto::AuthenticationRequired
+        );
+
+        let state = state_with_pull_requests(Err(PullRequestQueryError::PermissionDenied));
+        assert_eq!(
+            list_pull_requests_impl(&state, 1).unwrap(),
+            ListPullRequestsOutcomeDto::PermissionDenied
+        );
+    }
+
+    #[test]
+    fn list_pull_requests_surfaces_rate_limiting_with_the_reported_wait_time() {
+        let state = state_with_pull_requests(Err(PullRequestQueryError::RateLimited {
+            retry_after_seconds: Some(30),
+        }));
+
+        assert_eq!(
+            list_pull_requests_impl(&state, 1).unwrap(),
+            ListPullRequestsOutcomeDto::RateLimited { retry_after_seconds: Some(30) }
+        );
+    }
+
+    #[test]
+    fn list_pull_requests_surfaces_a_network_failure_as_offline_never_as_an_empty_page() {
+        let state = state_with_pull_requests(Err(PullRequestQueryError::NetworkFailure(
+            "connection refused".to_string(),
+        )));
+
+        let outcome = list_pull_requests_impl(&state, 1).unwrap();
+        assert_eq!(
+            outcome,
+            ListPullRequestsOutcomeDto::Offline { message: "connection refused".to_string() }
+        );
+        assert_ne!(
+            outcome,
+            ListPullRequestsOutcomeDto::Page { page: gitsail_protocol::PullRequestPageDto::default() },
+            "an offline failure must never be representable as (and confusable with) an empty page"
+        );
+    }
+
+    #[test]
+    fn list_pull_requests_never_renders_malicious_title_or_author_as_active_content() {
+        // This command only maps data through; asserting the exact string
+        // survives unescaped here documents that escaping is a
+        // presentation-layer job (Desktop's `PullRequestsPanel.vue`, never
+        // this Tauri command) — see US-103 criterion 3.
+        let malicious = PullRequestSummary {
+            title: "<script>alert(1)</script>".to_string(),
+            author: Some("[click](javascript:alert(1))".to_string()),
+            ..sample_pull_request()
+        };
+        let page = PullRequestPage { items: vec![malicious], has_next_page: false };
+        let state = state_with_pull_requests(Ok(page));
+
+        let outcome = list_pull_requests_impl(&state, 1).unwrap();
+        match outcome {
+            ListPullRequestsOutcomeDto::Page { page } => {
+                assert_eq!(page.items[0].title, "<script>alert(1)</script>");
+            }
+            other => panic!("expected Page, got {other:?}"),
+        }
+    }
+
+    // These test `resolve_pull_request_link_impl` directly — the pure
+    // validation decision `open_pull_request_link_impl` wraps — rather
+    // than `open_pull_request_link_impl` itself, so a "would open" result
+    // is asserted without ever spawning the real OS browser-opener process
+    // `crate::browser::open_url` performs (see that function's own doc
+    // comment for why this split exists).
+
+    #[test]
+    fn resolve_pull_request_link_accepts_a_url_whose_host_matches_the_detected_forge() {
+        let state = state_with_pull_requests(Ok(PullRequestPage::default()));
+        let resolved =
+            resolve_pull_request_link_impl(&state, "https://github.com/org/repo/pull/1").unwrap();
+        assert_eq!(resolved.as_deref(), Some("https://github.com/org/repo/pull/1"));
+    }
+
+    #[test]
+    fn resolve_pull_request_link_refuses_a_url_on_an_unexpected_host() {
+        let state = state_with_pull_requests(Ok(PullRequestPage::default()));
+        let resolved =
+            resolve_pull_request_link_impl(&state, "https://evil.example/org/repo/pull/1").unwrap();
+        assert_eq!(resolved, None, "a URL whose host does not match the detected forge must never be opened");
+    }
+
+    #[test]
+    fn resolve_pull_request_link_refuses_a_non_https_scheme() {
+        let state = state_with_pull_requests(Ok(PullRequestPage::default()));
+        let resolved =
+            resolve_pull_request_link_impl(&state, "http://github.com/org/repo/pull/1").unwrap();
+        assert_eq!(resolved, None);
+
+        let resolved = resolve_pull_request_link_impl(&state, "javascript:alert(1)").unwrap();
+        assert_eq!(resolved, None);
+    }
+
+    #[test]
+    fn resolve_pull_request_link_with_no_recognized_forge_remote_is_none_not_an_error() {
+        let state = state_from_port_and_pull_requests(
+            FakePort { remotes: vec![sample_remote("origin")], ..FakePort::default() },
+            gitsail_forge::FakePullRequestQueryPort::default(),
+        );
+        open_repository_impl(&state, "/repo").unwrap();
+
+        let resolved =
+            resolve_pull_request_link_impl(&state, "https://example.com/org/repo/pull/1").unwrap();
+        assert_eq!(resolved, None);
+    }
+
+    #[test]
+    fn open_pull_request_link_returns_false_without_erroring_when_resolution_refuses_the_url() {
+        // Exercises `open_pull_request_link_impl` itself (not just the
+        // resolver) for exactly the one branch that never reaches
+        // `browser::open_url`: an unresolvable/refused URL. The
+        // resolves-and-opens branch is intentionally left to manual/e2e
+        // verification, matching `browser::open_url`'s own documented
+        // limitation.
+        let state = state_with_pull_requests(Ok(PullRequestPage::default()));
+        let opened =
+            open_pull_request_link_impl(&state, "https://evil.example/org/repo/pull/1").unwrap();
+        assert!(!opened);
+    }
+
     // -- T-244/US-102: forge account connect/disconnect/status -------------
 
     fn sample_account() -> ForgeAccountDto {
@@ -2914,7 +3252,13 @@ mod tests {
         let port: Arc<dyn gitsail_application::RepositoryReadPort> = Arc::new(FakePort::default());
         let write_port: Arc<dyn gitsail_application::RepositoryWritePort> =
             Arc::new(SwitchingWritePort { inner: FakeWritePort::new() });
-        let state = AppState::new(port, write_port, InMemoryRecents::shared(), test_forge_credentials());
+        let state = AppState::new(
+                port,
+                write_port,
+                InMemoryRecents::shared(),
+                test_forge_credentials(),
+                Arc::new(gitsail_forge::FakePullRequestQueryPort::default()),
+            );
         state.open_session(sample_repository());
 
         let (repository, epoch) = state.repository_with_epoch().unwrap();
@@ -3022,7 +3366,13 @@ mod tests {
             gate: Mutex::new(gate_rx),
         });
         let write_port: Arc<dyn gitsail_application::RepositoryWritePort> = Arc::new(FakeWritePort::new());
-        let state = Arc::new(AppState::new(port, write_port, InMemoryRecents::shared(), test_forge_credentials()));
+        let state = Arc::new(AppState::new(
+                port,
+                write_port,
+                InMemoryRecents::shared(),
+                test_forge_credentials(),
+                Arc::new(gitsail_forge::FakePullRequestQueryPort::default()),
+            ));
         state.open_session(sample_repository());
 
         let state_for_thread = Arc::clone(&state);
@@ -3173,7 +3523,13 @@ mod tests {
             let provider = Arc::new(GitCliProvider::new(runner));
             let port: Arc<dyn gitsail_application::RepositoryReadPort> = provider.clone();
             let write_port: Arc<dyn gitsail_application::RepositoryWritePort> = provider;
-            AppState::new(port, write_port, InMemoryRecents::shared(), test_forge_credentials())
+            AppState::new(
+                port,
+                write_port,
+                InMemoryRecents::shared(),
+                test_forge_credentials(),
+                Arc::new(gitsail_forge::FakePullRequestQueryPort::default()),
+            )
         }
 
         #[test]
@@ -3426,7 +3782,13 @@ mod tests {
             let provider = Arc::new(GitCliProvider::new(runner));
             let port: Arc<dyn gitsail_application::RepositoryReadPort> = provider.clone();
             let write_port: Arc<dyn gitsail_application::RepositoryWritePort> = provider;
-            AppState::new(port, write_port, InMemoryRecents::shared(), test_forge_credentials())
+            AppState::new(
+                port,
+                write_port,
+                InMemoryRecents::shared(),
+                test_forge_credentials(),
+                Arc::new(gitsail_forge::FakePullRequestQueryPort::default()),
+            )
         }
 
         /// Sets up two branches that both modify the same line of the same

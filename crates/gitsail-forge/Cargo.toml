@@ -7,6 +7,21 @@ rust-version.workspace = true
 [dependencies]
 gitsail-application = { path = "../gitsail-application" }
 gitsail-domain = { path = "../gitsail-domain" }
+# T-245/US-103: PR/MR listing needs one synchronous HTTP GET against the
+# GitHub/GitLab REST APIs. `ureq` was chosen over `reqwest` because nothing
+# else in this workspace uses an async runtime (SAD §4: "the rest of the
+# Core is synchronous" — grepped the whole workspace for
+# `reqwest`/`tokio`/`hyper` before adding this dependency; none were
+# present), and pulling in `tokio` just for this one blocking call would be
+# a much larger footprint change than this story's scope justifies. `tls`
+# selects `ureq`'s pure-Rust (rustls) TLS backend — no system OpenSSL
+# dependency — matching the same "buildable in a minimal/CI/sandboxed Linux
+# environment" reasoning `keyring`'s `crypto-rust` feature above already
+# documents for this crate. `json` lets adapters hand `ureq` an
+# already-parsed `serde_json`/struct body directly.
+ureq = { version = "2", default-features = false, features = ["tls", "json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 
 # keyring's OS-storage backend is picked per platform via feature flags
 # (T-244/US-102 criterion 1). `crypto-rust` on Linux avoids a system
