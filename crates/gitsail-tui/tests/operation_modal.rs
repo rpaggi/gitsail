@@ -153,6 +153,10 @@ fn esc_cancels_a_pending_confirmation_without_mutating_anything() {
     // now swallowing, and say what the modal itself accepts instead.
     let confirming = rendered(&app);
     assert!(
+        confirming.contains("Delete branch 'feature'"),
+        "the prompt must name the action, not just its target:\n{confirming}"
+    );
+    assert!(
         confirming.contains("Enter confirms · Esc/q cancels · nothing has changed yet"),
         "the status bar must describe the modal's own keys:\n{confirming}"
     );

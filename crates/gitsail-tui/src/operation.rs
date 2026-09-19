@@ -58,7 +58,7 @@ pub enum OperationKind {
         force: bool,
     },
     /// T-157/US-024: `RepositoryWritePort::rename_branch`. Carries both
-    /// names so the confirmation prompt (and [`Self::target_label`]) always
+    /// names so the confirmation prompt (and [`Self::prompt_label`]) always
     /// names the exact source and destination, never a generic "rename a
     /// branch".
     RenameBranch {
@@ -278,11 +278,10 @@ impl OperationKind {
     /// What just happened, in past tense, for the status bar's own report
     /// once a successful operation has closed its overlay (T-267).
     ///
-    /// Deliberately not [`Self::target_label`]: that one names the *target*
-    /// for a prompt whose surrounding UI already implies the verb ("branch
-    /// 'feature'", with the risk tier beside it), which on its own would
-    /// leave a finished operation reported as a bare "Done: branch
-    /// 'feature'" — equally true of a checkout, a create and a delete. The
+    /// Separate from [`Self::prompt_label`], which asks in the imperative
+    /// ("Delete branch 'feature'") because it is answering a question that
+    /// has not happened yet; this one reports in the past ("deleted branch
+    /// 'feature'") on a status bar that is not asking anything. The
     /// per-outcome detail Git itself reports (fast-forward vs. merge commit
     /// vs. conflict) is separate again, and lives in `ui.rs` beside the
     /// `last_*_result` values it formats.
@@ -335,55 +334,75 @@ impl OperationKind {
         }
     }
 
-    /// A short, human-readable description of what would be affected, for
-    /// the confirmation prompt (criterion 1: "operação mostra alvo").
-    pub fn target_label(&self) -> String {
+    /// The confirmation prompt itself: what is about to happen, in the
+    /// imperative, naming both the action and its target (criterion 1:
+    /// "operação mostra alvo"; DoD: "sem confirmação genérica ambígua").
+    ///
+    /// Naming the action is not decoration. This used to be a
+    /// `prompt_label` that named the target alone, so checking out,
+    /// creating and deleting the same branch all prompted with the identical
+    /// "branch 'feature'", told apart only by the `risk:` line beside it —
+    /// and `Moderate` covers both the checkout and the delete. The verb is
+    /// the part that makes the prompt answerable.
+    pub fn prompt_label(&self) -> String {
         match self {
-            OperationKind::StageFiles => "staged files".to_string(),
-            OperationKind::UnstageFiles => "unstaged files".to_string(),
-            OperationKind::CreateCommit => "a new commit".to_string(),
-            OperationKind::SwitchBranch { target } => format!("branch '{target}'"),
-            OperationKind::CreateBranch { name } => format!("branch '{name}'"),
-            OperationKind::DeleteBranch { name, .. } => format!("branch '{name}'"),
-            OperationKind::RenameBranch { old_name, new_name } => {
-                format!("branch '{old_name}' to '{new_name}'")
+            OperationKind::StageFiles => "Stage the selected files".to_string(),
+            OperationKind::UnstageFiles => "Unstage the selected files".to_string(),
+            OperationKind::CreateCommit => "Create a new commit".to_string(),
+            OperationKind::SwitchBranch { target } => format!("Check out branch '{target}'"),
+            OperationKind::CreateBranch { name } => format!("Create branch '{name}'"),
+            OperationKind::DeleteBranch { name, force } => {
+                if *force {
+                    format!(
+                        "Force-delete branch '{name}' — this also discards any commits reachable only from it"
+                    )
+                } else {
+                    format!("Delete branch '{name}'")
+                }
             }
-            OperationKind::Fetch { remote } => format!("remote '{remote}'"),
+            OperationKind::RenameBranch { old_name, new_name } => {
+                format!("Rename branch '{old_name}' to '{new_name}'")
+            }
+            OperationKind::Fetch { remote } => format!("Fetch from remote '{remote}'"),
             OperationKind::Pull { remote, branch } => {
-                format!("branch '{branch}' from remote '{remote}'")
+                format!("Pull branch '{branch}' from remote '{remote}' (fast-forward only)")
             }
             OperationKind::Push { remote, branch } => {
-                format!("branch '{branch}' to remote '{remote}'")
+                format!("Push branch '{branch}' to remote '{remote}'")
             }
-            OperationKind::ApplyPatch { affected_file_count } => {
+            OperationKind::ApplyPatch {
+                affected_file_count,
+            } => {
                 format!(
-                    "{affected_file_count} file{} affected by the patch",
+                    "Apply the patch — {affected_file_count} file{} affected",
                     if *affected_file_count == 1 { "" } else { "s" }
                 )
             }
-            OperationKind::Merge { target } => format!("merging '{target}' into the current branch"),
-            OperationKind::ContinueOperation => "the in-progress operation".to_string(),
-            OperationKind::AbortOperation => "the in-progress operation".to_string(),
-            OperationKind::Rebase { onto } => format!("rebasing the current branch onto '{onto}'"),
+            OperationKind::Merge { target } => format!("Merge '{target}' into the current branch"),
+            OperationKind::ContinueOperation => "Continue the in-progress operation".to_string(),
+            OperationKind::AbortOperation => "Abort the in-progress operation".to_string(),
+            OperationKind::Rebase { onto } => format!("Rebase the current branch onto '{onto}'"),
             OperationKind::SkipOperation => {
-                "the current step of the in-progress operation".to_string()
+                "Skip the current step of the in-progress operation".to_string()
             }
             OperationKind::ExecuteRebasePlan { onto, commit_count } => format!(
-                "rebasing {commit_count} commit{} onto '{onto}' (interactive plan)",
+                "Rebase {commit_count} commit{} onto '{onto}' (interactive plan)",
                 if *commit_count == 1 { "" } else { "s" }
             ),
             OperationKind::CherryPick { commit, is_merge } => {
                 if *is_merge {
-                    format!("cherry-picking merge commit '{commit}' (using its first parent)")
+                    format!(
+                        "Cherry-pick merge commit '{commit}' onto the current branch (using its first parent)"
+                    )
                 } else {
-                    format!("cherry-picking commit '{commit}' onto the current branch")
+                    format!("Cherry-pick commit '{commit}' onto the current branch")
                 }
             }
             OperationKind::Revert { commit, is_merge } => {
                 if *is_merge {
-                    format!("reverting merge commit '{commit}' (using its first parent)")
+                    format!("Revert merge commit '{commit}' (using its first parent)")
                 } else {
-                    format!("reverting commit '{commit}'")
+                    format!("Revert commit '{commit}'")
                 }
             }
             OperationKind::Reset {
@@ -393,13 +412,13 @@ impl OperationKind {
                 ..
             } => match mode {
                 ResetMode::Soft => format!(
-                    "resetting to '{target}' (soft — HEAD moves; index and working tree are preserved, becoming staged changes)"
+                    "Reset to '{target}' (soft — HEAD moves; index and working tree are preserved, becoming staged changes)"
                 ),
                 ResetMode::Mixed => format!(
-                    "resetting to '{target}' (mixed — HEAD and index move; working tree is preserved, becoming unstaged changes)"
+                    "Reset to '{target}' (mixed — HEAD and index move; working tree is preserved, becoming unstaged changes)"
                 ),
                 ResetMode::Hard => format!(
-                    "resetting to '{target}' (HARD — HEAD, index and working tree all move; {predicted_loss_files} uncommitted change{} will be permanently discarded)",
+                    "Reset to '{target}' (HARD — HEAD, index and working tree all move; {predicted_loss_files} uncommitted change{} will be permanently discarded)",
                     if *predicted_loss_files == 1 { "" } else { "s" }
                 ),
             },
@@ -408,7 +427,7 @@ impl OperationKind {
             // same text `apps/desktop/src/stores/amend.ts`'s `requestAmend`
             // already shows, never a generic "are you sure?".
             OperationKind::AmendCommit { short_hash, .. } => format!(
-                "HEAD ({short_hash}) — this replaces the last commit with a new one carrying the message below. If this commit has already been pushed or shared, rewriting it means anyone who already has the old one will need to rebase or reset onto the new commit."
+                "Amend HEAD ({short_hash}) — this replaces the last commit with a new one carrying the message below. If this commit has already been pushed or shared, rewriting it means anyone who already has the old one will need to rebase or reset onto the new commit."
             ),
         }
     }
@@ -528,7 +547,7 @@ mod tests {
             new_name: "new-name".into(),
         };
         assert_eq!(kind.risk(), OperationRisk::Moderate);
-        let label = kind.target_label();
+        let label = kind.prompt_label();
         assert!(label.contains("old-name"));
         assert!(label.contains("new-name"));
     }
@@ -536,12 +555,12 @@ mod tests {
     /// T-163/US-030: `ApplyPatch` classifies `Moderate` and its label names
     /// the concrete affected-file count from the already-computed preview.
     #[test]
-    fn apply_patch_classifies_moderate_with_a_concrete_target_label() {
+    fn apply_patch_classifies_moderate_with_a_concrete_prompt_label() {
         let kind = OperationKind::ApplyPatch {
             affected_file_count: 2,
         };
         assert_eq!(kind.risk(), OperationRisk::Moderate);
-        assert_eq!(kind.target_label(), "2 files affected by the patch");
+        assert_eq!(kind.prompt_label(), "Apply the patch — 2 files affected");
     }
 
     /// T-182: mirrors `gitsail_application::mutation`'s canonical
@@ -583,7 +602,7 @@ mod tests {
             target: "feature/x".into(),
         };
         assert_eq!(merge.risk(), OperationRisk::Moderate);
-        assert!(merge.target_label().contains("feature/x"));
+        assert!(merge.prompt_label().contains("feature/x"));
 
         assert_eq!(
             OperationKind::ContinueOperation.risk(),
@@ -600,12 +619,12 @@ mod tests {
     /// never silently lost work), and `Rebase`'s label always names the
     /// concrete target base.
     #[test]
-    fn rebase_and_skip_operation_classify_moderate_with_a_concrete_target_label() {
+    fn rebase_and_skip_operation_classify_moderate_with_a_concrete_prompt_label() {
         let rebase = OperationKind::Rebase {
             onto: "main".to_string(),
         };
         assert_eq!(rebase.risk(), OperationRisk::Moderate);
-        assert!(rebase.target_label().contains("main"));
+        assert!(rebase.prompt_label().contains("main"));
 
         assert_eq!(OperationKind::SkipOperation.risk(), OperationRisk::Moderate);
     }
@@ -614,13 +633,13 @@ mod tests {
     /// `Rebase`, and its label names both the concrete target base and the
     /// exact commit count the plan reapplies — never a generic "rebase".
     #[test]
-    fn execute_rebase_plan_classifies_moderate_with_a_concrete_target_label() {
+    fn execute_rebase_plan_classifies_moderate_with_a_concrete_prompt_label() {
         let single = OperationKind::ExecuteRebasePlan {
             onto: "main".to_string(),
             commit_count: 1,
         };
         assert_eq!(single.risk(), OperationRisk::Moderate);
-        let label = single.target_label();
+        let label = single.prompt_label();
         assert!(label.contains("main"));
         assert!(label.contains("1 commit "));
 
@@ -628,7 +647,7 @@ mod tests {
             onto: "main".to_string(),
             commit_count: 3,
         };
-        assert!(plural.target_label().contains("3 commits"));
+        assert!(plural.prompt_label().contains("3 commits"));
     }
 
     /// T-238/T-239: `CherryPick`/`Revert` classify `Moderate`, and their
@@ -641,21 +660,21 @@ mod tests {
             is_merge: false,
         };
         assert_eq!(cherry_pick.risk(), OperationRisk::Moderate);
-        assert!(cherry_pick.target_label().contains("abc1234"));
-        assert!(!cherry_pick.target_label().contains("first parent"));
+        assert!(cherry_pick.prompt_label().contains("abc1234"));
+        assert!(!cherry_pick.prompt_label().contains("first parent"));
 
         let cherry_pick_merge = OperationKind::CherryPick {
             commit: "def5678".into(),
             is_merge: true,
         };
-        assert!(cherry_pick_merge.target_label().contains("first parent"));
+        assert!(cherry_pick_merge.prompt_label().contains("first parent"));
 
         let revert = OperationKind::Revert {
             commit: "abc1234".into(),
             is_merge: false,
         };
         assert_eq!(revert.risk(), OperationRisk::Moderate);
-        assert!(revert.target_label().contains("abc1234"));
+        assert!(revert.prompt_label().contains("abc1234"));
     }
 
     /// T-240/US-088: `Reset` classifies `Moderate` for soft/mixed and
@@ -670,8 +689,8 @@ mod tests {
             predicted_loss_files: 0,
         };
         assert_eq!(soft.risk(), OperationRisk::Moderate);
-        assert!(soft.target_label().contains("HEAD~1"));
-        assert!(soft.target_label().contains("staged"));
+        assert!(soft.prompt_label().contains("HEAD~1"));
+        assert!(soft.prompt_label().contains("staged"));
 
         let mixed = OperationKind::Reset {
             target: "HEAD~1".into(),
@@ -680,7 +699,7 @@ mod tests {
             predicted_loss_files: 0,
         };
         assert_eq!(mixed.risk(), OperationRisk::Moderate);
-        assert!(mixed.target_label().contains("unstaged"));
+        assert!(mixed.prompt_label().contains("unstaged"));
 
         let hard = OperationKind::Reset {
             target: "HEAD~1".into(),
@@ -689,7 +708,7 @@ mod tests {
             predicted_loss_files: 3,
         };
         assert_eq!(hard.risk(), OperationRisk::Destructive);
-        let label = hard.target_label();
+        let label = hard.prompt_label();
         assert!(label.contains("HARD"));
         assert!(label.contains("3 uncommitted changes"));
         assert!(label.contains("permanently discarded"));
@@ -707,9 +726,67 @@ mod tests {
             expected_head: "abc1234deadbeefdeadbeefdeadbeefdeadbeef".into(),
         };
         assert_eq!(kind.risk(), OperationRisk::Destructive);
-        let label = kind.target_label();
+        let label = kind.prompt_label();
         assert!(label.contains("abc1234"));
         assert!(label.contains("pushed or shared"));
+    }
+
+    /// US-044's DoD ("sem confirmação genérica ambígua") is not satisfied by
+    /// naming the target alone: three different things can be done to the
+    /// same branch, and two of them share a risk tier, so a prompt that
+    /// leaves the verb out is genuinely unanswerable.
+    #[test]
+    fn three_different_operations_on_one_branch_prompt_three_different_things() {
+        let switch = OperationKind::SwitchBranch {
+            target: "feature".into(),
+        };
+        let create = OperationKind::CreateBranch {
+            name: "feature".into(),
+        };
+        let delete = OperationKind::DeleteBranch {
+            name: "feature".into(),
+            force: false,
+        };
+        let force_delete = OperationKind::DeleteBranch {
+            name: "feature".into(),
+            force: true,
+        };
+
+        assert_eq!(switch.risk(), create.risk());
+        assert_eq!(switch.risk(), delete.risk());
+
+        let labels = [
+            switch.prompt_label(),
+            create.prompt_label(),
+            delete.prompt_label(),
+            force_delete.prompt_label(),
+        ];
+        for label in &labels {
+            assert!(
+                label.contains("feature"),
+                "every prompt must still name its target: {label}"
+            );
+        }
+        for (i, a) in labels.iter().enumerate() {
+            for b in labels.iter().skip(i + 1) {
+                assert_ne!(a, b, "two different operations must not prompt alike");
+            }
+        }
+        assert!(delete.prompt_label().starts_with("Delete branch"));
+        assert!(switch.prompt_label().starts_with("Check out branch"));
+    }
+
+    /// The completed report and the pending prompt are deliberately worded
+    /// differently (imperative vs. past), so neither can be mistaken for the
+    /// other on a glance at the status bar.
+    #[test]
+    fn a_prompt_and_its_completion_report_never_read_alike() {
+        let kind = OperationKind::DeleteBranch {
+            name: "feature".into(),
+            force: false,
+        };
+        assert_eq!(kind.prompt_label(), "Delete branch 'feature'");
+        assert_eq!(kind.completion_label(), "deleted branch 'feature'");
     }
 
     #[test]

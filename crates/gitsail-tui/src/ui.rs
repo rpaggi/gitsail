@@ -2387,7 +2387,7 @@ fn render_operation_overlay(frame: &mut Frame, area: Rect, app: &App) {
     };
 
     let mut lines = vec![
-        Line::from(sanitize::safe_line(&kind.target_label())),
+        Line::from(sanitize::safe_line(&kind.prompt_label())),
         Line::from(format!("risk: {:?}", kind.risk())),
     ];
 
@@ -2781,7 +2781,7 @@ fn render_commit_composer(frame: &mut Frame, area: Rect, app: &App) {
 /// preview), the editable message, and a footer that reflects
 /// `app.operation()`. Unlike the commit composer, `Confirming` shows the
 /// exact same Destructive risk text/target label
-/// [`crate::operation::OperationKind::AmendCommit::target_label`] renders
+/// [`crate::operation::OperationKind::AmendCommit::prompt_label`] renders
 /// everywhere else (US-090 criterion 2: the commit being replaced and the
 /// publication risk are both named explicitly, never a generic "are you
 /// sure?").
@@ -2827,7 +2827,7 @@ fn render_amend_overlay(frame: &mut Frame, area: Rect, app: &App) {
         OperationState::Idle => "Enter reviews · Esc discards".to_string(),
         OperationState::Confirming(kind) => format!(
             "{}\nrisk: {:?}\nEnter amends · Esc cancels (message kept)",
-            sanitize::safe_line(&kind.target_label()),
+            sanitize::safe_line(&kind.prompt_label()),
             kind.risk()
         ),
         OperationState::InProgress(_) => "Amending…".to_string(),

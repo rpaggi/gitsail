@@ -1891,8 +1891,8 @@ impl App {
     /// A short, human-readable description of what the exported patch
     /// covers (US-029 criterion 1: "origem e escopo do patch são
     /// informados") — which side of [`DiffScope`] and which file, mirroring
-    /// [`OperationKind::target_label`]'s "always name the target" rule for
-    /// mutations.
+    /// [`OperationKind::prompt_label`]'s "always name the action and its
+    /// target" rule for mutations.
     fn patch_scope_label(&self) -> String {
         match &self.selected_file {
             Some(entry) => {
@@ -6245,7 +6245,7 @@ mod tests {
         match app.operation() {
             OperationState::Confirming(kind) => {
                 assert_eq!(kind.risk(), crate::operation::OperationRisk::Destructive);
-                let label = kind.target_label();
+                let label = kind.prompt_label();
                 assert!(label.contains("deadbee"));
                 assert!(label.contains("pushed or shared"));
             }
