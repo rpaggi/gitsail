@@ -176,7 +176,7 @@ export const useMergeStore = defineStore("merge", {
 
     /** Requests merging `targetRevision` into the current branch (T-231/
      * US-079 criterion 1: origin — the current branch — destination and
-     * policy — a plain, non-force merge — are all named by `targetLabel`
+     * policy — a plain, non-force merge — are all named by `promptLabel`
      * before anything runs). Fast-forward, a new merge commit, and a
      * conflict are always three distinct, explicit `MergeResultDto`
      * outcomes (criterion 2) — never a generic success/failure. */
@@ -186,7 +186,7 @@ export const useMergeStore = defineStore("merge", {
       await operation.request({
         kind: "merge",
         risk: "moderate",
-        targetLabel: `merging '${targetRevision}' into the current branch`,
+        promptLabel: `Merge '${targetRevision}' into the current branch`,
         run: async () => {
           this.lastMergeResult = await mergeCommand(targetRevision);
           await session.refreshStatus("after_mutation");
@@ -198,7 +198,7 @@ export const useMergeStore = defineStore("merge", {
     /** Requests rebasing the current branch onto `ontoRevision` (T-235/
      * US-083 criterion 1: the current branch, the chosen base, and the
      * fact that this reapplies the branch's own commits are all named by
-     * `targetLabel` before anything runs). Never silently stashes local
+     * `promptLabel` before anything runs). Never silently stashes local
      * changes — a dirty working tree comes back as an ordinary failure
      * from `rebaseCommand` (US-083 criterion 2), reported the same way any
      * other refused operation is. Completion and conflict are always two
@@ -210,7 +210,7 @@ export const useMergeStore = defineStore("merge", {
       await operation.request({
         kind: "rebase",
         risk: "moderate",
-        targetLabel: `rebasing the current branch onto '${ontoRevision}'`,
+        promptLabel: `Rebase the current branch onto '${ontoRevision}'`,
         run: async () => {
           this.lastRebaseResult = await rebaseCommand(ontoRevision);
           await session.refreshStatus("after_mutation");
@@ -221,9 +221,9 @@ export const useMergeStore = defineStore("merge", {
 
     /** Requests cherry-picking `commit` onto the current branch (T-238/
      * US-086 criterion 1: the exact commit and the current branch as
-     * destination are both named by `targetLabel` before anything runs).
+     * destination are both named by `promptLabel` before anything runs).
      * `isMerge` selects this workspace's fixed first-parent policy for a
-     * merge commit — named explicitly in `targetLabel` rather than left
+     * merge commit — named explicitly in `promptLabel` rather than left
      * implicit (US-086 criterion 2: never silently guessed). Applying, a
      * conflict, and an empty "already applied" result are always three
      * distinct, explicit outcomes (criterion 3). */
@@ -234,9 +234,9 @@ export const useMergeStore = defineStore("merge", {
       await operation.request({
         kind: "cherryPick",
         risk: "moderate",
-        targetLabel: isMerge
-          ? `cherry-picking merge commit '${shortHash}' (using its first parent)`
-          : `cherry-picking commit '${shortHash}' onto the current branch`,
+        promptLabel: isMerge
+          ? `Cherry-pick merge commit '${shortHash}' onto the current branch (using its first parent)`
+          : `Cherry-pick commit '${shortHash}' onto the current branch`,
         run: async () => {
           this.lastCherryPickResult = await cherryPickCommand(commit, mergeParent);
           await session.refreshStatus("after_mutation");
@@ -254,9 +254,9 @@ export const useMergeStore = defineStore("merge", {
       await operation.request({
         kind: "revert",
         risk: "moderate",
-        targetLabel: isMerge
-          ? `reverting merge commit '${shortHash}' (using its first parent)`
-          : `reverting commit '${shortHash}'`,
+        promptLabel: isMerge
+          ? `Revert merge commit '${shortHash}' (using its first parent)`
+          : `Revert commit '${shortHash}'`,
         run: async () => {
           this.lastRevertResult = await revertCommand(commit, mergeParent);
           await session.refreshStatus("after_mutation");
@@ -288,7 +288,7 @@ export const useMergeStore = defineStore("merge", {
       await operation.request({
         kind: "markConflictResolved",
         risk: "safe",
-        targetLabel: `'${path}' as resolved`,
+        promptLabel: `Mark '${path}' as resolved`,
         run: async () => {
           await markConflictResolvedCommand(path);
           if (this.inspectedPath === path) {
@@ -317,7 +317,7 @@ export const useMergeStore = defineStore("merge", {
       await operation.request({
         kind: "takeConflictSide",
         risk: "moderate",
-        targetLabel: `'${path}' (take ${side})`,
+        promptLabel: `Take ${side} for '${path}'`,
         run: async () => {
           await takeConflictSideCommand(path, side);
           if (this.inspectedPath === path) {
@@ -342,7 +342,7 @@ export const useMergeStore = defineStore("merge", {
       await operation.request({
         kind: "continueOperation",
         risk: "moderate",
-        targetLabel: "the in-progress operation",
+        promptLabel: "Continue the in-progress operation",
         run: async () => {
           await continueOperationCommand();
           await session.refreshStatus("after_mutation");
@@ -368,7 +368,7 @@ export const useMergeStore = defineStore("merge", {
       await operation.request({
         kind: "abortOperation",
         risk: "destructive",
-        targetLabel: "the in-progress operation",
+        promptLabel: "Abort the in-progress operation",
         impact:
           "This restores HEAD to before the operation started and discards its own in-progress changes — unrelated local work is left untouched.",
         run: async () => {
@@ -394,7 +394,7 @@ export const useMergeStore = defineStore("merge", {
       await operation.request({
         kind: "skipOperation",
         risk: "moderate",
-        targetLabel: "the current step of the in-progress operation",
+        promptLabel: "Skip the current step of the in-progress operation",
         run: async () => {
           await skipOperationCommand();
           await session.refreshStatus("after_mutation");
@@ -511,7 +511,7 @@ export const useMergeStore = defineStore("merge", {
 
     /** Validates the current plan client-side and, only once it passes,
      * requests confirmation to execute it (T-236/US-084 criteria 1/2:
-     * candidate range, order, and action are all shown by `targetLabel`
+     * candidate range, order, and action are all shown by `promptLabel`
      * before anything runs, and an invalid plan never reaches
      * confirmation at all). The plan overlay is cleared the moment this
      * actually dispatches — regardless of whether execution then succeeds
@@ -535,7 +535,7 @@ export const useMergeStore = defineStore("merge", {
       await operation.request({
         kind: "executeRebasePlan",
         risk: "moderate",
-        targetLabel: `rebasing ${plan.entries.length} commit(s) onto '${plan.ontoRevision}' (interactive plan)`,
+        promptLabel: `Rebase ${plan.entries.length} commit(s) onto '${plan.ontoRevision}' (interactive plan)`,
         run: async () => {
           this.rebasePlan = null;
           this.lastRebaseResult = await executeRebasePlanCommand(plan);

@@ -134,8 +134,8 @@ describe("reset store", () => {
     await store.requestReset();
     const operation = useOperationStore();
     expect(operation.current?.risk).toBe("moderate");
-    expect(operation.current?.targetLabel).toContain("aaaaaaa");
-    expect(operation.current?.targetLabel).toContain("soft");
+    expect(operation.current?.promptLabel).toContain("aaaaaaa");
+    expect(operation.current?.promptLabel).toContain("soft");
     expect(operation.current?.impact).toBeUndefined();
     // The chooser closes the moment this dispatches, mirroring the rebase
     // plan overlay's own "never silently reopens" convention.

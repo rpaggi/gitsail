@@ -291,7 +291,10 @@ fn pulling_fast_forwards_a_behind_branch_and_reports_the_outcome() {
             new_head: gitsail_domain::CommitHash::new(&advanced_head).unwrap()
         })
     );
-    assert!(matches!(app.operation(), OperationState::Succeeded(_)));
+    // A success closes its own overlay (T-267): the operation returns to
+    // `Idle` and the completed kind is what the status bar reports.
+    assert!(app.operation().is_idle());
+    assert!(app.last_operation_outcome().is_some());
 }
 
 #[test]
@@ -345,7 +348,10 @@ fn pushing_publishes_local_commits_to_the_remote() {
         remote_head, new_head,
         "the bare remote must now have the pushed commit"
     );
-    assert!(matches!(app.operation(), OperationState::Succeeded(_)));
+    // A success closes its own overlay (T-267): the operation returns to
+    // `Idle` and the completed kind is what the status bar reports.
+    assert!(app.operation().is_idle());
+    assert!(app.last_operation_outcome().is_some());
 }
 
 /// T-182's DoD explicitly requires this scenario: "E2E com remote fixture

@@ -107,7 +107,7 @@ export const useResetStore = defineStore("reset", {
       await operation.request({
         kind: "reset",
         risk: mode === "hard" ? "destructive" : "moderate",
-        targetLabel: `resetting to '${target.shortHash}' (${resetModeDescription(mode)})`,
+        promptLabel: `Reset to '${target.shortHash}' (${resetModeDescription(mode)})`,
         impact:
           mode === "hard"
             ? `${predictedLoss} uncommitted change${predictedLoss === 1 ? "" : "s"} will be permanently discarded.`

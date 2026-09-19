@@ -16,6 +16,27 @@ use crate::action::Action;
 /// in it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputContext {
+    /// A mutating operation is awaiting explicit confirmation
+    /// (`OperationState::Confirming`). Wins over every other context,
+    /// including [`Self::Help`]: the confirmation is modal, so while it is
+    /// on screen it owns the keyboard outright.
+    ///
+    /// Before this existed, the operation overlay had no context of its own
+    /// and fell through to [`Self::Normal`] — which has no `Esc` binding at
+    /// all, so `Action::Dismiss` was unreachable and the overlay could not
+    /// be closed by any key (GitHub issue #1 / T-267), while a stray `d`/
+    /// `z`/`m` still started *new* destructive requests behind the pending
+    /// confirmation.
+    OperationConfirm,
+    /// A confirmed operation is running (`OperationState::InProgress`).
+    /// Swallows every key but `Ctrl+C`: the work already started and
+    /// `OperationState::cancel` deliberately refuses to un-start it, so
+    /// there is nothing else a key could honestly do here.
+    OperationRunning,
+    /// An operation reached a terminal state that is still on screen
+    /// (`OperationState::Failed`, and `Succeeded` in the rare case one is
+    /// observed before [`crate::app::App`] closes it). Dismiss-only.
+    OperationResult,
     /// The contextual help overlay is open (US-042 criterion 3).
     Help,
     /// Branch-filter search input is active.
@@ -87,6 +108,33 @@ pub fn action_for(key: KeyEvent, ctx: InputContext) -> Option<Action> {
     }
 
     match ctx {
+        // The three operation contexts are the only ones that own the
+        // keyboard completely: anything not listed here is swallowed rather
+        // than falling through to the panel underneath, so a pending
+        // confirmation can never have a second mutation stacked behind it.
+        // `Ctrl+C` stays live throughout as the usual escape hatch, most
+        // importantly while a slow Git process is still running.
+        InputContext::OperationConfirm => match key.code {
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                Some(Action::Quit)
+            }
+            KeyCode::Enter => Some(Action::Activate),
+            KeyCode::Esc | KeyCode::Char('q') => Some(Action::Dismiss),
+            _ => None,
+        },
+        InputContext::OperationRunning => match key.code {
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                Some(Action::Quit)
+            }
+            _ => None,
+        },
+        InputContext::OperationResult => match key.code {
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                Some(Action::Quit)
+            }
+            KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => Some(Action::Dismiss),
+            _ => None,
+        },
         InputContext::Help => match key.code {
             KeyCode::Char('?') | KeyCode::Esc | KeyCode::Char('q') => Some(Action::Dismiss),
             _ => None,
@@ -175,6 +223,13 @@ pub fn action_for(key: KeyEvent, ctx: InputContext) -> Option<Action> {
             _ => None,
         },
         InputContext::Normal => match key.code {
+            // Nothing is open here by definition, so `Esc` clears whatever
+            // transient report is still on the status bar or in a banner
+            // (the last operation's outcome, a patch export/apply result, a
+            // remote/forge error). Before T-267 `Normal` had no `Esc` arm at
+            // all, which is precisely how the operation overlay — which fell
+            // through to this context — ended up with no way to close it.
+            KeyCode::Esc => Some(Action::Dismiss),
             KeyCode::Tab => Some(Action::FocusNext),
             KeyCode::BackTab => Some(Action::FocusPrev),
             KeyCode::Up | KeyCode::Char('k') => Some(Action::MoveUp),
@@ -222,8 +277,8 @@ pub fn action_for(key: KeyEvent, ctx: InputContext) -> Option<Action> {
 /// the hardcoded default below it in [`action_for`]'s own `Normal` arm.
 ///
 /// **Every other `InputContext`** — every overlay, prompt and dialog, most
-/// importantly the `Enter`/`Esc` keys that drive
-/// [`crate::operation::OperationState::confirm`]/
+/// importantly [`InputContext::OperationConfirm`]'s `Enter`/`Esc` keys,
+/// which drive [`crate::operation::OperationState::confirm`]/
 /// [`crate::operation::OperationState::cancel`] for a pending `Moderate`/
 /// `Destructive` confirmation — is never routed through `bindings` at all;
 /// it always resolves through [`action_for`] alone, unconditionally. This
@@ -261,6 +316,94 @@ mod tests {
 
     fn press(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    /// T-267 (GitHub issue #1): the operation overlay's own keys. The
+    /// regression these guard is the *absence* of a mapping — the overlay
+    /// used to resolve through `InputContext::Normal`, whose arm binds no
+    /// `Esc`, so no key press could reach `Action::Dismiss` and the modal
+    /// could not be closed at all.
+    #[test]
+    fn a_pending_confirmation_accepts_only_confirm_cancel_and_ctrl_c() {
+        assert_eq!(
+            action_for(press(KeyCode::Enter), InputContext::OperationConfirm),
+            Some(Action::Activate)
+        );
+        for code in [KeyCode::Esc, KeyCode::Char('q')] {
+            assert_eq!(
+                action_for(press(code), InputContext::OperationConfirm),
+                Some(Action::Dismiss),
+                "{code:?} must cancel a pending confirmation"
+            );
+        }
+        assert_eq!(
+            action_for(
+                KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+                InputContext::OperationConfirm
+            ),
+            Some(Action::Quit)
+        );
+        for code in [
+            KeyCode::Char('d'),
+            KeyCode::Char('z'),
+            KeyCode::Char('?'),
+            KeyCode::Char('j'),
+            KeyCode::Tab,
+        ] {
+            assert_eq!(
+                action_for(press(code), InputContext::OperationConfirm),
+                None,
+                "{code:?} must not reach the panels behind a modal confirmation"
+            );
+        }
+    }
+
+    #[test]
+    fn a_running_operation_accepts_nothing_but_ctrl_c() {
+        for code in [
+            KeyCode::Esc,
+            KeyCode::Enter,
+            KeyCode::Char('q'),
+            KeyCode::Char('d'),
+        ] {
+            assert_eq!(
+                action_for(press(code), InputContext::OperationRunning),
+                None,
+                "{code:?} must not pretend to cancel work already in flight"
+            );
+        }
+        assert_eq!(
+            action_for(
+                KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+                InputContext::OperationRunning
+            ),
+            Some(Action::Quit)
+        );
+    }
+
+    #[test]
+    fn a_terminal_operation_is_dismissible_without_leaking_shortcuts() {
+        for code in [KeyCode::Esc, KeyCode::Enter, KeyCode::Char('q')] {
+            assert_eq!(
+                action_for(press(code), InputContext::OperationResult),
+                Some(Action::Dismiss),
+                "{code:?} must dismiss a finished operation"
+            );
+        }
+        assert_eq!(
+            action_for(press(KeyCode::Char('d')), InputContext::OperationResult),
+            None,
+            "a stray shortcut must not start a new operation over the result"
+        );
+    }
+
+    #[test]
+    fn esc_in_the_normal_context_dismisses_rather_than_meaning_nothing() {
+        assert_eq!(
+            action_for(press(KeyCode::Esc), InputContext::Normal),
+            Some(Action::Dismiss),
+            "Esc must clear the last transient report instead of being dead"
+        );
     }
 
     #[test]

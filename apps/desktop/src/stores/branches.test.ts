@@ -139,8 +139,8 @@ describe("branches store", () => {
     const operation = useOperationStore();
     expect(operation.status).toBe("confirming");
     expect(operation.current?.risk).toBe("moderate");
-    expect(operation.current?.targetLabel).toContain("feature/old");
-    expect(operation.current?.targetLabel).toContain("feature/renamed");
+    expect(operation.current?.promptLabel).toContain("feature/old");
+    expect(operation.current?.promptLabel).toContain("feature/renamed");
 
     await operation.confirm();
 
@@ -148,6 +148,36 @@ describe("branches store", () => {
     expect(received).toContain("list_branches");
     expect(operation.status).toBe("succeeded");
     expect(store.branches.some((b) => b.name === "feature/renamed")).toBe(true);
+  });
+
+  // T-267: US-061 criterion 1 ("never a generic 'are you sure?'") is not
+  // satisfied by naming the target alone. Creating, checking out and
+  // deleting the same branch used to open the identical dialog — "branch
+  // 'feature/x'" — and the risk badge does not separate them either, since
+  // `moderate` covers both the checkout and the plain delete.
+  it("three different operations on one branch ask three different questions", async () => {
+    mockIPC(() => null);
+    const store = useBranchesStore();
+    const { useOperationStore } = await import("./operation");
+    const operation = useOperationStore();
+
+    const prompts: string[] = [];
+    for (const request of [
+      () => store.requestCreate("feature/x"),
+      () => store.requestSwitch("feature/x"),
+      () => store.requestDelete("feature/x", false),
+      () => store.requestDelete("feature/x", true),
+    ]) {
+      await request();
+      const prompt = operation.current?.promptLabel ?? "";
+      expect(prompt).toContain("feature/x");
+      prompts.push(prompt);
+      operation.cancel();
+    }
+
+    expect(new Set(prompts).size).toBe(prompts.length);
+    expect(prompts[1]).toBe("Check out branch 'feature/x'");
+    expect(prompts[2]).toBe("Delete branch 'feature/x'");
   });
 
   it("requestRename never overwrites a colliding branch: a refused rename surfaces as a failed operation", async () => {

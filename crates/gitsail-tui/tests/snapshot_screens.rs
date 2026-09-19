@@ -259,12 +259,12 @@ fn the_merge_conflicts_overlay_popup_matches_the_recorded_snapshot() {
         Some(MergeResult::Conflict { .. })
     ));
 
-    // The merge's own "Done — press any key to dismiss" result overlay
-    // takes render priority over the conflicts overlay until dismissed
-    // (`ui.rs::render_overlays`'s own ordering) — a pure-state test never
-    // notices this (state-only tests like `tests/merge_conflicts.rs` never
-    // render a frame), but a snapshot of the actual popup must dismiss it
-    // first, exactly like a real user would.
+    // The merge's own result used to hold the screen ahead of the conflicts
+    // overlay (`ui.rs::render_overlays`'s own ordering) until dismissed; a
+    // successful operation now closes its overlay itself (T-267) and reports
+    // through the status bar instead, so this `Dismiss` only clears that
+    // report — kept so the snapshot below captures the conflicts overlay
+    // with a clean status bar either way.
     app.update(Action::Dismiss);
     app.update(Action::ToggleConflictsPanel);
     assert!(app.conflicts_open());

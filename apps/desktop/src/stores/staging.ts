@@ -53,7 +53,8 @@ export const useStagingStore = defineStore("staging", {
       await operation.request({
         kind: "stageFiles",
         risk: "safe",
-        targetLabel: paths.length === 1 ? `staged: ${paths[0]}` : `staged: ${paths.length} files`,
+        promptLabel:
+          paths.length === 1 ? `Stage ${paths[0]}` : `Stage ${paths.length} files`,
         run: async () => {
           await stagePaths(paths);
           await this.refreshAfterMutation();
@@ -66,7 +67,8 @@ export const useStagingStore = defineStore("staging", {
       await operation.request({
         kind: "unstageFiles",
         risk: "safe",
-        targetLabel: paths.length === 1 ? `unstaged: ${paths[0]}` : `unstaged: ${paths.length} files`,
+        promptLabel:
+          paths.length === 1 ? `Unstage ${paths[0]}` : `Unstage ${paths.length} files`,
         run: async () => {
           await unstagePaths(paths);
           await this.refreshAfterMutation();
@@ -79,7 +81,7 @@ export const useStagingStore = defineStore("staging", {
       await operation.request({
         kind: "stageHunks",
         risk: "safe",
-        targetLabel: "selected hunks",
+        promptLabel: "Stage the selected hunks",
         run: async () => {
           await stageHunksCommand(selection);
           await this.refreshAfterMutation();
@@ -92,7 +94,7 @@ export const useStagingStore = defineStore("staging", {
       await operation.request({
         kind: "unstageHunks",
         risk: "safe",
-        targetLabel: "selected hunks",
+        promptLabel: "Unstage the selected hunks",
         run: async () => {
           await unstageHunksCommand(selection);
           await this.refreshAfterMutation();
@@ -114,7 +116,7 @@ export const useStagingStore = defineStore("staging", {
       await operation.request({
         kind: "createCommit",
         risk: "moderate",
-        targetLabel: "a new commit",
+        promptLabel: "Create a new commit",
         impact: `Commits ${stagedCount} staged file${stagedCount === 1 ? "" : "s"} with the message below.`,
         run: async () => {
           const result = await createCommit(this.message);

@@ -160,10 +160,10 @@ is not foreclosing it later:
   `"line ".to_string() + &line_no.to_string() + ": expected..."` split
   across two separately-localizable pieces) — concatenation like that is
   exactly what breaks a future translation, since word order and
-  punctuation differ per language. `OperationKind::target_label` (already
-  in `crates/gitsail-tui/src/operation.rs`, predating this task) already
-  follows the same discipline and was left unchanged as the existing,
-  correct precedent.
+  punctuation differ per language. `OperationKind::prompt_label` (in
+  `crates/gitsail-tui/src/operation.rs`, predating this task as
+  `target_label` and renamed by T-267) already follows the same discipline
+  and was left unchanged as the existing, correct precedent.
 - `ConfigurableAction::label` (`"Quit"`, `"Toggle help"`, ...) is a single,
   free-standing field per action — a future localization pass swaps its
   value per-locale without touching `id` (the stable, never-localized

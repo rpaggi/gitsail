@@ -83,7 +83,7 @@ export const usePatchApplyStore = defineStore("patchApply", {
       await operation.request({
         kind: "applyPatch",
         risk: "moderate",
-        targetLabel: `${fileCount} file${fileCount === 1 ? "" : "s"} affected by the patch`,
+        promptLabel: `Apply the patch — ${fileCount} file${fileCount === 1 ? "" : "s"} affected`,
         run: async () => {
           const result = await applyPatch(patchText);
           this.lastResult = result;

@@ -50,7 +50,7 @@ export const useBranchesStore = defineStore("branches", {
       await operation.request({
         kind: "createBranch",
         risk: "moderate",
-        targetLabel: `branch '${name}'`,
+        promptLabel: `Create branch '${name}'`,
         run: async () => {
           await createBranch(name, startPoint);
           await this.load();
@@ -67,7 +67,7 @@ export const useBranchesStore = defineStore("branches", {
       await operation.request({
         kind: "switchBranch",
         risk: "moderate",
-        targetLabel: `branch '${target}'`,
+        promptLabel: `Check out branch '${target}'`,
         run: async () => {
           await switchBranch(target);
           await this.load();
@@ -85,7 +85,7 @@ export const useBranchesStore = defineStore("branches", {
       await operation.request({
         kind: "deleteBranch",
         risk: force ? "destructive" : "moderate",
-        targetLabel: `branch '${name}'`,
+        promptLabel: force ? `Force-delete branch '${name}'` : `Delete branch '${name}'`,
         impact: force
           ? `This permanently deletes '${name}', including any commits only reachable from it and not merged elsewhere.`
           : undefined,
@@ -110,7 +110,7 @@ export const useBranchesStore = defineStore("branches", {
       await operation.request({
         kind: "renameBranch",
         risk: "moderate",
-        targetLabel: `branch '${oldName}' to '${newName}'`,
+        promptLabel: `Rename branch '${oldName}' to '${newName}'`,
         run: async () => {
           await renameBranch(oldName, newName);
           await this.load();

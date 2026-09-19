@@ -180,7 +180,10 @@ fn amending_head_replaces_it_with_the_edited_message_and_folds_in_staged_changes
     ));
     run_mutation(&mut app, commands);
 
-    assert!(matches!(app.operation(), OperationState::Succeeded(_)));
+    // A success closes its own overlay (T-267): the operation returns to
+    // `Idle` and the completed kind is what the status bar reports.
+    assert!(app.operation().is_idle());
+    assert!(app.last_operation_outcome().is_some());
     assert!(!app.amend_open(), "success must close the composer");
     assert_eq!(last_commit_subject(dir.path()), "amended message");
     assert_ne!(

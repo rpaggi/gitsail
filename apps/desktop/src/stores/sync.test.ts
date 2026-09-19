@@ -82,7 +82,7 @@ describe("sync store", () => {
     expect(received).toEqual(["resolve_sync_target", "fetch"]);
     const operation = useOperationStore();
     expect(operation.status).toBe("succeeded");
-    expect(operation.current?.targetLabel).toBe("remote 'origin'");
+    expect(operation.current?.promptLabel).toBe("Fetch from remote 'origin'");
     expect(store.lastFetchResult?.remote).toBe("origin");
   });
 
@@ -124,7 +124,7 @@ describe("sync store", () => {
     const operation = useOperationStore();
     expect(operation.status).toBe("confirming");
     expect(operation.current?.risk).toBe("moderate");
-    expect(operation.current?.targetLabel).toBe("branch 'main' from remote 'origin'");
+    expect(operation.current?.promptLabel).toBe("Pull branch 'main' from remote 'origin' (fast-forward only)");
 
     await operation.confirm();
 
@@ -205,7 +205,7 @@ describe("sync store", () => {
 
     await store.requestPush();
     const operation = useOperationStore();
-    expect(operation.current?.targetLabel).toBe("branch 'main' to remote 'origin'");
+    expect(operation.current?.promptLabel).toBe("Push branch 'main' to remote 'origin'");
 
     await operation.confirm();
 

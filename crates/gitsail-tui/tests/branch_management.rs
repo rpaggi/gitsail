@@ -135,7 +135,10 @@ fn creating_a_branch_via_the_tui_flow_creates_it_in_git() {
     run_mutation(&mut app, commands);
 
     assert!(branch_exists(dir.path(), "feature/x"));
-    assert!(matches!(app.operation(), OperationState::Succeeded(_)));
+    // A success closes its own overlay (T-267): the operation returns to
+    // `Idle` and the completed kind is what the status bar reports.
+    assert!(app.operation().is_idle());
+    assert!(app.last_operation_outcome().is_some());
 }
 
 #[test]
@@ -168,7 +171,10 @@ fn checking_out_a_branch_switches_head() {
     run_mutation(&mut app, commands);
 
     assert_eq!(current_branch(dir.path()), "develop");
-    assert!(matches!(app.operation(), OperationState::Succeeded(_)));
+    // A success closes its own overlay (T-267): the operation returns to
+    // `Idle` and the completed kind is what the status bar reports.
+    assert!(app.operation().is_idle());
+    assert!(app.last_operation_outcome().is_some());
 }
 
 #[test]

@@ -38,7 +38,7 @@ use ratatui::Frame;
 use crate::app::{
     App, DiffViewMode, Panel, PatchApplyOutcome, PatchExportOutcome, ReferenceView, ViewPhase,
 };
-use crate::operation::OperationState;
+use crate::operation::{OperationKind, OperationState};
 use crate::sanitize;
 use crate::status_view::DiffScope;
 use crate::theme::{self, DotKind, Icon, Role, Theme};
@@ -1842,6 +1842,24 @@ fn diff_stats(diff: &Diff) -> (usize, usize, usize) {
 /// Mirrors [`crate::app::App::input_context`]'s own precedence exactly: the
 /// hint must describe the context that will actually receive the next key.
 fn contextual_hint(app: &App) -> Option<String> {
+    // The operation overlay is modal (`App::input_context`), so while it is
+    // up these are the *only* keys that do anything — saying so here is what
+    // keeps US-042 criterion 3 ("nenhuma ação escondida") honest for it, and
+    // the strip below would otherwise keep advertising Navigate/Open/Focus/
+    // Search to someone whose keyboard those keys no longer reach (T-267).
+    match app.operation() {
+        OperationState::Confirming(_) => {
+            return Some("Enter confirms · Esc/q cancels · nothing has changed yet".to_string())
+        }
+        OperationState::InProgress(_) => {
+            return Some("Working… · already started, so it cannot be cancelled".to_string())
+        }
+        OperationState::Succeeded(_) | OperationState::Failed(_, _) => {
+            return Some("Esc/Enter/q dismisses".to_string())
+        }
+        OperationState::Idle => {}
+    }
+
     let hint = if app.commit_details_open() {
         "Esc/q closes commit details"
     } else if app.reference_details_open() {
@@ -1870,7 +1888,17 @@ fn contextual_hint(app: &App) -> Option<String> {
     } else if app.commit_message().is_some() {
         "Type commit message · Enter confirms · Esc discards"
     } else {
-        return None;
+        // The completed operation reports itself here instead of holding the
+        // screen with a popup nobody could dismiss (T-267). Lowest priority
+        // on purpose: anything the person is still *doing* — resolving
+        // conflicts above, most of all — matters more than what already
+        // finished.
+        let kind = app.last_operation_outcome()?;
+        let label = sanitize::safe_line(&kind.completion_label());
+        return Some(match operation_outcome_detail(app, kind) {
+            Some(detail) => format!("Done — {label}: {detail} · Esc clears"),
+            None => format!("Done — {label} · Esc clears"),
+        });
     };
     Some(hint.to_string())
 }
@@ -2224,44 +2252,16 @@ fn render_sync_error(frame: &mut Frame, area: Rect, app: &App) {
     );
 }
 
-/// Shows a pending/running/finished mutation (US-047, US-048): what it
-/// targets, its SAD §20 risk tier, and — for `SwitchBranch`/`DeleteBranch`
-/// — the branch's current target as the "ref de origem" criterion 2 asks
-/// for. A failure never implies anything was discarded (criterion 3).
-fn render_operation_overlay(frame: &mut Frame, area: Rect, app: &App) {
-    use crate::operation::OperationKind;
-
-    let (kind, status_line, error_line) = match app.operation() {
-        OperationState::Confirming(kind) => (kind, "Enter confirms · Esc cancels", None),
-        OperationState::InProgress(kind) => (kind, "Working…", None),
-        OperationState::Succeeded(kind) => (kind, "Done — press any key to dismiss", None),
-        OperationState::Failed(kind, err) => (
-            kind,
-            "Nothing was changed — Esc dismisses",
-            Some(sanitize::safe_line(err.message())),
-        ),
-        OperationState::Idle => return,
-    };
-
-    let mut lines = vec![
-        Line::from(sanitize::safe_line(&kind.target_label())),
-        Line::from(format!("risk: {:?}", kind.risk())),
-    ];
-
-    let origin_name = match kind {
-        OperationKind::SwitchBranch { target } => Some(target.as_str()),
-        OperationKind::DeleteBranch { name, .. } => Some(name.as_str()),
-        _ => None,
-    };
-    if let Some(name) = origin_name {
-        if let Some(branch) = app.branches().iter().find(|b| b.name.as_str() == name) {
-            lines.push(Line::from(format!(
-                "ref: {}",
-                branch.target.to_short(8).as_str()
-            )));
-        }
-    }
-
+/// The last operation's own, per-kind outcome detail: "fast-forwarded to
+/// abc1234" rather than a bare "Done" (US-049 criterion 1; US-079 criteria
+/// 2/3; US-083 criterion 3; US-086 criterion 3; US-087 criterion 2 — every
+/// one of those asks for the distinct outcomes to be named explicitly).
+///
+/// Shared by the operation overlay and by [`contextual_hint`]'s status-bar
+/// report, which is what keeps those distinctions visible now that a
+/// successful operation closes its own overlay (T-267) instead of holding
+/// the screen until dismissed.
+fn operation_outcome_detail(app: &App, kind: &OperationKind) -> Option<String> {
     // US-049 criterion 1: a pull's exact outcome — already up to date, or
     // fast-forwarded to a specific commit — is shown explicitly rather than
     // a bare "Done", so it is never mistaken for a merge/rebase result.
@@ -2273,16 +2273,14 @@ fn render_operation_overlay(frame: &mut Frame, area: Rect, app: &App) {
                     format!("fast-forwarded to {}", new_head.to_short(8).as_str())
                 }
             };
-            lines.push(Line::from(text));
+            return Some(text);
         }
     }
 
     // T-231/US-079 criterion 2/3: fast-forward, a new merge commit, and a
     // conflict are always three distinct, explicit lines — a conflict is
-    // never left to be inferred from a bare "Done" (`status_line` above
-    // already says so unconditionally, but this line is what actually
-    // tells the two apart at a glance) and never silently treated the same
-    // as either of the other two outcomes.
+    // never left to be inferred from a bare "Done", and never silently
+    // treated the same as either of the other two outcomes.
     if matches!(kind, OperationKind::Merge { .. }) {
         if let Some(outcome) = app.last_merge_result() {
             let text = match outcome {
@@ -2293,12 +2291,12 @@ fn render_operation_overlay(frame: &mut Frame, area: Rect, app: &App) {
                     format!("merge commit {} created", hash.to_short(8).as_str())
                 }
                 MergeResult::Conflict { files } => format!(
-                    "CONFLICT — {} file{} need resolution (press 'M' once dismissed)",
+                    "CONFLICT — {} file{} need resolution (press 'M' to resolve)",
                     files.len(),
                     if files.len() == 1 { "" } else { "s" }
                 ),
             };
-            lines.push(Line::from(text));
+            return Some(text);
         }
     }
 
@@ -2318,12 +2316,12 @@ fn render_operation_overlay(frame: &mut Frame, area: Rect, app: &App) {
                     format!("rebased onto {}", new_head.to_short(8).as_str())
                 }
                 RebaseResult::Conflict { files } => format!(
-                    "CONFLICT — {} file{} need resolution (press 'M' once dismissed)",
+                    "CONFLICT — {} file{} need resolution (press 'M' to resolve)",
                     files.len(),
                     if files.len() == 1 { "" } else { "s" }
                 ),
             };
-            lines.push(Line::from(text));
+            return Some(text);
         }
     }
 
@@ -2337,13 +2335,16 @@ fn render_operation_overlay(frame: &mut Frame, area: Rect, app: &App) {
                     format!("applied as {}", hash.to_short(8).as_str())
                 }
                 CherryPickResult::Conflict { files } => format!(
-                    "CONFLICT — {} file{} need resolution (press 'M' once dismissed)",
+                    "CONFLICT — {} file{} need resolution (press 'M' to resolve)",
                     files.len(),
                     if files.len() == 1 { "" } else { "s" }
                 ),
-                CherryPickResult::Empty => "EMPTY — already applied on the current branch (press 'M' to skip/abort once dismissed)".to_string(),
+                CherryPickResult::Empty => {
+                    "EMPTY — already applied on the current branch (press 'M' to skip/abort)"
+                        .to_string()
+                }
             };
-            lines.push(Line::from(text));
+            return Some(text);
         }
     }
 
@@ -2356,13 +2357,56 @@ fn render_operation_overlay(frame: &mut Frame, area: Rect, app: &App) {
                     format!("reverted as {}", hash.to_short(8).as_str())
                 }
                 RevertResult::Conflict { files } => format!(
-                    "CONFLICT — {} file{} need resolution (press 'M' once dismissed)",
+                    "CONFLICT — {} file{} need resolution (press 'M' to resolve)",
                     files.len(),
                     if files.len() == 1 { "" } else { "s" }
                 ),
             };
-            lines.push(Line::from(text));
+            return Some(text);
         }
+    }
+
+    None
+}
+
+/// Shows a pending/running/finished mutation (US-047, US-048): what it
+/// targets, its SAD §20 risk tier, and — for `SwitchBranch`/`DeleteBranch`
+/// — the branch's current target as the "ref de origem" criterion 2 asks
+/// for. A failure never implies anything was discarded (criterion 3).
+fn render_operation_overlay(frame: &mut Frame, area: Rect, app: &App) {
+    let (kind, status_line, error_line) = match app.operation() {
+        OperationState::Confirming(kind) => (kind, "Enter confirms · Esc/q cancels", None),
+        OperationState::InProgress(kind) => (kind, "Working…", None),
+        OperationState::Succeeded(kind) => (kind, "Done — Esc dismisses", None),
+        OperationState::Failed(kind, err) => (
+            kind,
+            "Nothing was changed — Esc/Enter/q dismisses",
+            Some(sanitize::safe_line(err.message())),
+        ),
+        OperationState::Idle => return,
+    };
+
+    let mut lines = vec![
+        Line::from(sanitize::safe_line(&kind.prompt_label())),
+        Line::from(format!("risk: {:?}", kind.risk())),
+    ];
+
+    let origin_name = match kind {
+        OperationKind::SwitchBranch { target } => Some(target.as_str()),
+        OperationKind::DeleteBranch { name, .. } => Some(name.as_str()),
+        _ => None,
+    };
+    if let Some(name) = origin_name {
+        if let Some(branch) = app.branches().iter().find(|b| b.name.as_str() == name) {
+            lines.push(Line::from(format!(
+                "ref: {}",
+                branch.target.to_short(8).as_str()
+            )));
+        }
+    }
+
+    if let Some(detail) = operation_outcome_detail(app, kind) {
+        lines.push(Line::from(detail));
     }
 
     if let Some(error) = error_line {
@@ -2737,7 +2781,7 @@ fn render_commit_composer(frame: &mut Frame, area: Rect, app: &App) {
 /// preview), the editable message, and a footer that reflects
 /// `app.operation()`. Unlike the commit composer, `Confirming` shows the
 /// exact same Destructive risk text/target label
-/// [`crate::operation::OperationKind::AmendCommit::target_label`] renders
+/// [`crate::operation::OperationKind::AmendCommit::prompt_label`] renders
 /// everywhere else (US-090 criterion 2: the commit being replaced and the
 /// publication risk are both named explicitly, never a generic "are you
 /// sure?").
@@ -2783,7 +2827,7 @@ fn render_amend_overlay(frame: &mut Frame, area: Rect, app: &App) {
         OperationState::Idle => "Enter reviews · Esc discards".to_string(),
         OperationState::Confirming(kind) => format!(
             "{}\nrisk: {:?}\nEnter amends · Esc cancels (message kept)",
-            sanitize::safe_line(&kind.target_label()),
+            sanitize::safe_line(&kind.prompt_label()),
             kind.risk()
         ),
         OperationState::InProgress(_) => "Amending…".to_string(),
@@ -2843,6 +2887,8 @@ fn render_help(frame: &mut Frame, area: Rect, theme: Theme) {
         Line::from("  (Reflog) opens the entry's commit details, when it still exists"),
         Line::from("A                 amend HEAD (compose the new message, then confirm)"),
         Line::from("w                 open in browser (branch/commit/repo, when a GitHub/GitLab remote is detected)"),
+        Line::from("Esc               cancel a pending confirmation · dismiss a result"),
+        Line::from("  a confirmation is modal: while it is up, Enter and Esc are the only keys"),
         Line::from("r                 refresh status and branches"),
         Line::from("?                 toggle this help"),
         Line::from("q, Ctrl+C         quit"),

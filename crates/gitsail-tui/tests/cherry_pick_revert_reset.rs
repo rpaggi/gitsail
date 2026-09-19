@@ -209,7 +209,7 @@ fn cherry_picking_the_highlighted_graph_commit_applies_it_via_the_tui_flow() {
     app.update(Action::RequestCherryPick);
     match app.operation() {
         OperationState::Confirming(kind @ OperationKind::CherryPick { .. }) => {
-            assert!(kind.target_label().contains(highlighted.hash.as_str()));
+            assert!(kind.prompt_label().contains(highlighted.hash.as_str()));
         }
         other => panic!("expected Confirming(CherryPick), got {other:?}"),
     }

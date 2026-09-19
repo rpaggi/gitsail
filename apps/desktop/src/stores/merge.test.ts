@@ -104,7 +104,7 @@ describe("merge store", () => {
     const operation = useOperationStore();
     expect(operation.status).toBe("confirming");
     expect(operation.current?.risk).toBe("moderate");
-    expect(operation.current?.targetLabel).toBe("merging 'feature/x' into the current branch");
+    expect(operation.current?.promptLabel).toBe("Merge 'feature/x' into the current branch");
 
     await operation.confirm();
 
@@ -212,7 +212,7 @@ describe("merge store", () => {
     await store.requestCherryPick("a".repeat(40), "aaaaaaa", false);
     const operation = useOperationStore();
     expect(operation.current?.risk).toBe("moderate");
-    expect(operation.current?.targetLabel).toBe("cherry-picking commit 'aaaaaaa' onto the current branch");
+    expect(operation.current?.promptLabel).toBe("Cherry-pick commit 'aaaaaaa' onto the current branch");
 
     await operation.confirm();
 
@@ -235,7 +235,7 @@ describe("merge store", () => {
     const store = useMergeStore();
 
     await store.requestCherryPick("a".repeat(40), "aaaaaaa", true);
-    expect(useOperationStore().current?.targetLabel).toContain("first parent");
+    expect(useOperationStore().current?.promptLabel).toContain("first parent");
 
     await useOperationStore().confirm();
 
@@ -287,7 +287,7 @@ describe("merge store", () => {
     await store.requestRevert("d".repeat(40), "ddddddd", false);
     const operation = useOperationStore();
     expect(operation.current?.risk).toBe("moderate");
-    expect(operation.current?.targetLabel).toBe("reverting commit 'ddddddd'");
+    expect(operation.current?.promptLabel).toBe("Revert commit 'ddddddd'");
 
     await operation.confirm();
 
@@ -360,7 +360,7 @@ describe("merge store", () => {
     expect(received).toEqual([]);
     const operation = useOperationStore();
     expect(operation.status).toBe("confirming");
-    expect(operation.current?.targetLabel).toBe("'img.bin' (take theirs)");
+    expect(operation.current?.promptLabel).toBe("Take theirs for 'img.bin'");
 
     await operation.confirm();
 
@@ -432,7 +432,7 @@ describe("merge store", () => {
     const operation = useOperationStore();
     expect(operation.status).toBe("confirming");
     expect(operation.current?.risk).toBe("moderate");
-    expect(operation.current?.targetLabel).toBe("rebasing the current branch onto 'main'");
+    expect(operation.current?.promptLabel).toBe("Rebase the current branch onto 'main'");
 
     await operation.confirm();
 
@@ -633,7 +633,7 @@ describe("merge store", () => {
     const operation = useOperationStore();
     expect(operation.status).toBe("confirming");
     expect(operation.current?.risk).toBe("moderate");
-    expect(operation.current?.targetLabel).toBe("rebasing 2 commit(s) onto 'main' (interactive plan)");
+    expect(operation.current?.promptLabel).toBe("Rebase 2 commit(s) onto 'main' (interactive plan)");
     // The plan is still visible while only confirmation is pending — it is
     // cleared once the mutation actually dispatches, not before.
     expect(store.rebasePlan).not.toBeNull();
