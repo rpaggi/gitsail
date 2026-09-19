@@ -485,7 +485,7 @@ impl RepositoryReadPort for GitCliProvider {
         // and non-bare repositories, so they are used to first establish
         // that `path` is inside a Git repository at all.
         let identity_output = self
-            .try_run(
+            .run(
                 vec![
                     "rev-parse".to_string(),
                     "--path-format=absolute".to_string(),
@@ -493,11 +493,8 @@ impl RepositoryReadPort for GitCliProvider {
                     "--absolute-git-dir".to_string(),
                 ],
                 path,
-            )?
-            .ok_or_else(|| {
-                GitSailError::new(ErrorCode::RepositoryNotFound, "not a Git repository")
-                    .with_remediation("open a path inside a Git repository")
-            })?;
+            )
+            .map_err(classify_discover_failure)?;
         let stdout = Self::stdout_string(&identity_output)?;
         let mut lines = stdout.lines();
         let is_bare = match lines.next() {
@@ -3098,6 +3095,38 @@ fn classify_patch_check_failure(err: &GitSailError) -> (ErrorCode, String) {
 /// the target does not resolve to a branch, giving a clearer, actionable
 /// error than a bare process failure. Any other failure passes through
 /// unchanged.
+/// Reclassifies a failed discovery `git rev-parse`. Only Git's own "not a
+/// git repository" answer means the path really is not one; every other
+/// failure used to be flattened into that same message, which actively
+/// misled. The case that motivated this: Git refuses a repository whose
+/// directory is owned by a different user ("detected dubious ownership"),
+/// which is exactly what Git for Windows reports for a WSL working tree
+/// opened over `\\wsl.localhost\...` — the repository is perfectly valid
+/// and one `safe.directory` line fixes it, but the old message sent the
+/// user looking for a nonexistent repository instead.
+fn classify_discover_failure(err: GitSailError) -> GitSailError {
+    if err.code() != ErrorCode::ProcessFailure {
+        return err;
+    }
+    let diagnostic_text = err.diagnostic().map(|d| d.to_string()).unwrap_or_default();
+    if diagnostic_text.contains("dubious ownership") {
+        GitSailError::new(
+            ErrorCode::PermissionDenied,
+            "Git refused this repository because its directory belongs to a different user",
+        )
+        .with_remediation(
+            "trust it explicitly: git config --global --add safe.directory <repository path>",
+        )
+        .with_source(err)
+    } else if diagnostic_text.contains("not a git repository") {
+        GitSailError::new(ErrorCode::RepositoryNotFound, "not a Git repository")
+            .with_remediation("open a path inside a Git repository")
+            .with_source(err)
+    } else {
+        err
+    }
+}
+
 fn classify_switch_failure(err: GitSailError) -> GitSailError {
     if err.code() != ErrorCode::ProcessFailure {
         return err;
@@ -5337,6 +5366,52 @@ mod tests {
             "git process exited with a non-zero status",
         )
         .with_source(RawStderr(stderr))
+    }
+
+    #[test]
+    fn classifies_dubious_ownership_as_permission_denied_not_a_missing_repository() {
+        // Captured verbatim from Git for Windows opening a WSL working tree
+        // over `\\wsl.localhost\...`: the repository is valid, so reporting
+        // "not a Git repository" (as every discovery failure once did) sends
+        // the user hunting for the wrong problem entirely.
+        let err = process_failure(
+            "fatal: detected dubious ownership in repository at '//wsl.localhost/Ubuntu/home/u/p'\n",
+        );
+
+        let classified = classify_discover_failure(err);
+
+        assert_eq!(classified.code(), ErrorCode::PermissionDenied);
+        assert!(classified.remediation().unwrap().contains("safe.directory"));
+        assert!(
+            classified.diagnostic().is_some(),
+            "original diagnostic must be preserved"
+        );
+    }
+
+    #[test]
+    fn still_reports_a_genuine_non_repository_as_repository_not_found() {
+        let err = process_failure(
+            "fatal: not a git repository (or any of the parent directories): .git\n",
+        );
+
+        let classified = classify_discover_failure(err);
+
+        assert_eq!(classified.code(), ErrorCode::RepositoryNotFound);
+    }
+
+    #[test]
+    fn leaves_an_unrecognized_discovery_failure_as_a_process_failure() {
+        // Never flatten an unknown cause into a confident wrong answer.
+        let err = process_failure("fatal: unable to read current working directory\n");
+
+        let classified = classify_discover_failure(err);
+
+        assert_eq!(classified.code(), ErrorCode::ProcessFailure);
+        assert!(classified
+            .diagnostic()
+            .unwrap()
+            .to_string()
+            .contains("current working directory"));
     }
 
     #[test]
