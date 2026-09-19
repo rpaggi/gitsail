@@ -13,6 +13,13 @@ gitsail-application = { path = "../gitsail-application" }
 gitsail-domain = { path = "../gitsail-domain" }
 gitsail-git = { path = "../gitsail-git" }
 gitsail-protocol = { path = "../gitsail-protocol" }
+# `gitsail` with no subcommand drops into the interactive TUI (a common,
+# discoverable convention for a Git terminal client — `lazygit`/`tig` do
+# the same) rather than requiring a separate `gitsail-tui` binary to be
+# installed/known about. `gitsail-tui`'s own binary keeps existing
+# unchanged for anyone who prefers to invoke it directly or scripts
+# against its name specifically.
+gitsail-tui = { path = "../gitsail-tui" }
 clap = { version = "4", features = ["derive"] }
 ctrlc = "3"
 serde = "1"

@@ -44,11 +44,15 @@ features that floor depends on.
 Running GitSail
 ----------------
 
-Put this archive's directory on your PATH, or run the binaries directly:
-  ./gitsail --help
-  ./gitsail-tui
+Put this archive's directory on your PATH, or run the binaries directly.
+`gitsail` with no subcommand at all (or `gitsail tui`) opens the same
+interactive terminal UI as the separate `gitsail-tui` binary — both exist
+and both work, `gitsail` alone is just the friendliest thing to type:
+  ./gitsail            # opens the interactive TUI
+  ./gitsail --help     # lists every one-shot query subcommand
+  ./gitsail-tui         # the standalone TUI binary, identical interface
 
-On Windows, the equivalent is `gitsail.exe --help` / `gitsail-tui.exe`.
+On Windows, the equivalent is `gitsail.exe` / `gitsail-tui.exe`.
 
 Verifying this download
 -------------------------

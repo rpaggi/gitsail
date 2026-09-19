@@ -1650,6 +1650,7 @@ dependencies = [
  "gitsail-domain",
  "gitsail-git",
  "gitsail-protocol",
+ "gitsail-tui",
  "serde",
  "serde_json",
  "tracing",

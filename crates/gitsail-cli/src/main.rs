@@ -19,12 +19,24 @@ use gitsail_domain::{CancellationToken, GitSailError};
 use gitsail_git::{GitCliProvider, GitProcessRunner, GitProcessRunnerConfig};
 use gitsail_protocol::{Envelope, ErrorPayload, RequestId, SCHEMA_VERSION};
 
-use cli::Cli;
+use cli::{Cli, Command};
 use exit_code::exit_code_for;
 use output::Output;
 
-fn main() {
+fn main() -> std::process::ExitCode {
     let cli = Cli::parse();
+
+    // No subcommand at all, or the explicit `tui` subcommand, both open
+    // the interactive TUI (`cli.rs`'s own doc comment) — intercepted here,
+    // before any of the read-only-query machinery (logging, the panic
+    // hook, the Ctrl+C-to-cooperative-cancel handler, JSON envelopes) that
+    // exists for that machinery alone, none of which the TUI needs or
+    // wants (it manages the terminal and Ctrl+C itself).
+    if matches!(cli.command, None | Some(Command::Tui)) {
+        let low_color = cli.ascii || std::env::var_os("NO_COLOR").is_some();
+        return gitsail_tui::run_interactive(cli.repo, cli.git_path, low_color, cli.keybindings);
+    }
+
     init_logging(cli.debug);
     install_panic_hook();
     let cancel = CancellationToken::new();
@@ -32,7 +44,7 @@ fn main() {
 
     let request_id = RequestId::generate();
     let exit_code = run(&cli, &cancel, &request_id);
-    std::process::exit(exit_code);
+    std::process::exit(exit_code)
 }
 
 /// Installs a minimal structured logger (SAD §28; EPIC-22/T-224/US-113):
@@ -105,7 +117,13 @@ fn run(cli: &Cli, cancel: &CancellationToken, request_id: &RequestId) -> i32 {
     };
     let port: Arc<dyn RepositoryReadPort> = Arc::new(GitCliProvider::new(runner));
 
-    let result = commands::execute(&port, &cli.repo, &cli.command, cancel);
+    // `main` only calls `run` once `cli.command` is confirmed `Some` (and
+    // not `Tui`) — see its own doc comment.
+    let command = cli
+        .command
+        .as_ref()
+        .expect("run() is only called once main() has confirmed a non-TUI subcommand");
+    let result = commands::execute(&port, &cli.repo, command, cancel);
     report(cli, request_id, result)
 }
 

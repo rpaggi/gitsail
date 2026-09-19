@@ -9,11 +9,32 @@ configuration file locations, updates, privacy, and protocol compatibility
 
 ## Opening and navigating
 
+The friendliest way to open it, once the CLI is installed, is simply:
+
 ```sh
+gitsail
+```
+
+`gitsail` with no subcommand (or the explicit `gitsail tui`) opens the exact
+same interactive interface as the separate `gitsail-tui` binary — a common
+convention for a Git terminal client (`lazygit`/`tig` do the same), so there
+is nothing extra to install or remember. Every read-only query still works
+exactly as before (`gitsail status`, `gitsail log`, ...); only the *absence*
+of a subcommand changed meaning, from a usage error to opening the TUI. Both
+entry points share one implementation (`gitsail_tui::run_interactive`, see
+`crates/gitsail-tui/src/runtime.rs`) — they can never drift apart.
+
+The standalone binary, and building/running from source, still work exactly
+as before:
+
+```sh
+gitsail-tui --repo /path/to/repository
+# or, from a source checkout, without installing anything:
 cargo run -p gitsail-tui --release -- --repo /path/to/repository
 ```
 
-Flags (`crates/gitsail-tui/src/main.rs`):
+Flags (shared by both entry points — `crates/gitsail-tui/src/main.rs` for the
+standalone binary, `crates/gitsail-cli/src/cli.rs` for `gitsail`/`gitsail tui`):
 
 | Flag | Meaning |
 |---|---|

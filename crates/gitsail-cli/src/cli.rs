@@ -8,7 +8,10 @@ use clap::{Args, Parser, Subcommand};
 ///
 /// Runs one read-only query against a Git repository and prints the result
 /// either as human-readable text or, with `--json`, as a single versioned
-/// JSON envelope on stdout (SAD §14, §15).
+/// JSON envelope on stdout (SAD §14, §15). Run with no subcommand at all to
+/// open the interactive TUI instead (same as running `gitsail tui`, or the
+/// separate `gitsail-tui` binary) — a common convention for a Git terminal
+/// client, so `gitsail` alone is always the friendliest thing to type.
 #[derive(Debug, Parser)]
 #[command(name = "gitsail", version, about, long_about = None)]
 pub struct Cli {
@@ -18,7 +21,8 @@ pub struct Cli {
 
     /// Print a single versioned JSON envelope on stdout instead of
     /// human-readable text (US-037). Never mixed with progress, ANSI color
-    /// or log output on stdout.
+    /// or log output on stdout. Not meaningful with no subcommand/`tui`
+    /// (the TUI has no JSON mode of its own).
     #[arg(long, global = true)]
     pub json: bool,
 
@@ -30,7 +34,8 @@ pub struct Cli {
 
     /// Abort the underlying `git` invocation after this many seconds
     /// (fractional values are accepted, e.g. `0.5`). Unset means no
-    /// per-command timeout.
+    /// per-command timeout. Ignored by the TUI, which has no single
+    /// per-invocation timeout of its own.
     #[arg(long, global = true)]
     pub timeout: Option<f64>,
 
@@ -38,12 +43,30 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub git_path: Option<PathBuf>,
 
+    /// Disable color in the TUI and rely on text/markers alone to
+    /// distinguish state (US-043 criterion 3). Also enabled automatically
+    /// when `NO_COLOR` is set. Ignored by every read-only query subcommand.
+    #[arg(long, global = true)]
+    pub ascii: bool,
+
+    /// With the TUI: explicit path to a keybindings-override file (T-251/
+    /// US-109 criterion 2). Defaults to `gitsail_tui::keybindings::
+    /// default_config_path` (`<OS config dir>/gitsail/tui/keybindings.conf`)
+    /// when omitted; a missing file at either location is not an error.
+    /// Ignored by every read-only query subcommand.
+    #[arg(long, global = true)]
+    pub keybindings: Option<PathBuf>,
+
     #[command(subcommand)]
-    pub command: Command,
+    pub command: Option<Command>,
 }
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Open the interactive TUI (same as running `gitsail` with no
+    /// subcommand at all).
+    Tui,
+
     /// Discover the repository at --repo and print its identity and HEAD state.
     ///
     /// Example: `gitsail open --repo ~/code/gitsail`

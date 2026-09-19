@@ -38,6 +38,10 @@ The binary is produced at `target/release/gitsail` (`gitsail.exe` on Windows). R
 
 Every example below was executed against a real, disposable Git repository — created for this README with plain `git` commands (two commits on `main`, a third commit on a `feature/greeting` branch, one staged addition, and one unstaged modification) — using the `gitsail` binary built above. Human output is the default; `--json` always emits a single versioned envelope (`schemaVersion`, `requestId`, then `data`) on stdout instead, with nothing else mixed into that stream (SAD §14–15; ADR-014). JSON below is pretty-printed for readability; the CLI itself prints it as one line. Paths shown are the disposable fixture's own absolute path — GitSail always reports paths as `git` resolves them for the repository you actually run against, never a fixed or invented value.
 
+Run `gitsail` with **no subcommand at all** (or `gitsail tui`) to open the
+interactive terminal UI instead of a one-shot query — see
+[`docs/manual/tui.md`](docs/manual/tui.md).
+
 ### 1. Discover a repository — `gitsail open`
 
 Resolves `--repo` (default: the current directory) to its identity and current `HEAD` state, whether invoked from the root or a subdirectory.

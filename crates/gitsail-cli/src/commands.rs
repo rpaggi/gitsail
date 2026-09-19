@@ -103,6 +103,13 @@ pub fn execute(
             let content = GetFileContent::new(port.clone()).execute(&repo, &hash, &args.file)?;
             Ok(Output::FileContent(FileContentDto::from(&content)))
         }
+
+        // `main()` intercepts `Command::Tui` (and the no-subcommand case)
+        // before ever calling `execute` — the TUI is an interactive
+        // program, not a read-only query with an `Output`/JSON envelope.
+        Command::Tui => {
+            unreachable!("Command::Tui must be handled by main() before reaching commands::execute")
+        }
     }
 }
 
