@@ -21,10 +21,25 @@ export function focusableElements(container: HTMLElement): HTMLElement[] {
  * once a dialog becomes visible (e.g. from a `watch` on the store field
  * that controls it), so keyboard/screen-reader users land somewhere
  * actionable immediately instead of on whatever had focus on the page
- * behind the now-open overlay. */
+ * behind the now-open overlay. When the dialog currently renders no
+ * focusable element (e.g. `ConfirmationDialog.vue`'s `inProgress` state,
+ * which shows only status text), falls back to focusing `container`
+ * itself — which is why dialog roots carry `tabindex="-1"` — so focus
+ * never drops back to `<body>` while the modal is still on screen
+ * (US-055 criterion 1 / WCAG 2.1.2) and the root's own `keydown` handler
+ * keeps receiving keys. */
 export function focusFirst(container: HTMLElement | null | undefined): void {
-  const first = container ? focusableElements(container)[0] : undefined;
-  first?.focus();
+  if (!container) {
+    return;
+  }
+  const first = focusableElements(container)[0];
+  if (first) {
+    first.focus();
+    return;
+  }
+  if (container.tabIndex === -1) {
+    container.focus();
+  }
 }
 
 /**

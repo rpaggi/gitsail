@@ -64,6 +64,7 @@ function riskLabel(risk: string): string {
       :class="`risk-${store.current?.risk}`"
       role="alertdialog"
       aria-modal="true"
+      tabindex="-1"
       @keydown="onDialogKeydown"
     >
       <template v-if="store.status === 'confirming' && store.current">
