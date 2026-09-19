@@ -438,6 +438,16 @@ impl MutationKind {
 
     /// A short, human-readable description of what would be affected, for a
     /// confirmation prompt (never a generic "are you sure?").
+    ///
+    /// **A surface must not show this as the prompt on its own.** Naming the
+    /// target alone is not enough to make a prompt answerable: creating,
+    /// checking out and deleting the same branch all reduce to "branch
+    /// 'feature'" here, and [`Self::risk`] does not separate them either
+    /// (`Moderate` covers both the checkout and the plain delete). Both
+    /// surfaces that actually ask the question own a label that names the
+    /// action *and* its target — `gitsail_tui::operation::OperationKind::
+    /// prompt_label` and the Desktop's `OperationDescriptor.promptLabel` —
+    /// and no caller reads this method today (T-267).
     pub fn target_label(&self) -> String {
         match self {
             MutationKind::StageFiles => "staged files".to_string(),

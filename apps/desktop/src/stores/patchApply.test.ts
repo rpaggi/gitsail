@@ -104,7 +104,7 @@ describe("patchApply store", () => {
     const operation = useOperationStore();
     expect(operation.status).toBe("confirming");
     expect(operation.current?.risk).toBe("moderate");
-    expect(operation.current?.targetLabel).toContain("2 files");
+    expect(operation.current?.promptLabel).toContain("2 files");
   });
 
   it("confirming sends back exactly the previewed patch text and clears it on success", async () => {

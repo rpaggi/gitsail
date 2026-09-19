@@ -65,7 +65,7 @@ export const useAmendStore = defineStore("amend", {
       await operation.request({
         kind: "amendCommit",
         risk: "destructive",
-        targetLabel: `HEAD (${preview.head.shortHash})`,
+        promptLabel: `Amend HEAD (${preview.head.shortHash})`,
         impact:
           "This replaces the last commit with a new one carrying the message below. " +
           "If this commit has already been pushed or shared, rewriting it means anyone " +

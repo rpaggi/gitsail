@@ -7,7 +7,7 @@ function sampleOp(overrides: Partial<OperationDescriptor> = {}): OperationDescri
   return {
     kind: "deleteBranch",
     risk: "moderate",
-    targetLabel: "branch 'feature/x'",
+    promptLabel: "branch 'feature/x'",
     run: vi.fn().mockResolvedValue(undefined),
     ...overrides,
   };
@@ -98,11 +98,11 @@ describe("operation store", () => {
 
   it("a new request replaces whatever was previously pending", async () => {
     const store = useOperationStore();
-    await store.request(sampleOp({ risk: "moderate", targetLabel: "first" }));
+    await store.request(sampleOp({ risk: "moderate", promptLabel: "first" }));
     expect(store.status).toBe("confirming");
 
-    await store.request(sampleOp({ risk: "moderate", targetLabel: "second" }));
+    await store.request(sampleOp({ risk: "moderate", promptLabel: "second" }));
 
-    expect(store.current?.targetLabel).toBe("second");
+    expect(store.current?.promptLabel).toBe("second");
   });
 });

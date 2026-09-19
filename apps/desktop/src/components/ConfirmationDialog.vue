@@ -68,7 +68,7 @@ function riskLabel(risk: string): string {
     >
       <template v-if="store.status === 'confirming' && store.current">
         <p class="risk-badge">{{ riskLabel(store.current.risk) }}</p>
-        <p class="target">{{ store.current.targetLabel }}</p>
+        <p class="prompt">{{ store.current.promptLabel }}</p>
         <p v-if="store.current.impact" class="impact">{{ store.current.impact }}</p>
         <div class="actions">
           <button @click="store.cancel()">Cancel</button>
@@ -77,12 +77,12 @@ function riskLabel(risk: string): string {
       </template>
 
       <template v-else-if="store.status === 'inProgress' && store.current">
-        <p class="target">{{ store.current.targetLabel }}</p>
+        <p class="prompt">{{ store.current.promptLabel }}</p>
         <p>Running…</p>
       </template>
 
       <template v-else-if="store.status === 'succeeded' && store.current">
-        <p class="target">{{ store.current.targetLabel }}</p>
+        <p class="prompt">{{ store.current.promptLabel }}</p>
         <p class="success">Completed successfully.</p>
         <div class="actions">
           <button @click="store.cancel()">Dismiss</button>
@@ -90,7 +90,7 @@ function riskLabel(risk: string): string {
       </template>
 
       <template v-else-if="store.status === 'failed' && store.current">
-        <p class="target">{{ store.current.targetLabel }}</p>
+        <p class="prompt">{{ store.current.promptLabel }}</p>
         <p class="failure">
           {{ store.error?.message }}
           <span v-if="store.error?.remediation"> — {{ store.error.remediation }}</span>
@@ -135,7 +135,7 @@ function riskLabel(risk: string): string {
   opacity: 0.8;
   margin: 0 0 0.25rem;
 }
-.target {
+.prompt {
   font-weight: 600;
   margin: 0 0 0.5rem;
 }

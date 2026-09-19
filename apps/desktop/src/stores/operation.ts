@@ -39,9 +39,20 @@ export interface OperationDescriptor {
    * by any future telemetry, never shown to the person directly. */
   kind: string;
   risk: OperationRisk;
-  /** Human-readable target, e.g. `"branch 'feature/x'"`, `"a new commit"` —
-   * shown verbatim in the confirmation dialog. */
-  targetLabel: string;
+  /** The confirmation prompt itself, in the imperative, naming the action
+   * *and* its target: `"Delete branch 'feature/x'"`, `"Create a new
+   * commit"` — shown verbatim in the confirmation dialog.
+   *
+   * Naming the action is what makes the prompt answerable (T-267). This was
+   * a `targetLabel` that named the target alone, so creating, checking out
+   * and deleting the same branch all asked the identical "branch
+   * 'feature/x'", told apart only by the risk badge beside it — and
+   * `moderate` covers both the checkout and the plain delete. Each label is
+   * one whole sentence built with interpolation, never a verb concatenated
+   * onto a separately-built target fragment (see
+   * `docs/architecture/preferences-matrix.md` on why that breaks a future
+   * translation). */
+  promptLabel: string;
   /** Extra impact/warning text beyond the target label (e.g. US-059's
    * "this replaces the last commit and rewrites history other people may
    * already have" warning for amend, or US-063's "this permanently deletes

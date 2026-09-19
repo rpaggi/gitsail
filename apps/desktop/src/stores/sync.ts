@@ -126,7 +126,7 @@ export const useSyncStore = defineStore("sync", {
       await operation.request({
         kind: "fetch",
         risk: "safe",
-        targetLabel: `remote '${target.remote}'`,
+        promptLabel: `Fetch from remote '${target.remote}'`,
         run: async () => {
           this.lastFetchResult = await fetchCommand();
         },
@@ -146,7 +146,7 @@ export const useSyncStore = defineStore("sync", {
       await operation.request({
         kind: "pull",
         risk: "moderate",
-        targetLabel: `branch '${target.branch}' from remote '${target.remote}'`,
+        promptLabel: `Pull branch '${target.branch}' from remote '${target.remote}' (fast-forward only)`,
         run: async () => {
           this.lastPullResult = await pullCommand();
           await session.refreshStatus("after_mutation");
@@ -166,7 +166,7 @@ export const useSyncStore = defineStore("sync", {
       await operation.request({
         kind: "push",
         risk: "moderate",
-        targetLabel: `branch '${target.branch}' to remote '${target.remote}'`,
+        promptLabel: `Push branch '${target.branch}' to remote '${target.remote}'`,
         run: async () => {
           this.lastPushResult = await pushCommand();
           await session.refreshStatus("after_mutation");
