@@ -25,7 +25,9 @@
     "active": true,
     "targets": "all",
     "icon": [
-      "icons/icon.png"
+      "icons/icon.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
     ],
     "publisher": "GitSail",
     "homepage": "https://github.com/rpaggi/gitsail",
