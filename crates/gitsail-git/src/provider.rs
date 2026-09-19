@@ -1687,16 +1687,29 @@ impl RepositoryWritePort for GitCliProvider {
         // request alone (which would not know, e.g., the resolved detached
         // HEAD commit for a `NewBranch { start_point: None }` request).
         // Matched by canonical path where possible (Git reports the
-        // worktree's real, canonicalized path, which is not always
-        // byte-identical to the caller's `path`, e.g. a symlinked temp
-        // directory) — falling back to a literal match otherwise, a known
-        // simplification for a path that cannot be canonicalized (e.g. does
-        // not exist, on a filesystem quirk).
+        // worktree's real path, which is not always byte-identical to the
+        // caller's `path`, e.g. a symlinked temp directory) — falling back
+        // to a literal match otherwise, a known simplification for a path
+        // that cannot be canonicalized (e.g. does not exist, on a
+        // filesystem quirk).
+        //
+        // Both sides are canonicalized rather than only the request,
+        // because the two spellings differ by more than symlinks on
+        // Windows: Git reports `C:/Users/...` while `canonicalize` yields
+        // the verbatim form `\\?\C:\Users\...`, so comparing a raw Git path
+        // against a canonicalized one never matched there and every
+        // `create_worktree` failed with "could not be found in the
+        // listing" despite Git having created it.
         let canonical_requested = std::fs::canonicalize(path).ok();
         let worktrees = RepositoryReadPort::list_worktrees(self, repo)?;
         worktrees
             .into_iter()
-            .find(|w| Some(&w.path) == canonical_requested.as_ref() || w.path == path)
+            .find(|w| {
+                w.path == path
+                    || Some(&w.path) == canonical_requested.as_ref()
+                    || (canonical_requested.is_some()
+                        && std::fs::canonicalize(&w.path).ok() == canonical_requested)
+            })
             .ok_or_else(|| {
                 parse_err(
                     "worktree add succeeded but the new worktree could not be found in the listing",

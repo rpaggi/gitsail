@@ -297,14 +297,23 @@ fn list_worktrees_reports_main_and_linked_worktrees_with_state() {
         .iter()
         .find(|w| w.is_main)
         .expect("a main worktree");
-    assert_eq!(main.path, repo_dir.path().canonicalize().unwrap());
+    // Canonicalize both sides: the assertion is "this is the same
+    // directory", and the two spellings genuinely differ on Windows, where
+    // Git reports `C:/Users/...` and `canonicalize` yields `\\?\C:\Users\...`.
+    assert_eq!(
+        main.path.canonicalize().unwrap(),
+        repo_dir.path().canonicalize().unwrap()
+    );
     assert!(matches!(&main.head, WorktreeHead::Attached { branch } if branch.as_str() == "main"));
 
     let linked = worktrees
         .iter()
         .find(|w| !w.is_main)
         .expect("a linked worktree");
-    assert_eq!(linked.path, linked_dir.path().canonicalize().unwrap());
+    assert_eq!(
+        linked.path.canonicalize().unwrap(),
+        linked_dir.path().canonicalize().unwrap()
+    );
     assert!(
         matches!(&linked.head, WorktreeHead::Attached { branch } if branch.as_str() == "wt-branch")
     );
