@@ -214,11 +214,45 @@ jobs:
         working-directory: apps/desktop
         run: npx tauri build --bundles deb,appimage --config "$TAURI_VERSION_OVERRIDE"
 
+      - name: Compute a WiX/MSI-safe app version for Windows
+        # WiX rejects the plain `${RELEASE_TAG#v}` override above for a
+        # prerelease tag (e.g. "0.1.0-alpha.1"): MSI requires the
+        # pre-release identifier to be numeric-only and <= 65535, so
+        # "alpha.1" fails outright (confirmed failure on v0.1.0-alpha.1).
+        # Encode alpha/beta/rc + their numeric suffix into one such number
+        # (stage*10000 + N — alpha=0xxxx, beta=1xxxx, rc=2xxxx, so
+        # ordering across stages still increases correctly). A tag with no
+        # recognized pre-release suffix falls back to the bare core
+        # version. Cosmetic only (ADR-021) — VERSION.txt/the release tag
+        # stay the real version identifier; deb/AppImage/dmg are untouched
+        # since only WiX enforces this.
+        if: matrix.os == 'windows-latest'
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${RELEASE_TAG#v}"
+          core="${version%%-*}"
+          msi_version="$core"
+          if [[ "$version" == *-* ]]; then
+            pre="${version#*-}"
+            stage=""
+            n=""
+            case "$pre" in
+              alpha.*) stage=0; n="${pre#alpha.}" ;;
+              beta.*) stage=1; n="${pre#beta.}" ;;
+              rc.*) stage=2; n="${pre#rc.}" ;;
+            esac
+            if [[ -n "$stage" && "$n" =~ ^[0-9]+$ ]]; then
+              msi_version="${core}-$((stage * 10000 + 10#$n))"
+            fi
+          fi
+          echo "TAURI_VERSION_OVERRIDE_WINDOWS={\"version\":\"${msi_version}\"}" >> "$GITHUB_ENV"
+
       - name: Build Desktop bundles (MSI + NSIS)
         if: matrix.os == 'windows-latest'
         shell: bash
         working-directory: apps/desktop
-        run: npx tauri build --bundles msi,nsis --config "$TAURI_VERSION_OVERRIDE"
+        run: npx tauri build --bundles msi,nsis --config "$TAURI_VERSION_OVERRIDE_WINDOWS"
 
       - name: Build Desktop bundles (dmg + app)
         if: matrix.os == 'macos-latest'
