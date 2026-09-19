@@ -275,6 +275,66 @@ impl OperationKind {
         }
     }
 
+    /// What just happened, in past tense, for the status bar's own report
+    /// once a successful operation has closed its overlay (T-267).
+    ///
+    /// Deliberately not [`Self::target_label`]: that one names the *target*
+    /// for a prompt whose surrounding UI already implies the verb ("branch
+    /// 'feature'", with the risk tier beside it), which on its own would
+    /// leave a finished operation reported as a bare "Done: branch
+    /// 'feature'" — equally true of a checkout, a create and a delete. The
+    /// per-outcome detail Git itself reports (fast-forward vs. merge commit
+    /// vs. conflict) is separate again, and lives in `ui.rs` beside the
+    /// `last_*_result` values it formats.
+    pub fn completion_label(&self) -> String {
+        match self {
+            OperationKind::StageFiles => "staged the selected files".to_string(),
+            OperationKind::UnstageFiles => "unstaged the selected files".to_string(),
+            OperationKind::CreateCommit => "created a commit".to_string(),
+            OperationKind::SwitchBranch { target } => format!("switched to '{target}'"),
+            OperationKind::CreateBranch { name } => format!("created branch '{name}'"),
+            OperationKind::DeleteBranch { name, force } => {
+                if *force {
+                    format!("force-deleted branch '{name}'")
+                } else {
+                    format!("deleted branch '{name}'")
+                }
+            }
+            OperationKind::RenameBranch { old_name, new_name } => {
+                format!("renamed '{old_name}' to '{new_name}'")
+            }
+            OperationKind::Fetch { remote } => format!("fetched from '{remote}'"),
+            OperationKind::Pull { remote, branch } => format!("pulled '{branch}' from '{remote}'"),
+            OperationKind::Push { remote, branch } => format!("pushed '{branch}' to '{remote}'"),
+            OperationKind::ApplyPatch {
+                affected_file_count,
+            } => format!(
+                "applied the patch to {affected_file_count} file{}",
+                if *affected_file_count == 1 { "" } else { "s" }
+            ),
+            OperationKind::Merge { target } => format!("merged '{target}'"),
+            OperationKind::ContinueOperation => "continued the in-progress operation".to_string(),
+            OperationKind::AbortOperation => "aborted the in-progress operation".to_string(),
+            OperationKind::Rebase { onto } => format!("rebased onto '{onto}'"),
+            OperationKind::SkipOperation => "skipped the current step".to_string(),
+            OperationKind::ExecuteRebasePlan { onto, commit_count } => format!(
+                "rebased {commit_count} commit{} onto '{onto}'",
+                if *commit_count == 1 { "" } else { "s" }
+            ),
+            OperationKind::CherryPick { commit, .. } => format!("cherry-picked '{commit}'"),
+            OperationKind::Revert { commit, .. } => format!("reverted '{commit}'"),
+            OperationKind::Reset { target, mode, .. } => {
+                let mode = match mode {
+                    ResetMode::Soft => "soft",
+                    ResetMode::Mixed => "mixed",
+                    ResetMode::Hard => "hard",
+                };
+                format!("reset to '{target}' ({mode})")
+            }
+            OperationKind::AmendCommit { short_hash, .. } => format!("amended {short_hash}"),
+        }
+    }
+
     /// A short, human-readable description of what would be affected, for
     /// the confirmation prompt (criterion 1: "operação mostra alvo").
     pub fn target_label(&self) -> String {

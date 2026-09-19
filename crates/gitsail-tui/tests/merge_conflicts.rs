@@ -7,6 +7,7 @@
 
 mod support;
 
+use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
 use gitsail_application::{GetRepositoryStatus, ListBranches, MergeResult, OpenRepository};
 use gitsail_domain::InProgressOperation;
 use gitsail_tui::{Action, App, Command, OperationKind, OperationState};
@@ -426,4 +427,64 @@ fn aborting_a_pending_merge_restores_head_and_preserves_unrelated_work() {
         "unrelated work\n",
         "abort must never discard unrelated local work"
     );
+}
+
+/// T-267 (GitHub issue #1): the confirmation overlay is modal, so `Esc`
+/// while it is up must cancel *it* — not the conflicts overlay rendered
+/// underneath it. `App::dismiss` used to walk an else-chain in which
+/// `conflicts_open` was tested before the operation, so the overlay that
+/// closed was the one the person was not even looking at.
+#[test]
+fn esc_over_the_conflicts_overlay_cancels_the_confirmation_and_keeps_the_conflicts_open() {
+    let dir = TempDir::new("merge-conflict-esc-priority");
+    setup_conflicting_divergence(dir.path());
+
+    let (mut app, _commands) = App::new(dir.path().to_path_buf(), read_port(), false);
+    open_and_load(&mut app, dir.path());
+
+    select_branch(&mut app, "feature");
+    app.update(Action::RequestMerge);
+    let commands = app.update(Action::Activate);
+    run_mutation(&mut app, commands);
+
+    app.update(Action::ToggleConflictsPanel);
+    assert!(app.conflicts_open());
+
+    // `a` inside the conflicts overlay asks to abort the pending merge.
+    app.update(Action::RequestAbortOperation);
+    assert!(matches!(
+        app.operation(),
+        OperationState::Confirming(OperationKind::AbortOperation)
+    ));
+    assert_eq!(
+        gitsail_tui::keymap::action_for(
+            KeyEvent {
+                code: KeyCode::Esc,
+                modifiers: KeyModifiers::NONE,
+                kind: KeyEventKind::Press,
+                state: KeyEventState::NONE,
+            },
+            app.input_context()
+        ),
+        Some(Action::Dismiss),
+        "Esc must have a meaning while the confirmation is up"
+    );
+
+    let commands = app.update(Action::Dismiss);
+    assert!(
+        commands.is_empty(),
+        "cancelling must dispatch nothing: {commands:?}"
+    );
+    assert!(
+        app.operation().is_idle(),
+        "Esc must cancel the confirmation itself"
+    );
+    assert!(
+        app.conflicts_open(),
+        "the conflicts overlay underneath must stay open"
+    );
+    assert!(matches!(
+        app.in_progress_operation(),
+        InProgressOperation::Merge(_)
+    ));
 }

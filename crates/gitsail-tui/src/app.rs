@@ -291,6 +291,21 @@ pub struct App {
     /// [`Self::patch_export`]'s "transient banner, cleared by the next
     /// relevant action" convention.
     last_pull_outcome: Option<PullOutcome>,
+    /// The operation that last succeeded, kept only so the status bar can
+    /// report its outcome *after* the overlay closes itself (T-267).
+    ///
+    /// A success needs no acknowledgement — the confirmation already
+    /// happened, before anything mutated — so making the person dismiss a
+    /// "Done" popup was pure friction, and the popup could not even be
+    /// dismissed (GitHub issue #1). Only a failure still holds the screen,
+    /// because US-044 criterion 3 requires the error and its remediation to
+    /// be readable. The per-outcome detail the overlay used to show
+    /// (fast-forward vs. merge commit vs. conflict, US-049/079/083/086/087)
+    /// is rendered from the `last_*_result` fields beside this one, so
+    /// closing the overlay never collapses those distinctions into a bare
+    /// "Done". Cleared by the next dispatched operation, and by `Esc` once
+    /// nothing else is open.
+    last_operation_outcome: Option<OperationKind>,
 
     // -- T-243/US-101: open a forge link in the browser ---------------------
     /// A failure to actually launch the browser (T-243/US-101) — a
@@ -580,6 +595,7 @@ impl App {
             reference_details_open: false,
             sync_error: None,
             last_pull_outcome: None,
+            last_operation_outcome: None,
             forge_link_error: None,
             clipboard,
             patch_export: None,
@@ -945,6 +961,12 @@ impl App {
         self.last_pull_outcome.as_ref()
     }
 
+    /// The operation that last succeeded, for the status bar's own outcome
+    /// report (T-267) — see [`Self::last_operation_outcome`]'s field doc.
+    pub fn last_operation_outcome(&self) -> Option<&OperationKind> {
+        self.last_operation_outcome.as_ref()
+    }
+
     /// A failure to launch the browser for the last
     /// [`Action::RequestOpenForgeLink`] (T-243/US-101), or `None` before
     /// one has ever run or after it was superseded.
@@ -1097,19 +1119,41 @@ impl App {
     }
 
     /// Which keys are currently meaningful (US-042 criterion 3: help/
-    /// search/prompts never let a hidden action through). Priority: the
-    /// help overlay always wins; then the commit-details overlay (US-045
+    /// search/prompts never let a hidden action through). Priority: an
+    /// operation that is confirming/running/terminal always wins, because
+    /// its overlay is modal (T-267 — see below); then the
+    /// help overlay; then the commit-details overlay (US-045
     /// criterion 3); then the reference-details overlay (US-050 criterion
-    /// 2); then the commit composer, but only while no operation
-    /// is confirming/running — the moment `Enter` moves it to `Confirming`,
-    /// this falls through to `Normal` so the *second* `Enter` is handled by
-    /// the confirmation intercept in [`Self::handle_activate`] instead of
-    /// re-editing the message; then the branch-name prompt; then the
+    /// 2); then the commit composer — which, the moment `Enter` moves its
+    /// operation to `Confirming`, is outranked by the modal check above, so
+    /// the *second* `Enter` is handled by the confirmation intercept in
+    /// [`Self::handle_activate`] instead of re-editing the message (the
+    /// conflicts, rebase-plan, reset-mode and amend surfaces all work the
+    /// same way); then the branch-name prompt; then the
     /// commit-search box (US-045 criterion 2); then the branch-filter
     /// search. Every one of these is opened by its own distinct action, so
     /// at most one is ever `Some`/`true` at a time — the order here only
     /// documents which this function would prefer, not a real conflict.
+    ///
+    /// The operation overlay owning the keyboard is what fixes GitHub issue
+    /// #1 (T-267): every context below is reached only while the operation
+    /// is `Idle`, so before this early return the overlay fell through to
+    /// [`InputContext::Normal`] — which binds no `Esc` at all — and no key
+    /// could ever reach [`Self::dismiss`]/[`OperationState::cancel`]. The
+    /// per-overlay `operation.is_idle()` guards the contexts below used to
+    /// carry are therefore gone: this one check replaces all of them, and
+    /// the second `Enter` that confirms a pending operation still reaches
+    /// [`Self::handle_activate`]'s `Confirming` intercept rather than the
+    /// composer/plan/chooser underneath, exactly as before.
     pub fn input_context(&self) -> InputContext {
+        match self.operation {
+            OperationState::Confirming(_) => return InputContext::OperationConfirm,
+            OperationState::InProgress(_) => return InputContext::OperationRunning,
+            OperationState::Succeeded(_) | OperationState::Failed(_, _) => {
+                return InputContext::OperationResult
+            }
+            OperationState::Idle => {}
+        }
         if self.help_visible {
             InputContext::Help
         } else if self.commit_details_open {
@@ -1118,47 +1162,23 @@ impl App {
             InputContext::ReferenceDetails
         } else if self.reflog_details_open {
             InputContext::ReflogDetails
-        } else if self.conflicts_open && self.operation.is_idle() {
-            // Falls through to `Normal` while a merge/continue/abort
-            // confirmation is in flight (`operation` not idle), exactly
-            // like `commit_message` above does for the commit composer —
-            // the second `Enter` that confirms it must reach
-            // `Self::handle_activate`'s intercept, not `InputContext::
-            // Conflicts`'s own (unrelated) `Enter` meaning.
+        } else if self.conflicts_open {
             InputContext::Conflicts
         } else if self.rebase_plan_open && self.rebase_plan_reword_input.is_some() {
-            // Mirrors `commit_message`'s own priority over `Normal`: the
-            // Reword prompt is itself layered over the plan overlay, so it
-            // must win over `InputContext::RebasePlan` below whenever it is
-            // open, regardless of `operation`'s state (editing a message
-            // never starts an operation, so there is no analogous
-            // `operation.is_idle()` race to guard against here).
+            // The Reword prompt is itself layered over the plan overlay, so
+            // it must win over `InputContext::RebasePlan` below whenever it
+            // is open.
             InputContext::RebasePlanReword
-        } else if self.rebase_plan_open && self.operation.is_idle() {
-            // Falls through to `Normal` while an `ExecuteRebasePlan`
-            // confirmation is in flight, exactly like `Conflicts`/
-            // `CommitMessage` above — the second `Enter` that confirms it
-            // must reach `Self::handle_activate`'s intercept, not this
-            // context's own (unrelated) `Enter` meaning.
+        } else if self.rebase_plan_open {
             InputContext::RebasePlan
-        } else if self.reset_mode_open && self.operation.is_idle() {
-            // Falls through to `Normal` while a `Reset` confirmation is in
-            // flight, mirroring `RebasePlan`/`Conflicts`/`CommitMessage`
-            // above: the second `Enter` that confirms it must reach
-            // `Self::handle_activate`'s intercept, not this context's own
-            // (unrelated) `Enter` meaning.
+        } else if self.reset_mode_open {
             InputContext::ResetMode
-        } else if self.commit_message.is_some() && self.operation.is_idle() {
+        } else if self.commit_message.is_some() {
             InputContext::CommitMessage
-        } else if self.amend_open && self.operation.is_idle() {
-            // Falls through to `Normal` while a `Confirming`/`InProgress`/
-            // terminal amend is in flight, exactly like `CommitMessage`
-            // above — the second `Enter` that confirms it must reach
-            // `Self::handle_activate`'s generic `Confirming` intercept, not
-            // this context's own (unrelated) `Enter` meaning. Unlike
-            // `CommitMessage`, `Self::amend_open` (not the message buffer
-            // itself) is what tracks whether the composer is open, since
-            // the message starts `None` while the preview is still loading.
+        } else if self.amend_open {
+            // `Self::amend_open` (not the message buffer itself) is what
+            // tracks whether the composer is open, since the message starts
+            // `None` while the preview is still loading.
             InputContext::Amend
         } else if self.branch_input.is_some() && self.rename_source.is_some() {
             InputContext::RenameBranch
@@ -1886,7 +1906,38 @@ impl App {
         }
     }
 
+    /// `Esc`'s meaning: closes whatever is topmost. A pending/running/
+    /// terminal operation is handled first and on its own (T-267), because
+    /// its overlay is modal and renders over everything below it — before
+    /// this branch existed, an `Esc` meant for a merge confirmation sitting
+    /// over the conflicts overlay closed the *conflicts* overlay instead
+    /// and left the confirmation up (`conflicts_open`, `patch_export`,
+    /// `sync_error` and `forge_link_error` never carried the
+    /// `operation.is_idle()` guard the other branches did).
+    ///
+    /// Cancelling only ever touches [`Self::operation`], never the composer/
+    /// plan/chooser underneath: a cancelled confirmation returns to an
+    /// editable commit message, an intact rebase plan and so on, exactly as
+    /// before. A second `Esc` then closes that surface.
     fn dismiss(&mut self) {
+        if !self.operation.is_idle() {
+            // A terminal operation overlay (`Succeeded`/`Failed`) being
+            // dismissed also clears any lingering pull-outcome banner from
+            // the same operation, so a stale "fast-forwarded to ..." can
+            // never survive into the next one.
+            if matches!(
+                self.operation,
+                OperationState::Succeeded(_) | OperationState::Failed(_, _)
+            ) {
+                self.last_pull_outcome = None;
+            }
+            // A no-op while `InProgress` — work already started cannot be
+            // un-started (`OperationState::cancel`'s own rule), and
+            // `InputContext::OperationRunning` does not even produce a
+            // `Dismiss` for it.
+            self.operation.cancel();
+            return;
+        }
         if self.help_visible {
             self.help_visible = false;
         } else if self.commit_details_open {
@@ -1897,18 +1948,9 @@ impl App {
             self.reflog_details_open = false;
             self.reflog_details_commit = None;
             self.reflog_details_error = None;
-        } else if self.commit_message.is_some() && self.operation.is_idle() {
-            // A confirmation in flight (`Confirming(CreateCommit)`) is left
-            // alone here — cancelling *that* is `operation.cancel()` below,
-            // which never touches `commit_message`, so a cancelled
-            // confirmation returns to an editable composer with the typed
-            // message intact.
+        } else if self.commit_message.is_some() {
             self.commit_message = None;
-        } else if self.amend_open && self.operation.is_idle() {
-            // Same guard/rationale as `commit_message` above: a
-            // confirmation/in-progress/terminal amend already in flight is
-            // left alone here — dismissing *that* is `operation.cancel()`
-            // in the final `else` below, which never touches these fields.
+        } else if self.amend_open {
             self.amend_open = false;
             self.amend_preview = None;
             self.amend_message = None;
@@ -1919,19 +1961,12 @@ impl App {
             // before this plan can be confirmed), matching `branch_input`'s
             // own "discard the unsubmitted edit" rule below.
             self.rebase_plan_reword_input = None;
-        } else if self.rebase_plan_open && self.operation.is_idle() {
-            // A confirmation in flight is left alone here (same guard as
-            // `commit_message` above) — cancelling *that* is
-            // `operation.cancel()` in the final `else` below, which never
-            // touches `rebase_plan`, so a cancelled confirmation returns to
-            // an editable plan with every entry intact.
+        } else if self.rebase_plan_open {
             self.rebase_plan_open = false;
             self.rebase_plan = None;
             self.rebase_plan_cursor = 0;
             self.rebase_plan_error = None;
-        } else if self.reset_mode_open && self.operation.is_idle() {
-            // Same guard/rationale as `rebase_plan_open` above: a
-            // confirmation already in flight is left alone here.
+        } else if self.reset_mode_open {
             self.reset_mode_open = false;
             self.reset_mode_cursor = 0;
             self.reset_target = None;
@@ -1958,17 +1993,10 @@ impl App {
         } else if self.sync_error.is_some() {
             self.sync_error = None;
         } else {
-            // A terminal operation overlay (`Succeeded`/`Failed`) being
-            // dismissed also clears any lingering pull-outcome banner from
-            // the same operation, so a stale "fast-forwarded to ..." can
-            // never survive into the next one.
-            if matches!(
-                self.operation,
-                OperationState::Succeeded(_) | OperationState::Failed(_, _)
-            ) {
-                self.last_pull_outcome = None;
-            }
-            self.operation.cancel();
+            // Nothing is open: clear the last operation's outcome line from
+            // the status bar, so `Esc` also dismisses that report once the
+            // person has read it.
+            self.last_operation_outcome = None;
         }
     }
 
@@ -2686,6 +2714,9 @@ impl App {
         // this field's own doc). The `RenameBranch` arm below re-sets it
         // immediately after, once both names are known to be valid.
         self.pending_branch_rename = None;
+        // The previous operation's status-bar report belongs to the
+        // operation that produced it, never to this one (T-267).
+        self.last_operation_outcome = None;
         let Some(session) = self.session.as_ref() else {
             self.operation.cancel();
             return Vec::new();
@@ -3217,7 +3248,7 @@ impl App {
     pub fn on_amend_finished(&mut self, result: Result<CommitHash, GitSailError>) -> Vec<Command> {
         match result {
             Ok(_hash) => {
-                self.operation.succeed();
+                self.succeed_operation();
                 self.amend_open = false;
                 self.amend_preview = None;
                 self.amend_message = None;
@@ -3288,7 +3319,7 @@ impl App {
     pub fn on_merge_finished(&mut self, result: Result<MergeResult, GitSailError>) -> Vec<Command> {
         match result {
             Ok(outcome) => {
-                self.operation.succeed();
+                self.succeed_operation();
                 self.last_merge_result = Some(outcome);
                 self.refresh_commands_for(RefreshReason::AfterMutation)
             }
@@ -3314,7 +3345,7 @@ impl App {
     ) -> Vec<Command> {
         match result {
             Ok(outcome) => {
-                self.operation.succeed();
+                self.succeed_operation();
                 self.last_rebase_result = Some(outcome);
                 self.refresh_commands_for(RefreshReason::AfterMutation)
             }
@@ -3339,7 +3370,7 @@ impl App {
     ) -> Vec<Command> {
         match result {
             Ok(outcome) => {
-                self.operation.succeed();
+                self.succeed_operation();
                 self.last_cherry_pick_result = Some(outcome);
                 self.refresh_commands_for(RefreshReason::AfterMutation)
             }
@@ -3358,7 +3389,7 @@ impl App {
     ) -> Vec<Command> {
         match result {
             Ok(outcome) => {
-                self.operation.succeed();
+                self.succeed_operation();
                 self.last_revert_result = Some(outcome);
                 self.refresh_commands_for(RefreshReason::AfterMutation)
             }
@@ -3469,7 +3500,7 @@ impl App {
     ) -> Vec<Command> {
         match result {
             Ok(()) => {
-                self.operation.succeed();
+                self.succeed_operation();
                 self.refresh_commands_for(RefreshReason::AfterMutation)
             }
             Err(error) => {
@@ -3521,20 +3552,35 @@ impl App {
     /// changes nothing else — no refresh, no state discarded (US-048
     /// criterion 3: "mudanças incompatíveis mostram erro sem descarte").
     ///
-    /// A `Safe`-risk success (stage/unstage) never showed a confirmation in
-    /// the first place ([`Self::request_toggle_stage`]), so it returns
-    /// straight to `Idle` instead of lingering as a `Succeeded` state that
-    /// would need dismissing — otherwise it would still be sitting there,
-    /// blocking [`Self::input_context`] from recognizing the commit
-    /// composer, the next time the person opens one.
+    /// Records a successful completion and closes the overlay with it
+    /// (T-267): the operation moves to `Succeeded` — so a late or duplicate
+    /// completion message still cannot overwrite a state the caller has
+    /// moved past ([`OperationState::succeed`]'s own in-progress guard) —
+    /// its kind is handed to the status bar through
+    /// [`Self::last_operation_outcome`], and the state returns to `Idle`.
+    ///
+    /// Every completion handler in this file funnels through here, so
+    /// "success closes itself, failure stays until dismissed" is one rule in
+    /// one place rather than a convention each handler could drift from.
+    /// This generalizes what used to be a `Safe`-risk-only special case
+    /// (stage/unstage returned straight to `Idle`, everything else left a
+    /// `Succeeded` popup on screen — which, before this same task, no key
+    /// could dismiss).
+    fn succeed_operation(&mut self) {
+        self.operation.succeed();
+        if let OperationState::Succeeded(kind) = &self.operation {
+            self.last_operation_outcome = Some(kind.clone());
+        }
+        self.operation.cancel();
+    }
+
+    /// Like every other completion handler here, success goes through
+    /// [`Self::succeed_operation`], which closes the overlay and leaves the
+    /// report to the status bar (T-267).
     pub fn on_operation_finished(&mut self, result: Result<(), GitSailError>) -> Vec<Command> {
         match result {
             Ok(()) => {
-                self.operation.succeed();
-                if matches!(&self.operation, OperationState::Succeeded(kind) if kind.risk() == crate::operation::OperationRisk::Safe)
-                {
-                    self.operation.cancel();
-                }
+                self.succeed_operation();
                 self.refresh_commands_for(RefreshReason::AfterMutation)
             }
             Err(error) => {
@@ -3550,7 +3596,7 @@ impl App {
     pub fn on_commit_created(&mut self, result: Result<CommitHash, GitSailError>) -> Vec<Command> {
         match result {
             Ok(_hash) => {
-                self.operation.succeed();
+                self.succeed_operation();
                 self.commit_message = None;
                 self.refresh_commands_for(RefreshReason::AfterMutation)
             }
@@ -3572,7 +3618,7 @@ impl App {
     pub fn on_pull_finished(&mut self, result: Result<PullOutcome, GitSailError>) -> Vec<Command> {
         match result {
             Ok(outcome) => {
-                self.operation.succeed();
+                self.succeed_operation();
                 self.last_pull_outcome = Some(outcome);
                 self.refresh_commands_for(RefreshReason::AfterMutation)
             }
@@ -3629,7 +3675,7 @@ impl App {
     ) -> Vec<Command> {
         match result {
             Ok(applied) => {
-                self.operation.succeed();
+                self.succeed_operation();
                 self.patch_apply_outcome = Some(PatchApplyOutcome::Applied {
                     affected_files: applied.applied_files,
                 });
@@ -4465,9 +4511,12 @@ mod tests {
         app.update(Action::Activate); // -> InProgress, dispatches RenameBranch
 
         app.on_operation_finished(Ok(()));
+        // A success closes its own overlay and reports itself through the
+        // status bar instead (T-267).
+        assert!(app.operation().is_idle());
         assert!(matches!(
-            app.operation(),
-            OperationState::Succeeded(OperationKind::RenameBranch { .. })
+            app.last_operation_outcome(),
+            Some(OperationKind::RenameBranch { .. })
         ));
 
         // The refresh this success triggered reports the renamed branch
@@ -4618,7 +4667,10 @@ mod tests {
             "success must refresh branches"
         );
         assert!(app.commit_message().is_none());
-        assert!(matches!(app.operation(), OperationState::Succeeded(_)));
+        // A success closes its own overlay (T-267): the operation returns
+        // to `Idle` and the completed kind is what the status bar reports.
+        assert!(app.operation().is_idle());
+        assert!(app.last_operation_outcome().is_some());
     }
 
     // -- US-029: copy or export a patch -----------------------------------
@@ -4958,7 +5010,10 @@ mod tests {
             }
             other => panic!("expected Applied, got {other:?}"),
         }
-        assert!(matches!(app.operation(), OperationState::Succeeded(_)));
+        // A success closes its own overlay (T-267): the operation returns
+        // to `Idle` and the completed kind is what the status bar reports.
+        assert!(app.operation().is_idle());
+        assert!(app.last_operation_outcome().is_some());
     }
 
     #[test]
@@ -5147,7 +5202,10 @@ mod tests {
             "a successful pull must refresh"
         );
         assert_eq!(app.last_pull_outcome(), Some(&PullOutcome::AlreadyUpToDate));
-        assert!(matches!(app.operation(), OperationState::Succeeded(_)));
+        // A success closes its own overlay (T-267): the operation returns
+        // to `Idle` and the completed kind is what the status bar reports.
+        assert!(app.operation().is_idle());
+        assert!(app.last_operation_outcome().is_some());
     }
 
     #[test]
@@ -5443,7 +5501,10 @@ mod tests {
             app.last_merge_result(),
             Some(&MergeResult::FastForwarded { new_head })
         );
-        assert!(matches!(app.operation(), OperationState::Succeeded(_)));
+        // A success closes its own overlay (T-267): the operation returns
+        // to `Idle` and the completed kind is what the status bar reports.
+        assert!(app.operation().is_idle());
+        assert!(app.last_operation_outcome().is_some());
     }
 
     /// A conflict is a legitimate `Ok` outcome (US-079 criterion 2/3), never
@@ -6282,7 +6343,10 @@ mod tests {
         assert!(!app.amend_open());
         assert!(app.amend_message().is_none());
         assert!(app.amend_preview().is_none());
-        assert!(matches!(app.operation(), OperationState::Succeeded(_)));
+        // A success closes its own overlay (T-267): the operation returns
+        // to `Idle` and the completed kind is what the status bar reports.
+        assert!(app.operation().is_idle());
+        assert!(app.last_operation_outcome().is_some());
         assert!(
             commands
                 .iter()
