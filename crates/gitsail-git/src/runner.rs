@@ -70,17 +70,16 @@ impl GitExecutable {
             .map(Path::to_path_buf)
             .unwrap_or_else(|| PathBuf::from("git"));
 
-        let output = Command::new(&path)
-            .arg("--version")
-            .stdin(Stdio::null())
-            .output()
-            .map_err(|err| {
-                GitSailError::new(ErrorCode::GitNotInstalled, "git executable was not found")
-                    .with_remediation(
-                        "install Git and ensure it is on PATH, or configure an explicit path",
-                    )
-                    .with_source(err)
-            })?;
+        let mut probe = Command::new(&path);
+        probe.arg("--version").stdin(Stdio::null());
+        suppress_console_window(&mut probe);
+        let output = probe.output().map_err(|err| {
+            GitSailError::new(ErrorCode::GitNotInstalled, "git executable was not found")
+                .with_remediation(
+                    "install Git and ensure it is on PATH, or configure an explicit path",
+                )
+                .with_source(err)
+        })?;
 
         if !output.status.success() {
             return Err(GitSailError::new(
@@ -261,6 +260,7 @@ pub fn run_process(
     for (key, value) in &request.env {
         command.env(key, value);
     }
+    suppress_console_window(&mut command);
     let start = Instant::now();
     let mut child = command.spawn().map_err(|err| {
         GitSailError::new(ErrorCode::ProcessFailure, "failed to spawn git process")
@@ -519,6 +519,27 @@ impl fmt::Display for ProcessDiagnostic {
 }
 
 impl std::error::Error for ProcessDiagnostic {}
+
+/// Keeps Windows from flashing a console window for every Git call.
+///
+/// The Desktop app is built as a GUI binary (`windows_subsystem =
+/// "windows"`), so it owns no console. Windows therefore hands each
+/// console child it spawns a brand-new console window — and `git` is a
+/// console program, so the user saw a CMD window blink on screen for every
+/// single invocation. `CREATE_NO_WINDOW` suppresses that window.
+///
+/// Applied to every spawn rather than only the Desktop's, because this
+/// adapter always captures stdout/stderr through pipes and never writes to
+/// a console itself: the CLI and TUI lose nothing by it.
+#[cfg(windows)]
+fn suppress_console_window(command: &mut Command) {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    command.creation_flags(CREATE_NO_WINDOW);
+}
+
+#[cfg(not(windows))]
+fn suppress_console_window(_command: &mut Command) {}
 
 fn process_failure_error(
     safe_args: &[String],

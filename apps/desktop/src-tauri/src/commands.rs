@@ -10,10 +10,18 @@
 //! business rule beyond that lives here (US-051 criterion 3) — this file is
 //! what a "bridge review" against SAD §17 inspects.
 //!
-//! Tauri v2 dispatches commands off the webview/UI thread by default, so
-//! the synchronous `RepositoryReadPort` calls below never block rendering
-//! (SAD §26's "UI thread/render loop never waits on Git process
-//! execution").
+//! Every command is declared `#[tauri::command(async)]`, and that is load
+//! bearing rather than decorative: Tauri's default execution context is
+//! `Blocking`, which runs the command **on the main thread**. The
+//! `RepositoryReadPort` calls below are synchronous and spawn a real `git`
+//! process, so under the default the whole window froze for the duration
+//! of every Git invocation — which is exactly what users reported. The
+//! `async` argument moves the call off that thread and restores SAD §26's
+//! "UI thread/render loop never waits on Git process execution".
+//!
+//! `AppState` is shared across those threads safely by construction
+//! (`Arc` ports plus `Mutex` state), and each command returns a `Result`,
+//! which Tauri requires of an async command taking a `State` reference.
 
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -106,7 +114,7 @@ fn parse_refresh_reason(reason: &str) -> RefreshReason {
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn open_repository(
     path: String,
     state: tauri::State<AppState>,
@@ -114,7 +122,7 @@ pub fn open_repository(
     open_repository_impl(&state, &path).map_err(|err| ErrorPayload::from(&err))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_repository_status(
     reason: String,
     state: tauri::State<AppState>,
@@ -124,7 +132,7 @@ pub fn get_repository_status(
 
 /// Lists the recently opened repositories, most-recently-opened first
 /// (US-052 criterion 1).
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_recent_repositories(
     state: tauri::State<AppState>,
 ) -> Result<Vec<RecentRepositoryDto>, ErrorPayload> {
@@ -134,7 +142,7 @@ pub fn list_recent_repositories(
 /// Removes one entry from the recent-repositories list — the explicit
 /// confirmation US-052 criterion 2 requires before a moved/inaccessible
 /// entry disappears; nothing removes an entry automatically.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn forget_recent_repository(
     path: String,
     state: tauri::State<AppState>,
@@ -162,7 +170,7 @@ pub fn forget_recent_repository(
 /// (criterion 3) both happen in the frontend, which already has native
 /// access to the browser clipboard API and the Tauri dialog plugin — this
 /// command's only job is producing the patch text, never touching either.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn export_patch(
     staged: bool,
     path: Option<String>,
@@ -183,7 +191,7 @@ pub fn export_patch(
 /// Deliberately generic (not "save a patch"): the same primitive would
 /// serve any future "save this text to a file" need without a second,
 /// near-identical command.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn save_text_file(path: String, contents: String) -> Result<(), ErrorPayload> {
     save_text_file_impl(&path, &contents).map_err(|err| ErrorPayload::from(&err))
 }
@@ -201,7 +209,7 @@ fn save_text_file_impl(path: &str, contents: &str) -> Result<(), GitSailError> {
 /// dependency), this command's only job is the read itself. Deliberately
 /// generic (not "read a patch file"), mirroring [`save_text_file`]'s own
 /// "the same primitive would serve any future need" reasoning.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn read_text_file(path: String) -> Result<String, ErrorPayload> {
     read_text_file_impl(&path).map_err(|err| ErrorPayload::from(&err))
 }
@@ -218,7 +226,7 @@ fn read_text_file_impl(path: &str) -> Result<String, GitSailError> {
 /// preview the frontend shows *before* asking for confirmation. Never
 /// mutates anything; the actual apply is [`apply_patch`], a separate
 /// command the frontend calls only once the person confirms.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn preview_patch_application(
     patch_text: String,
     state: tauri::State<AppState>,
@@ -243,7 +251,7 @@ fn preview_patch_application_impl(
 /// same `--check` immediately before writing anything, so a stale
 /// confirmation (the file changed again after the preview the frontend
 /// showed) is refused rather than silently applied.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn apply_patch(
     patch_text: String,
     state: tauri::State<AppState>,
@@ -261,7 +269,7 @@ fn apply_patch_impl(
     Ok(ApplyPatchResultDto::from(&result))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_commit_graph_page(
     branch: Option<String>,
     cursor: Option<String>,
@@ -398,14 +406,14 @@ fn get_commit_graph_page_impl(
 /// a second time (`AppState::take_startup_intent`'s own contract).
 /// Infallible: a plain launch with no such arguments is not an error, it
 /// is simply an empty intent.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn take_startup_intent(state: tauri::State<AppState>) -> StartupIntent {
     state.take_startup_intent()
 }
 
 // -- US-056: branches, single-commit lookup, and history search --------
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_branches(state: tauri::State<AppState>) -> Result<Vec<BranchDto>, ErrorPayload> {
     list_branches_impl(&state).map_err(|err| ErrorPayload::from(&err))
 }
@@ -419,7 +427,7 @@ fn list_branches_impl(state: &AppState) -> Result<Vec<BranchDto>, GitSailError> 
 /// Fetches one commit by its full hash (US-056 criterion 2: selecting a
 /// search result, or a `--commit` startup handoff target, resolves to the
 /// same commit identity the graph/list/details panels already share).
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_commit(hash: String, state: tauri::State<AppState>) -> Result<CommitDto, ErrorPayload> {
     get_commit_impl(&state, &hash).map_err(|err| ErrorPayload::from(&err))
 }
@@ -439,7 +447,7 @@ fn get_commit_impl(state: &AppState, hash: &str) -> Result<CommitDto, GitSailErr
 /// blocked/out of scope here); a tag *decoration* on an already-loaded
 /// commit is still visible (`CommitDto::decorations`), just not
 /// searchable as its own filter.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn search_commits(
     text_query: Option<String>,
     author: Option<String>,
@@ -480,7 +488,7 @@ fn search_commits_impl(
 /// to one file (US-057 criterion 1) — the frontend derives both the
 /// unified and side-by-side presentations from this single [`DiffDto`],
 /// never issuing a second read per view mode.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_diff(
     staged: bool,
     path: Option<String>,
@@ -507,7 +515,7 @@ fn get_diff_impl(
 
 // -- US-058: stage/unstage and compose a commit -------------------------
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn stage_paths(paths: Vec<String>, state: tauri::State<AppState>) -> Result<(), ErrorPayload> {
     stage_paths_impl(&state, paths).map_err(|err| ErrorPayload::from(&err))
 }
@@ -519,7 +527,7 @@ fn stage_paths_impl(state: &AppState, paths: Vec<String>) -> Result<(), GitSailE
     })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn unstage_paths(
     paths: Vec<String>,
     state: tauri::State<AppState>,
@@ -540,7 +548,7 @@ fn unstage_paths_impl(state: &AppState, paths: Vec<String>) -> Result<(), GitSai
 /// returned for the unstaged side. The DTO -> domain conversion
 /// (`gitsail_protocol::dto`'s reverse `From` impls) is the only "logic"
 /// here; the actual hunk application is `gitsail-git`'s, unchanged.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn stage_hunks(
     selection: Vec<FileDiffDto>,
     state: tauri::State<AppState>,
@@ -555,7 +563,7 @@ fn stage_hunks_impl(state: &AppState, selection: &[FileDiffDto]) -> Result<(), G
     })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn unstage_hunks(
     selection: Vec<FileDiffDto>,
     state: tauri::State<AppState>,
@@ -575,7 +583,7 @@ fn unstage_hunks_impl(state: &AppState, selection: &[FileDiffDto]) -> Result<(),
 /// through the T-194 confirmation dialog — this command itself has no
 /// notion of confirmation, matching every other command in this file
 /// (US-051 criterion 3: no business/UX rule lives in a Tauri command).
-#[tauri::command]
+#[tauri::command(async)]
 pub fn create_commit(
     message: String,
     state: tauri::State<AppState>,
@@ -594,7 +602,7 @@ fn create_commit_impl(state: &AppState, message: &str) -> Result<CommitResultDto
 
 /// Builds the read-only preview US-059 criterion 1 requires: `HEAD`'s
 /// exact commit and the staged diff that would be folded into it.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn preview_amend(state: tauri::State<AppState>) -> Result<AmendPreviewDto, ErrorPayload> {
     preview_amend_impl(&state).map_err(|err| ErrorPayload::from(&err))
 }
@@ -614,7 +622,7 @@ fn preview_amend_impl(state: &AppState) -> Result<AmendPreviewDto, GitSailError>
 /// preview (HEAD moved since it was shown) can never rewrite the wrong
 /// commit. The frontend is expected to have already shown the T-194
 /// confirmation, including the "this rewrites history" warning text.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn amend_commit(
     message: String,
     expected_head: String,
@@ -637,7 +645,7 @@ fn amend_commit_impl(
 
 // -- US-060: local branches, plus remote sync (fetch/pull/push) --------
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn create_branch(
     name: String,
     start_point: Option<String>,
@@ -665,7 +673,7 @@ fn create_branch_impl(
     })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn switch_branch(target: String, state: tauri::State<AppState>) -> Result<(), ErrorPayload> {
     switch_branch_impl(&state, &target).map_err(|err| ErrorPayload::from(&err))
 }
@@ -677,7 +685,7 @@ fn switch_branch_impl(state: &AppState, target: &str) -> Result<(), GitSailError
     })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn delete_branch(
     name: String,
     force: bool,
@@ -698,7 +706,7 @@ fn delete_branch_impl(state: &AppState, name: &str, force: bool) -> Result<(), G
 /// collision/upstream contract this delegates to unchanged; the frontend is
 /// expected to have already shown both names and their risk (US-024
 /// criterion 1) before this runs.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn rename_branch(
     old_name: String,
     new_name: String,
@@ -791,7 +799,7 @@ fn resolve_sync_target_for(
 /// Lists the repository's configured remotes (EPIC-18/US-091), used by the
 /// Desktop sync panel to show what is configured alongside the resolved
 /// target. Read-only.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_remotes(state: tauri::State<AppState>) -> Result<Vec<RemoteDto>, ErrorPayload> {
     list_remotes_impl(&state).map_err(|err| ErrorPayload::from(&err))
 }
@@ -818,7 +826,7 @@ fn list_remotes_impl(state: &AppState) -> Result<Vec<RemoteDto>, GitSailError> {
 /// T-195 criterion 2). An empty repository legitimately reports an empty
 /// list — never an error — matching [`RepositoryReadPort::list_tags`]'s own
 /// "empty is a valid state" contract.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_tags(state: tauri::State<AppState>) -> Result<Vec<TagDto>, ErrorPayload> {
     list_tags_impl(&state).map_err(|err| ErrorPayload::from(&err))
 }
@@ -833,7 +841,7 @@ fn list_tags_impl(state: &AppState) -> Result<Vec<TagDto>, GitSailError> {
 /// T-195 criterion 2). An empty stash legitimately reports an empty list —
 /// never an error — matching [`RepositoryReadPort::list_stash_entries`]'s
 /// own "empty is a valid state" contract.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_stash_entries(state: tauri::State<AppState>) -> Result<Vec<StashDto>, ErrorPayload> {
     list_stash_entries_impl(&state).map_err(|err| ErrorPayload::from(&err))
 }
@@ -861,7 +869,7 @@ fn list_stash_entries_impl(state: &AppState) -> Result<Vec<StashDto>, GitSailErr
 /// argument below, always `0`: nothing in `AppState` yet tracks a content
 /// version to key a shared cache on). A future story can add that caching
 /// without changing this command's contract.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_blame(
     path: String,
     revision: Option<String>,
@@ -903,7 +911,7 @@ fn get_blame_impl(
 /// criterion 3 — never an error). Used by the frontend to decide whether
 /// to show the "open in browser" action at all, and as the read half of
 /// [`open_forge_link`].
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_forge_link(
     target: ForgeLinkTargetDto,
     state: tauri::State<AppState>,
@@ -927,7 +935,7 @@ fn get_forge_link_impl(
 /// command never accepts a raw URL from the frontend, precisely so a
 /// caller can never smuggle a non-forge/non-https destination past
 /// [`gitsail_domain::forge::build_web_url`]'s own guarantees.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn open_forge_link(
     target: ForgeLinkTargetDto,
     state: tauri::State<AppState>,
@@ -957,7 +965,7 @@ fn open_forge_link_impl(
 /// Whether `account` currently has a token connected (US-102 criterion 1).
 /// Never a hard error: a credential-store failure is folded into
 /// `NotConnected` by [`GetForgeConnectionStatus`] itself.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn forge_connection_status(
     account: ForgeAccountDto,
     state: tauri::State<AppState>,
@@ -976,7 +984,7 @@ fn forge_connection_status_impl(
 /// Connects `account`, storing `token` in OS-secure storage (US-102
 /// criterion 2) — an explicit, user-initiated action; this never validates
 /// `token` against the forge's live API (T-245, out of scope here).
-#[tauri::command]
+#[tauri::command(async)]
 pub fn connect_forge_account(
     account: ForgeAccountDto,
     token: String,
@@ -998,7 +1006,7 @@ fn connect_forge_account_impl(
 /// (US-102 criterion 2: this is a real deletion, not just clearing a
 /// cache). Idempotent: disconnecting an account with no stored token is
 /// not an error.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn disconnect_forge_account(
     account: ForgeAccountDto,
     state: tauri::State<AppState>,
@@ -1031,7 +1039,7 @@ fn disconnect_forge_account_impl(
 /// reported; offline/network failure; a truly empty page) is its own
 /// [`ListPullRequestsOutcomeDto`] variant instead, so a caller can never
 /// mistake one for "this repository simply has no PRs/MRs".
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_pull_requests(
     page: u32,
     state: tauri::State<AppState>,
@@ -1068,7 +1076,7 @@ fn list_pull_requests_impl(
 /// like an unrecognized remote, resolves to `Ok(false)` rather than an
 /// error — this is a "was it opened" signal, not a repository read that
 /// can meaningfully fail.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn open_pull_request_link(
     url: String,
     state: tauri::State<AppState>,
@@ -1128,7 +1136,7 @@ fn resolve_pull_request_link_impl(
 /// a standing "this is what Fetch/Pull/Push will do" display; `fetch`/
 /// `pull`/`push` below each re-resolve the same way immediately before
 /// acting, so what actually runs is never a stale snapshot of this call.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn resolve_sync_target(state: tauri::State<AppState>) -> Result<SyncTargetDto, ErrorPayload> {
     resolve_sync_target_impl(&state).map_err(|err| ErrorPayload::from(&err))
 }
@@ -1147,7 +1155,7 @@ fn resolve_sync_target_impl(state: &AppState) -> Result<SyncTargetDto, GitSailEr
 /// — no confirmation gate here, matching every other Tauri command in this
 /// file). Never touches the working tree/HEAD (`RepositoryWritePort::
 /// fetch`'s own contract, unchanged).
-#[tauri::command]
+#[tauri::command(async)]
 pub fn fetch(state: tauri::State<AppState>) -> Result<SyncTargetDto, ErrorPayload> {
     fetch_impl(&state).map_err(|err| ErrorPayload::from(&err))
 }
@@ -1170,7 +1178,7 @@ fn fetch_impl(state: &AppState) -> Result<SyncTargetDto, GitSailError> {
 /// ordinary [`GitSailError`] (`ErrorCode::OperationConflict`), exactly
 /// `RepositoryWritePort::pull`'s fixed policy, matching `gitsail-tui`'s own
 /// T-182 behavior (this story's criterion 3).
-#[tauri::command]
+#[tauri::command(async)]
 pub fn pull(state: tauri::State<AppState>) -> Result<PullResultDto, ErrorPayload> {
     pull_impl(&state).map_err(|err| ErrorPayload::from(&err))
 }
@@ -1199,7 +1207,7 @@ fn pull_impl(state: &AppState) -> Result<PullResultDto, GitSailError> {
 /// force_push_with_lease`'s own, separate, out-of-scope operation (matching
 /// `gitsail-tui`'s T-182 `OperationKind::Push`, which deliberately excludes
 /// it for the same reason).
-#[tauri::command]
+#[tauri::command(async)]
 pub fn push(state: tauri::State<AppState>) -> Result<SyncTargetDto, ErrorPayload> {
     push_impl(&state).map_err(|err| ErrorPayload::from(&err))
 }
@@ -1235,7 +1243,7 @@ fn push_impl(state: &AppState) -> Result<SyncTargetDto, GitSailError> {
 
 /// Detects a merge/rebase/cherry-pick/revert/bisect currently in progress
 /// (T-230/US-078), read-only.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn detect_in_progress_operation(
     state: tauri::State<AppState>,
 ) -> Result<InProgressOperationDto, ErrorPayload> {
@@ -1255,7 +1263,7 @@ fn detect_in_progress_operation_impl(
 /// selection UI resolved (a branch, tag, or other revision expression),
 /// mirroring `RepositoryReadPort::resolve_revision`'s own free-text
 /// contract.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn merge(
     target_revision: String,
     state: tauri::State<AppState>,
@@ -1272,7 +1280,7 @@ fn merge_impl(state: &AppState, target_revision: &str) -> Result<MergeResultDto,
 
 /// Reads one conflicted file's base/ours/theirs sides (T-232/US-080
 /// criterion 2), read-only.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_conflict_sides(
     path: String,
     state: tauri::State<AppState>,
@@ -1289,7 +1297,7 @@ fn get_conflict_sides_impl(state: &AppState, path: &str) -> Result<ConflictSides
 /// Marks a conflicted file resolved by staging its current working-tree
 /// content (T-232/US-080 criterion 3) — only ever this explicit call, never
 /// inferred by the frontend from the file merely "looking" resolved.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn mark_conflict_resolved(
     path: String,
     state: tauri::State<AppState>,
@@ -1306,7 +1314,7 @@ fn mark_conflict_resolved_impl(state: &AppState, path: &str) -> Result<(), GitSa
 /// Resolves a conflicted file by taking `side` ("ours" or "theirs")
 /// wholesale (T-232/US-080 criterion 3's documented binary-conflict flow —
 /// equally usable for a text file).
-#[tauri::command]
+#[tauri::command(async)]
 pub fn take_conflict_side(
     path: String,
     side: String,
@@ -1337,7 +1345,7 @@ fn take_conflict_side_impl(state: &AppState, path: &str, side: &str) -> Result<(
 /// `detect_in_progress_operation` afterward to see it (criterion 3), and
 /// this command's own `Ok(())` only means the underlying `git` command
 /// itself exited successfully.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn continue_operation(state: tauri::State<AppState>) -> Result<(), ErrorPayload> {
     continue_operation_impl(&state).map_err(|err| ErrorPayload::from(&err))
 }
@@ -1352,7 +1360,7 @@ fn continue_operation_impl(state: &AppState) -> Result<(), GitSailError> {
 /// restoring the pre-operation state as far as Git itself guarantees.
 /// Matches [`continue_operation`]'s own "never presumed, always
 /// reinspected" contract.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn abort_operation(state: tauri::State<AppState>) -> Result<(), ErrorPayload> {
     abort_operation_impl(&state).map_err(|err| ErrorPayload::from(&err))
 }
@@ -1375,7 +1383,7 @@ fn abort_operation_impl(state: &AppState) -> Result<(), GitSailError> {
 /// Rebases the current branch onto `onto_revision` (T-235/US-083).
 /// `onto_revision` is whatever reference the frontend's own search/
 /// selection UI resolved, mirroring [`merge`]'s own free-text contract.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn rebase(
     onto_revision: String,
     state: tauri::State<AppState>,
@@ -1396,7 +1404,7 @@ fn rebase_impl(state: &AppState, onto_revision: &str) -> Result<RebaseResultDto,
 /// mirrors [`continue_operation`]/[`abort_operation`]'s own "never presumed,
 /// always reinspected" contract: the frontend re-calls
 /// `detect_in_progress_operation` afterward to see the real result.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn skip_operation(state: tauri::State<AppState>) -> Result<(), ErrorPayload> {
     skip_operation_impl(&state).map_err(|err| ErrorPayload::from(&err))
 }
@@ -1441,7 +1449,7 @@ fn parse_merge_parent_policy(
 /// `merge_parent` must be `"firstParent"` when `commit` is a merge commit
 /// (US-086 criterion 2) — omitted/`null` against a merge commit is refused
 /// by `RepositoryWritePort::cherry_pick` itself, never guessed here.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn cherry_pick(
     commit: String,
     merge_parent: Option<String>,
@@ -1467,7 +1475,7 @@ fn cherry_pick_impl(
 /// Creates a new commit undoing `commit`'s change (T-239/US-087) — never
 /// rewrites or moves any existing reference (History Editing Rules #8).
 /// `merge_parent` mirrors [`cherry_pick`]'s own contract for a merge commit.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn revert(
     commit: String,
     merge_parent: Option<String>,
@@ -1513,7 +1521,7 @@ fn parse_reset_mode(mode: &str) -> Result<ResetMode, GitSailError> {
 /// [`amend_commit`]'s own `expected_head` contract exactly. A concurrent
 /// repository switch is additionally caught by [`run_mutation`]'s own
 /// epoch guard.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn reset(
     target_revision: String,
     mode: String,
@@ -1552,7 +1560,7 @@ fn reset_impl(
 /// Reads a non-mutating interactive rebase plan for the candidate range the
 /// current branch would reapply onto `onto_revision` (T-236/US-084
 /// criterion 1).
-#[tauri::command]
+#[tauri::command(async)]
 pub fn plan_rebase(
     onto_revision: String,
     state: tauri::State<AppState>,
@@ -1573,7 +1581,7 @@ fn plan_rebase_impl(state: &AppState, onto_revision: &str) -> Result<RebasePlanD
 /// `onto`/`HEAD` immediately before applying anything (criterion 2),
 /// refusing a stale plan with a clear error rather than silently rebuilding
 /// it, exactly as it does for the TUI.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn execute_rebase_plan(
     plan: RebasePlanDto,
     state: tauri::State<AppState>,
@@ -1607,7 +1615,7 @@ fn execute_rebase_plan_impl(
 /// [`gitsail_application::PreferencesLoadOutcome`]'s own contract — the
 /// resulting [`PreferencesDto::diagnostic`] carries that instead, so the
 /// frontend can still start with a safe default and inform the person once.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_preferences(state: tauri::State<AppState>) -> Result<PreferencesDto, ErrorPayload> {
     get_preferences_impl(&state).map_err(|err| ErrorPayload::from(&err))
 }
@@ -1644,7 +1652,7 @@ fn parse_theme_preference(theme: &str) -> Result<ThemePreference, GitSailError> 
 /// fresh install never needs this command called at all to already look
 /// dark). Calling this with `"dark"` or `"light"` is what actually switches
 /// and persists a person's explicit choice.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn set_theme(
     theme: String,
     state: tauri::State<AppState>,
@@ -1674,7 +1682,7 @@ fn set_theme_impl(state: &AppState, theme: &str) -> Result<PreferencesDto, GitSa
 /// Reads every currently-overridden action id -> binding pair (US-107
 /// criterion 1). An action with no entry here is using its frontend-defined
 /// default.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_keybinding_overrides(
     state: tauri::State<AppState>,
 ) -> Result<HashMap<String, String>, ErrorPayload> {
@@ -1685,7 +1693,7 @@ pub fn get_keybinding_overrides(
 }
 
 /// Remaps `action_id` to `binding`, persisting it immediately.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn set_keybinding_override(
     action_id: String,
     binding: String,
@@ -1699,7 +1707,7 @@ pub fn set_keybinding_override(
 
 /// Clears `action_id`'s override, reverting it to its frontend-defined
 /// default (US-107 criterion 1's "restaurar padrão", scoped to one action).
-#[tauri::command]
+#[tauri::command(async)]
 pub fn reset_keybinding_override(
     action_id: String,
     state: tauri::State<AppState>,
@@ -1712,7 +1720,7 @@ pub fn reset_keybinding_override(
 
 /// Clears every override at once (US-107 criterion 1's "restaurar padrão",
 /// applied to the whole list).
-#[tauri::command]
+#[tauri::command(async)]
 pub fn reset_all_keybinding_overrides(state: tauri::State<AppState>) -> Result<(), ErrorPayload> {
     state
         .keybindings()
@@ -1758,7 +1766,7 @@ fn parse_update_check_trigger(trigger: &str) -> UpdateCheckTrigger {
 /// malformed-response failure is one more `UpdateCheckOutcomeDto` variant
 /// (`checkFailed`), not a command failure (US-127 criterion 2: never
 /// crashes, never blocks the app).
-#[tauri::command]
+#[tauri::command(async)]
 pub fn check_for_update(trigger: String, state: tauri::State<AppState>) -> UpdateCheckOutcomeDto {
     check_for_update_impl(&state, &trigger)
 }
@@ -1776,7 +1784,7 @@ fn check_for_update_impl(state: &AppState, trigger: &str) -> UpdateCheckOutcomeD
 /// "always possible to disable via a preference" control) — mirrors
 /// [`set_theme`]'s own shape exactly, and never gates a manual check (see
 /// [`parse_update_check_trigger`]).
-#[tauri::command]
+#[tauri::command(async)]
 pub fn set_check_for_updates(
     enabled: bool,
     state: tauri::State<AppState>,
@@ -1802,7 +1810,7 @@ fn set_check_for_updates_impl(
 /// claimed. A mismatch resolves to `Ok(false)`, never an error: an
 /// explicit click that turns out to point somewhere refused is a "was it
 /// opened" signal, not a failure this command needs to explain.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn open_update_link(url: String) -> Result<bool, ErrorPayload> {
     open_update_link_impl(&url).map_err(|err| ErrorPayload::from(&err))
 }
