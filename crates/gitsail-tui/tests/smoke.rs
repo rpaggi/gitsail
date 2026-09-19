@@ -10,6 +10,11 @@
 //! assertions below *are* the recorded visual reference: any future
 //! layout change that drops one of the required panel regions, the branch
 //! name, or the loading/empty/error indicators breaks a test here.
+//!
+//! The five regions are asserted by the *label* each panel carries in the
+//! rendered frame, not by the internal `Panel` variant name: the layout
+//! redesign renamed what the boxes say ("Commits", "Changes", "Branches")
+//! without touching which panels exist or how focus moves between them.
 
 mod support;
 
@@ -31,19 +36,17 @@ fn initial_frame_shows_all_five_regions_in_the_loading_phase() {
     terminal.draw(|frame| ui::render(frame, &app)).unwrap();
 
     let text = buffer_text(&terminal);
-    assert!(text.contains("Sidebar"), "missing sidebar region:\n{text}");
-    assert!(text.contains("Graph"), "missing graph region:\n{text}");
-    assert!(text.contains("Details"), "missing details region:\n{text}");
-    assert!(text.contains("Diff"), "missing diff region:\n{text}");
-    assert!(
-        text.contains("References"),
-        "missing references region:\n{text}"
-    );
+    for region in ["Branches", "Commits", "Changes", "Diff", "Tags"] {
+        assert!(text.contains(region), "missing {region} region:\n{text}");
+    }
     assert!(
         text.contains("loading"),
         "loading state not visible:\n{text}"
     );
-    assert!(text.contains("? help"), "missing shortcuts bar:\n{text}");
+    assert!(
+        text.contains("Help") && text.contains("Quit"),
+        "missing shortcuts bar:\n{text}"
+    );
 }
 
 #[test]
@@ -78,12 +81,85 @@ fn opening_a_known_fixture_repository_reaches_the_loaded_phase_with_its_branch()
     terminal.draw(|frame| ui::render(frame, &app)).unwrap();
     let text = buffer_text(&terminal);
 
-    assert!(text.contains("branch: main"), "branch not shown:\n{text}");
-    assert!(text.contains("status: clean"), "status not shown:\n{text}");
     assert!(
-        text.contains("* main"),
-        "current branch not listed in sidebar:\n{text}"
+        text.contains("Current branch"),
+        "current-branch card not shown:\n{text}"
     );
+    assert!(
+        text.contains("Clean"),
+        "clean working tree not stated:\n{text}"
+    );
+    // The filled dot is the current branch's marker in the Branches panel
+    // (a hollow one means "local, not current"), and it is a *shape*, so
+    // this still holds with color off.
+    assert!(
+        text.contains("● main"),
+        "current branch not marked in the Branches panel:\n{text}"
+    );
+}
+
+/// US-043 criterion 3 / `NO_COLOR`: with color switched off, every state
+/// the colored frame distinguishes must still be readable from the text
+/// alone. `crate::theme`'s unit tests prove each *primitive* degrades
+/// (every icon has an ASCII form, no role emits a color, the three branch
+/// dots stay distinct shapes); this one proves the primitives are actually
+/// wired through to a rendered frame.
+#[test]
+fn the_low_color_frame_still_carries_every_state_as_text() {
+    let dir = TempDir::new("smoke-ascii");
+    support::init_repo_with_initial_commit(dir.path());
+    std::fs::write(dir.path().join("README.md"), "hello\nworld\n").unwrap();
+
+    let port = read_port();
+    let (mut app, _commands) = App::new(dir.path().to_path_buf(), port.clone(), true);
+    let repo = OpenRepository::new(port.clone())
+        .execute(dir.path())
+        .unwrap();
+    let open_commands = app.on_repository_opened(Ok(repo.clone()));
+    let ticket = open_commands
+        .iter()
+        .find_map(|c| match c {
+            gitsail_tui::Command::RefreshStatus(t, _) => Some(*t),
+            _ => None,
+        })
+        .expect("RefreshStatus command");
+    app.on_status_refreshed(
+        ticket,
+        GetRepositoryStatus::new(port.clone()).execute(&repo),
+    );
+    let generation = app.session().unwrap().generation();
+    app.on_branches_loaded(generation, ListBranches::new(port).execute(&repo));
+
+    let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+    terminal.draw(|frame| ui::render(frame, &app)).unwrap();
+    let text = buffer_text(&terminal);
+
+    for (marker, what) in [
+        ("* main", "the current branch's filled marker"),
+        (">", "the selection cursor"),
+        ("W README.md", "the worktree scope tag on a changed file"),
+        ("! 1 changed", "the dirty working-tree verdict"),
+        ("|?| Help", "the ASCII keycap strip"),
+    ] {
+        assert!(
+            text.contains(marker),
+            "low-color frame lost {what} ({marker:?}):\n{text}"
+        );
+    }
+    // No cell may carry a color when `low_color` is set.
+    let buffer = terminal.backend().buffer();
+    for cell in buffer.content() {
+        assert_eq!(
+            cell.fg,
+            ratatui::style::Color::Reset,
+            "colored cell: {cell:?}"
+        );
+        assert_eq!(
+            cell.bg,
+            ratatui::style::Color::Reset,
+            "colored cell: {cell:?}"
+        );
+    }
 }
 
 #[test]
@@ -117,7 +193,7 @@ fn a_terminal_below_the_minimum_size_shows_a_resize_message_instead_of_the_layou
         "expected a minimum-size message:\n{text}"
     );
     assert!(
-        !text.contains("Sidebar"),
+        !text.contains("Commits"),
         "the full layout must not attempt to render:\n{text}"
     );
 }

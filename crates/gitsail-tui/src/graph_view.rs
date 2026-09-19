@@ -50,31 +50,60 @@ fn decoration_label(decoration: &Decoration) -> String {
     }
 }
 
+/// One glyph per lane column, `lane_count` long, in lane order.
+///
+/// Exposed separately from [`lane_track`] so a caller that wants to tint
+/// each lane its own color (the Commits panel does) can style the glyphs
+/// individually without re-deriving — or second-guessing — the lane
+/// assignment [`gitsail_domain::CommitGraph`] already made.
+pub fn lane_glyphs(row: &GraphRow, commit: &Commit, lane_count: usize) -> Vec<char> {
+    (0..lane_count)
+        .map(|lane| {
+            if lane == row.lane {
+                node_glyph(commit)
+            } else if row.passthrough_lanes.contains(&lane) {
+                '│'
+            } else if row.edges.iter().any(|edge| edge.to_lane == lane) {
+                // A lane this row's commit connects to but does not itself
+                // occupy: a branch spawning to the right, or a merge
+                // converging back to the left.
+                if lane > row.lane {
+                    '\\'
+                } else {
+                    '/'
+                }
+            } else {
+                ' '
+            }
+        })
+        .collect()
+}
+
 /// Renders the lane-track prefix for `row`: one glyph per lane column,
 /// `lane_count` wide, each followed by a single space separator.
 fn lane_track(row: &GraphRow, commit: &Commit, lane_count: usize) -> String {
     let mut track = String::with_capacity(lane_count * 2);
-    for lane in 0..lane_count {
-        let glyph = if lane == row.lane {
-            node_glyph(commit)
-        } else if row.passthrough_lanes.contains(&lane) {
-            '│'
-        } else if row.edges.iter().any(|edge| edge.to_lane == lane) {
-            // A lane this row's commit connects to but does not itself
-            // occupy: a branch spawning to the right, or a merge
-            // converging back to the left.
-            if lane > row.lane {
-                '\\'
-            } else {
-                '/'
-            }
-        } else {
-            ' '
-        };
+    for glyph in lane_glyphs(row, commit, lane_count) {
         track.push(glyph);
         track.push(' ');
     }
     track
+}
+
+/// The decoration labels for `row` (`HEAD`, branch/remote-branch names,
+/// `tag: …`), in the order [`gitsail_domain::CommitGraph`] recorded them.
+///
+/// Repository-sourced and therefore *not* sanitized here: the render
+/// boundary (`ui.rs`) is where that happens, exactly as it already does
+/// for every other value this module hands back untouched.
+pub fn decoration_labels(row: &GraphRow) -> Vec<String> {
+    row.decorations.iter().map(decoration_label).collect()
+}
+
+/// Whether any of `row`'s edges points at a commit this page has not
+/// loaded — the `(continues…)` case (US-065 criterion 1).
+pub fn has_unresolved_edge(row: &GraphRow) -> bool {
+    row.edges.iter().any(|edge| !edge.resolved)
 }
 
 /// Renders one [`GraphLine`] for `row`/`commit` — a matched pair from the

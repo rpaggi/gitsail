@@ -87,8 +87,10 @@ fn selecting_a_modified_file_loads_and_shows_its_unstaged_diff() {
     run_diff_or_blame_command(&mut app, commands);
 
     let text = render(&app);
+    // The diff gutter renders as `<old> <new> <sign> <code>`, so the sign
+    // column is separated from the content by a space.
     assert!(
-        text.contains("+world"),
+        text.contains("+ world"),
         "the added line must appear in the unstaged diff:\n{text}"
     );
 }
@@ -265,10 +267,20 @@ fn exporting_a_patch_falls_back_to_a_file_when_the_clipboard_is_unavailable_and_
         other => panic!("expected the clipboard-unavailable fallback, got {other:?}"),
     };
     let text = render(&app);
-    assert!(
-        text.contains("saved to") && text.contains("README.md"),
-        "the UI must name the fallback file and the patch's scope:\n{text}"
-    );
+    // Asserted token by token rather than as one phrase: the banner is a
+    // soft-wrapped paragraph inside a panel, and a frame row carries the
+    // other two columns' content too, so a multi-word `contains` would be
+    // testing where the wrap happens to land rather than whether the UI
+    // said it. The fallback *path* itself is checked structurally above
+    // (`app.patch_export()`) and exercised by the `git apply` round-trip
+    // below — a stronger guarantee than a substring ever was.
+    for token in ["Clipboard", "unavailable", "unstaged", "README.md", "saved"] {
+        assert!(
+            text.contains(token),
+            "the UI must name the fallback outcome, file and scope \
+             (missing {token:?}):\n{text}"
+        );
+    }
 
     // DoD: round-trip through a real `git apply` reproduces the diff this
     // patch was exported from, closing the loop for the TUI exactly like

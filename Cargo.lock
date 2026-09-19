@@ -1735,6 +1735,7 @@ dependencies = [
  "gitsail-domain",
  "gitsail-git",
  "ratatui",
+ "unicode-width 0.2.0",
 ]
 
 [[package]]

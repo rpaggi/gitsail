@@ -45,6 +45,7 @@ pub mod runtime;
 pub mod sanitize;
 pub mod status_view;
 pub mod terminal;
+pub mod theme;
 pub mod ui;
 pub mod worker;
 

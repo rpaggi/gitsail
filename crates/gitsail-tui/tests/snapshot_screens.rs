@@ -20,13 +20,14 @@
 //!   The graph-panel snapshot queries the real hash right after creating
 //!   the commit and substitutes a fixed placeholder for it before
 //!   comparing, so the expected string itself never embeds a hash.
-//! - **The Sidebar's `repo: <path>` line** embeds the fixture's absolute
+//! - **The Repository panel's path row** embeds the fixture's absolute
 //!   temporary-directory path, which varies in both content and length
-//!   across runs and operating systems — [`mask_repo_path_line`] replaces
-//!   whatever text sits between `"repo: "` and the panel's closing border
-//!   with a fixed run of `·` of the same width, in both the actual and the
-//!   expected string, so the assertion never depends on where `TempDir`
-//!   happens to live.
+//!   across runs and operating systems. Every fixture here therefore puts
+//!   its repository in a `repo/` subdirectory of the `TempDir`, so the
+//!   *name* the panel shows is always the fixed string `repo`, and
+//!   [`mask_repo_path`] then blanks whatever prefix of the absolute path
+//!   survived truncation into a fixed run of `·` of the same width — so
+//!   the assertion never depends on where `TempDir` happens to live.
 //! - **The merge-conflicts overlay** is asserted only over its own popup
 //!   region (computed with the same `centered_rect` math `ui.rs` uses
 //!   internally), not the whole screen — the screen behind a floating
@@ -84,44 +85,59 @@ fn region_text(terminal: &Terminal<TestBackend>, rect: Rect) -> String {
     lines.join("\n")
 }
 
-/// Replaces whatever sits between `"repo: "` and the Sidebar panel's
-/// closing `'│'` with a fixed-width run of `'·'` — see the module doc
-/// comment for why the raw path can never appear in a snapshot's expected
-/// string.
-fn mask_repo_path_line(text: &str) -> String {
+/// The fixed stand-in for a content-derived commit hash. Long enough to
+/// cover any abbreviation length Git might choose; callers cut it to the
+/// exact width of the value they are replacing.
+const PLACEHOLDER_HASH: &str = "abcd1234abcd1234";
+
+/// Blanks the fixture's absolute path wherever it appears, with a run of
+/// `'·'` of the same display width — see the module doc comment for why the
+/// raw path can never appear in a snapshot's expected string.
+///
+/// The Repository panel truncates the path to the box's inner width, so
+/// what actually reaches the buffer is some *prefix* of it; this looks for
+/// the longest prefix present on each line rather than the whole string.
+/// Eight characters is the shortest prefix considered, below which a match
+/// would be coincidence rather than the path.
+fn mask_repo_path(text: &str, repo_path: &std::path::Path) -> String {
+    let full = repo_path.display().to_string();
     text.lines()
-        .map(|line| match line.find("repo: ") {
-            Some(idx) => {
-                let start = idx + "repo: ".len();
-                match line[start..].find('│') {
-                    Some(border_rel) => {
-                        let border = start + border_rel;
-                        format!(
-                            "{}{}{}",
-                            &line[..start],
-                            "·".repeat(border - start),
-                            &line[border..]
-                        )
-                    }
-                    None => line.to_string(),
+        .map(|line| {
+            for len in (8..=full.chars().count()).rev() {
+                let prefix: String = full.chars().take(len).collect();
+                if let Some(idx) = line.find(&prefix) {
+                    return format!(
+                        "{}{}{}",
+                        &line[..idx],
+                        "·".repeat(prefix.chars().count()),
+                        &line[idx + prefix.len()..]
+                    );
                 }
             }
-            None => line.to_string(),
+            line.to_string()
         })
         .collect::<Vec<_>>()
         .join("\n")
 }
 
+/// A repository inside a fixed-name subdirectory of `dir`, so the
+/// Repository panel's *name* row is stable across runs (see the module doc
+/// comment).
+fn fixture_root(dir: &TempDir) -> std::path::PathBuf {
+    let root = dir.path().join("repo");
+    std::fs::create_dir_all(&root).expect("create fixture root");
+    root
+}
+
 #[test]
 fn a_single_commit_graph_panel_frame_matches_the_recorded_snapshot() {
     let dir = TempDir::new("snapshot-graph");
-    init_repo_with_initial_commit(dir.path());
+    let root = fixture_root(&dir);
+    init_repo_with_initial_commit(&root);
 
     let port = read_port();
-    let (mut app, _commands) = App::new(dir.path().to_path_buf(), port.clone(), false);
-    let repo = OpenRepository::new(port.clone())
-        .execute(dir.path())
-        .unwrap();
+    let (mut app, _commands) = App::new(root.clone(), port.clone(), false);
+    let repo = OpenRepository::new(port.clone()).execute(&root).unwrap();
     let open_commands = app.on_repository_opened(Ok(repo.clone()));
 
     let ticket = open_commands
@@ -158,42 +174,66 @@ fn a_single_commit_graph_panel_frame_matches_the_recorded_snapshot() {
 
     // The two non-deterministic ingredients: the real commit hash and the
     // fixture's temp-directory path (see module doc comment).
+    // Two abbreviations of the same hash reach the buffer: the Commits
+    // panel prints `Commit::short_hash` (whatever width Git abbreviated to)
+    // and the Branches panel its own 7-character form. Each placeholder is
+    // cut to the exact width of what it replaces — a longer one would shift
+    // every column to its right and make the snapshot depend on Git's
+    // abbreviation length.
     let short_hash = app.graph_commits()[0].short_hash.as_str().to_string();
-    let text = mask_repo_path_line(&raw.replace(&short_hash, "abcd1234"));
+    let placeholder: String = PLACEHOLDER_HASH
+        .chars()
+        .take(short_hash.chars().count())
+        .collect();
+    let shorter: String = short_hash.chars().take(7).collect();
+    let shorter_placeholder: String = PLACEHOLDER_HASH.chars().take(7).collect();
+    let text = mask_repo_path(
+        &raw.replace(&short_hash, &placeholder)
+            .replace(&shorter, &shorter_placeholder),
+        &root,
+    );
+    assert_eq!(
+        text.lines().map(|l| l.chars().count()).max(),
+        raw.lines().map(|l| l.chars().count()).max(),
+        "masking must preserve every row's width"
+    );
 
     let expected = "\
-┌» Sidebar───────────────────┐┌Graph───────────────────────────────────────────────────────────────┐
-│repo: ······················││○ abcd1234 (HEAD, main) initial commit                               │
-│branch: main                ││                                                                    │
-│status: clean               ││                                                                    │
-│* main                      ││                                                                    │
-│                            ││                                                                    │
-│                            ││                                                                    │
-│                            ││                                                                    │
-│                            ││                                                                    │
-│                            ││                                                                    │
-│                            ││                                                                    │
-│                            ││                                                                    │
-│                            ││                                                                    │
-│                            ││                                                                    │
-│                            ││                                                                    │
-│                            │└────────────────────────────────────────────────────────────────────┘
-│                            │┌Details───────────────┐┌Diff─────────────────┐┌References — Tags────┐
-│                            ││No changes.           ││No file selected —   ││No tags.             │
-│                            ││                      ││press Enter on a     ││                     │
-│                            ││                      ││status entry.        ││                     │
-│                            ││                      ││                     ││                     │
-│                            ││                      ││                     ││                     │
-│                            ││                      ││                     ││                     │
-│                            ││                      ││                     ││                     │
-│                            ││                      ││                     ││                     │
-│                            ││                      ││                     ││                     │
-│                            ││                      ││                     ││                     │
-│                            ││                      ││                     ││                     │
-└────────────────────────────┘└──────────────────────┘└─────────────────────┘└─────────────────────┘
-Tab focus · j/k move · Enter act · / search · r refresh · ? help · q quit                           "
+╭──────────────────────────╮╭ ◉ Commits ─────────────────── 1 commit ╮╭ ▣ Repository ──────────────╮
+│        ╱▌ GitSail        ││▸○ abcd123 (HEAD, main) initial c… now T││▣ repo                ↳ main│
+│──────────────────────────││                                        ││···························…│
+│ ◉ Commits               1││                                        ││────────────────────────────│
+│▸↳ Branches              1││                                        ││◉ Commits                  1│
+│ ▦ Changes               0││                                        ││↳ Branches                 1│
+│ ± Diff                   ││                                        ││▤ Stashes                  0│
+│ ≡ Blame                  ││                                        ││⇄ Remotes                  0│
+│ ▤ Stashes               0││                                        ││◆ Tags                     0│
+│ ⇄ Remotes               0││                                        ││                            │
+│ ◆ Tags                  0││                                        │╰────────────────────────────╯
+│ ↺ Reflog                0││                                        │╭»↳ Branches ───────────── 1 ╮
+│                          ││                                        ││▸● main              abcd123│
+│                          ││                                        ││                            │
+│                          │╰────────────────────────────────────────╯│                            │
+│                          │╭ ± Diff ────────────────────────────────╮│                            │
+│                          ││╭ ▦ Changes ───────────────────────────╮││                            │
+│                          │││No changes.                           │││                            │
+│╭ Current branch ────────╮││╰──────────────────────────────────────╯││                            │
+││↳ main                 ●│││No file selected — press Enter on a     ││                            │
+││────────────────────────│││Changes entry.                          ││                            │
+││Working tree            │││                                        │╰────────────────────────────╯
+││✓ Clean                 │││                                        │╭ ◆ Tags  (t cycles) ───── 0 ╮
+│╰────────────────────────╯││                                        ││No tags.                    │
+│──────────────────────────││                                        ││                            │
+│ ?  Help    q  Quit       ││                                        ││                            │
+╰──────────────────────────╯╰────────────────────────────────────────╯╰────────────────────────────╯
+╭──╮           ╭─╮       ╭───╮        ╭─╮         ╭─╮       ╭─╮                                     
+│↑↓│ Navigate  │⏎│ Open  │Tab│ Focus  │/│ Search  │?│ Help  │q│ Quit                                
+╰──╯           ╰─╯       ╰───╯        ╰─╯         ╰─╯       ╰─╯                                     "
         .to_string();
 
+    if std::env::var_os("GITSAIL_SNAPSHOT_DUMP").is_some() {
+        println!("<<<GRAPH>>>\n{text}\n<<<END>>>");
+    }
     assert_eq!(
         text, expected,
         "rendered graph-panel frame drifted from the recorded snapshot:\n{text}"
@@ -203,11 +243,12 @@ Tab focus · j/k move · Enter act · / search · r refresh · ? help · q quit 
 #[test]
 fn the_merge_conflicts_overlay_popup_matches_the_recorded_snapshot() {
     let dir = TempDir::new("snapshot-conflicts");
-    setup_conflicting_divergence(dir.path());
+    let root = fixture_root(&dir);
+    setup_conflicting_divergence(&root);
 
     let port = read_port();
-    let (mut app, _commands) = App::new(dir.path().to_path_buf(), port.clone(), false);
-    open_and_load(&mut app, dir.path());
+    let (mut app, _commands) = App::new(root.clone(), port.clone(), false);
+    open_and_load(&mut app, &root);
 
     select_branch(&mut app, "feature");
     app.update(Action::RequestMerge);
@@ -234,7 +275,7 @@ fn the_merge_conflicts_overlay_popup_matches_the_recorded_snapshot() {
     let text = region_text(&terminal, popup);
 
     let expected = "\
-┌Conflicts───────────────────────────────────────────────────────────┐
+╭ Conflicts ─────────────────────────────────────────────────────────╮
 │merge — 1 conflicted file                                           │
 │                                                                    │
 │> f.txt (both modified)                                             │
@@ -254,9 +295,12 @@ fn the_merge_conflicts_overlay_popup_matches_the_recorded_snapshot() {
 │                                                                    │
 │                                                                    │
 │                                                                    │
-└────────────────────────────────────────────────────────────────────┘"
+╰────────────────────────────────────────────────────────────────────╯"
         .to_string();
 
+    if std::env::var_os("GITSAIL_SNAPSHOT_DUMP").is_some() {
+        println!("<<<CONFLICTS>>>\n{text}\n<<<END>>>");
+    }
     assert_eq!(
         text, expected,
         "rendered conflicts-overlay popup drifted from the recorded snapshot:\n{text}"
@@ -266,15 +310,14 @@ fn the_merge_conflicts_overlay_popup_matches_the_recorded_snapshot() {
 #[test]
 fn an_empty_repository_frame_matches_the_recorded_snapshot() {
     let dir = TempDir::new("snapshot-empty");
-    git(dir.path(), &["init", "--quiet", "--initial-branch=main"]);
-    git(dir.path(), &["config", "user.name", "Test User"]);
-    git(dir.path(), &["config", "user.email", "test@example.com"]);
+    let root = fixture_root(&dir);
+    git(&root, &["init", "--quiet", "--initial-branch=main"]);
+    git(&root, &["config", "user.name", "Test User"]);
+    git(&root, &["config", "user.email", "test@example.com"]);
 
     let port = read_port();
-    let (mut app, _commands) = App::new(dir.path().to_path_buf(), port.clone(), false);
-    let repo = OpenRepository::new(port.clone())
-        .execute(dir.path())
-        .unwrap();
+    let (mut app, _commands) = App::new(root.clone(), port.clone(), false);
+    let repo = OpenRepository::new(port.clone()).execute(&root).unwrap();
     let open_commands = app.on_repository_opened(Ok(repo.clone()));
     let ticket = open_commands
         .iter()
@@ -293,41 +336,44 @@ fn an_empty_repository_frame_matches_the_recorded_snapshot() {
 
     let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
     terminal.draw(|frame| ui::render(frame, &app)).unwrap();
-    let text = mask_repo_path_line(&buffer_text(&terminal));
+    let text = mask_repo_path(&buffer_text(&terminal), &root);
 
     let expected = "\
-┌» Sidebar───────────────────┐┌Graph───────────────────────────────────────────────────────────────┐
-│repo: ······················││Nothing to show — empty repository.                                 │
-│branch: (detached HEAD)     ││                                                                    │
-│status: empty repository (no││                                                                    │
-│                            ││                                                                    │
-│                            ││                                                                    │
-│                            ││                                                                    │
-│                            ││                                                                    │
-│                            ││                                                                    │
-│                            ││                                                                    │
-│                            ││                                                                    │
-│                            ││                                                                    │
-│                            ││                                                                    │
-│                            ││                                                                    │
-│                            ││                                                                    │
-│                            │└────────────────────────────────────────────────────────────────────┘
-│                            │┌Details───────────────┐┌Diff─────────────────┐┌References — Tags────┐
-│                            ││Nothing to show —     ││Nothing to show —    ││Nothing to show —    │
-│                            ││empty repository.     ││empty repository.    ││empty repository.    │
-│                            ││                      ││                     ││                     │
-│                            ││                      ││                     ││                     │
-│                            ││                      ││                     ││                     │
-│                            ││                      ││                     ││                     │
-│                            ││                      ││                     ││                     │
-│                            ││                      ││                     ││                     │
-│                            ││                      ││                     ││                     │
-│                            ││                      ││                     ││                     │
-│                            ││                      ││                     ││                     │
-└────────────────────────────┘└──────────────────────┘└─────────────────────┘└─────────────────────┘
-Tab focus · j/k move · Enter act · / search · r refresh · ? help · q quit                           "
+╭──────────────────────────╮╭ ◉ Commits ────────────────── 0 commits ╮╭ ▣ Repository ──────────────╮
+│        ╱▌ GitSail        ││Nothing to show — empty repository.     ││▣ repo          ↳ (detached)│
+│──────────────────────────││                                        ││···························…│
+│ ◉ Commits               0││                                        ││────────────────────────────│
+│▸↳ Branches              0││                                        ││◉ Commits                  0│
+│ ▦ Changes               0││                                        ││↳ Branches                 0│
+│ ± Diff                   ││                                        ││▤ Stashes                  0│
+│ ≡ Blame                  ││                                        ││⇄ Remotes                  0│
+│ ▤ Stashes               0││                                        ││◆ Tags                     0│
+│ ⇄ Remotes               0││                                        ││                            │
+│ ◆ Tags                  0││                                        │╰────────────────────────────╯
+│ ↺ Reflog                0││                                        │╭»↳ Branches ───────────── 0 ╮
+│                          ││                                        ││Nothing to show — empty     │
+│                          ││                                        ││repository.                 │
+│                          │╰────────────────────────────────────────╯│                            │
+│                          │╭ ± Diff ────────────────────────────────╮│                            │
+│                          ││Nothing to show — empty repository.     ││                            │
+│                          ││                                        ││                            │
+│╭ Current branch ────────╮││                                        ││                            │
+││↳ (detached HEAD)      ●│││                                        ││                            │
+││────────────────────────│││                                        ││                            │
+││Working tree            │││                                        │╰────────────────────────────╯
+││(no commits yet)        │││                                        │╭ ◆ Tags  (t cycles) ───── 0 ╮
+│╰────────────────────────╯││                                        ││Nothing to show — empty     │
+│──────────────────────────││                                        ││repository.                 │
+│ ?  Help    q  Quit       ││                                        ││                            │
+╰──────────────────────────╯╰────────────────────────────────────────╯╰────────────────────────────╯
+╭──╮           ╭─╮       ╭───╮        ╭─╮         ╭─╮       ╭─╮                                     
+│↑↓│ Navigate  │⏎│ Open  │Tab│ Focus  │/│ Search  │?│ Help  │q│ Quit                                
+╰──╯           ╰─╯       ╰───╯        ╰─╯         ╰─╯       ╰─╯                                     "
         .to_string();
 
+    if std::env::var_os("GITSAIL_SNAPSHOT_DUMP").is_some() {
+        println!("<<<EMPTY>>>\n{text}\n<<<END>>>");
+    }
     assert_eq!(
         text, expected,
         "rendered empty-repository frame drifted from the recorded snapshot:\n{text}"

@@ -28,6 +28,13 @@ gitsail-application = { path = "../gitsail-application" }
 gitsail-domain = { path = "../gitsail-domain" }
 gitsail-git = { path = "../gitsail-git" }
 ratatui = "0.29"
+# Column-accurate truncation/padding for the right-aligned summaries and
+# highlight bars `ui.rs` lays out by hand: a CJK or box-drawing glyph in a
+# branch/file name occupies two terminal cells, so `str::chars().count()`
+# silently misaligns every row after it. Already in the lockfile as a
+# transitive dependency of `ratatui` itself (same major version), so this
+# adds no new crate to the build graph.
+unicode-width = "0.2"
 
 [lints]
 workspace = true

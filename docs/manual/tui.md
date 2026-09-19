@@ -40,18 +40,28 @@ standalone binary, `crates/gitsail-cli/src/cli.rs` for `gitsail`/`gitsail tui`):
 |---|---|
 | `--repo <path>` | Repository to open (default: current directory). |
 | `--git-path <path>` | Explicit `git` executable (default: `git` on `PATH`). |
-| `--ascii` | Disable color; render with text/markers only. Also enabled automatically when the `NO_COLOR` environment variable is set. |
+| `--ascii` | Disable color, and swap the decorative glyphs (panel icons, branch dots, selection cursors, keycap boxes, box corners, the GitSail mark) for ASCII equivalents. Every state the colored interface shows — focus, selection, current branch, local vs. remote, staged vs. unstaged, added vs. removed diff lines, clean vs. dirty — stays distinguishable, because each one is carried by a marker or a glyph *shape* as well as by its color. The commit graph's own lane glyphs (`●`/`○`/`◆`/`│`) are unchanged in this mode, as they always have been. Also enabled automatically when the `NO_COLOR` environment variable is set. |
 | `--keybindings <path>` | Explicit keybindings-override file (default: `<OS config dir>/gitsail/tui/keybindings.conf` — see [keyboard remapping](#keyboard-remapping) below). |
 
-The terminal needs a minimum size; below it the TUI shows "Terminal too
-small (WxH). Resize to at least MIN_WIDTHxMIN_HEIGHT." instead of a broken
-layout.
+The terminal needs a minimum size — 78x20 — below which the TUI shows
+"Terminal too small (WxH). Resize to at least 78x20." instead of a broken
+layout. Between that floor and a full-size window the layout adapts by
+narrowing its side columns, never by hiding a panel.
 
-**Panels**: Sidebar (branches), Graph (commit history), Details/Diff (status,
-diff, blame), References (tags/remotes/stash/reflog, read-only). `Tab` /
+**Layout**: a left chrome column (the GitSail mark, a navigation menu
+mirroring the current focus, the current branch and working-tree state, and
+a help strip), a wide center column (**Commits** above, **Diff**/**Blame**
+below with the **Changes** file list nested inside it), a right column
+(**Repository** facts, **Branches**, and the current **References**
+sub-view), and a keycap strip along the bottom. The navigation menu on the
+left is a read-out of where focus currently is, not a separate control: it
+follows `Tab`, `t` and `b` rather than being driven on its own.
+
+**Panels** (five, unchanged): Branches, Commits, Changes, Diff/Blame, and
+References (tags/remotes/stash/reflog, read-only). `Tab` /
 `Shift+Tab` move focus between panels; `Up`/`Down` or `j`/`k` move the
-selection within the focused panel; `Enter` activates/opens whatever is
-selected; `?` toggles a contextual help overlay listing every shortcut below;
+selection within the focused panel (the focused panel is the one whose box
+is marked `»` in its title); `Enter` activates/opens whatever is selected; `?` toggles a contextual help overlay listing every shortcut below;
 `q` or `Ctrl+C` quits (from the Normal context — `q` inside an overlay closes
 that overlay instead, never the whole app, and `r` refreshes status/branches
 manually).
@@ -60,20 +70,20 @@ manually).
 
 | Shortcut | Where | Action |
 |---|---|---|
-| `s` | Details panel | Stage/unstage the highlighted entry. |
+| `s` | Changes panel | Stage/unstage the highlighted entry. |
 | `C` | anywhere (Normal) | Open the commit-message composer; `Enter` confirms, `Esc` cancels. |
 | `y` | Diff panel | Copy the diff's patch (falls back to saving a file if the clipboard is unavailable). |
 | `Y` | Diff panel | Preview-apply the patch currently on the clipboard (`git apply --check`); confirming the prompt actually applies it. |
-| `n` | Sidebar | Create a branch (name prompt). |
-| `c` | Sidebar | Checkout the highlighted branch (confirmation). |
-| `d` | Sidebar | Delete the highlighted branch (confirmation). |
-| `R` | Sidebar | Rename the highlighted branch, pre-filled with its current name. |
+| `n` | Branches panel | Create a branch (name prompt). |
+| `c` | Branches panel | Checkout the highlighted branch (confirmation). |
+| `d` | Branches panel | Delete the highlighted branch (confirmation). |
+| `R` | Branches panel | Rename the highlighted branch, pre-filled with its current name. |
 | `f` | anywhere (Normal) | Fetch the resolved remote (Safe — no confirmation). |
 | `p` | anywhere (Normal) | Pull the tracked branch, fast-forward only (confirmation). |
 | `P` | anywhere (Normal) | Push the current branch (confirmation). |
-| `b` | Details/Diff panel | Toggle between the diff and blame sub-views. |
-| `/` | Sidebar | Filter the branch list. |
-| `/` | Graph panel | Search commits (`text`, `author:`, `branch:`, `hash`). |
+| `b` | Changes/Diff panel | Toggle between the diff and blame sub-views. |
+| `/` | Branches panel | Filter the branch list. |
+| `/` | Commits panel | Search commits (`text`, `author:`, `branch:`, `hash`). |
 | `t` | References panel | Cycle Tags / Remotes / Stash / Reflog sub-views (read-only listing — see [Limitations](#limitations)). |
 | `Enter` | References panel | View the highlighted entry's details (a reflog entry opens its commit's details, when that commit still exists). |
 | `w` | anywhere (Normal) | Open the current selection (branch/commit/repo root) on its detected GitHub/GitLab remote's web page. A no-op when no configured remote resolves to a known forge. |
@@ -82,12 +92,12 @@ manually).
 
 | Shortcut | Where | Action |
 |---|---|---|
-| `m` | Sidebar | Merge the highlighted reference into the current branch (confirmation shows origin, destination, policy). |
-| `o` | Sidebar | Rebase the current branch onto the highlighted reference (confirmation). |
-| `O` | Sidebar | Open the interactive rebase plan for the highlighted reference (read-only until confirmed). Inside the plan: `j`/`k` select an entry, `J`/`K` reorder it, `a` cycles its action Pick → Reword → Squash → Fixup → Drop → Pick, `Enter` confirms the plan. |
-| `x` | Graph panel | Cherry-pick the highlighted commit onto the current branch (confirmation). A merge commit always uses the fixed first-parent policy, named explicitly in the confirmation. |
-| `v` | Graph panel | Revert the highlighted commit (confirmation). |
-| `z` | Graph panel | Open the reset-mode chooser for the highlighted commit — pick soft/mixed/hard, then confirm. |
+| `m` | Branches panel | Merge the highlighted reference into the current branch (confirmation shows origin, destination, policy). |
+| `o` | Branches panel | Rebase the current branch onto the highlighted reference (confirmation). |
+| `O` | Branches panel | Open the interactive rebase plan for the highlighted reference (read-only until confirmed). Inside the plan: `j`/`k` select an entry, `J`/`K` reorder it, `a` cycles its action Pick → Reword → Squash → Fixup → Drop → Pick, `Enter` confirms the plan. |
+| `x` | Commits panel | Cherry-pick the highlighted commit onto the current branch (confirmation). A merge commit always uses the fixed first-parent policy, named explicitly in the confirmation. |
+| `v` | Commits panel | Revert the highlighted commit (confirmation). |
+| `z` | Commits panel | Open the reset-mode chooser for the highlighted commit — pick soft/mixed/hard, then confirm. |
 | `A` | anywhere (Normal) | Open the amend composer, pre-loaded with HEAD's current message and staged diff; edit the message, `Enter` amends (confirmation), `Esc` discards (a failed amend keeps the typed message and never silently refreshes). |
 
 Reset modes (identical semantics in Desktop, see `docs/manual/desktop.md`):
