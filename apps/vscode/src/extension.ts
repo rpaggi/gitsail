@@ -18,6 +18,7 @@ import * as vscode from "vscode";
 
 import { ExtensionController } from "./controller";
 import { COMMIT_DETAILS_URI_SCHEME } from "./commitDetailsUri";
+import { buildBlameDecorationLayout } from "./blameDecorations";
 import { HistoryController } from "./historyController";
 import {
   BlameDecorationRenderEntry,
@@ -179,9 +180,15 @@ function createBlameDecorationType(): vscode.TextEditorDecorationType {
   });
 }
 
-function buildBlameDecorationOptions(entries: readonly BlameDecorationRenderEntry[]): vscode.DecorationOptions[] {
-  return entries.map((entry) => {
-    const line = Math.max(0, entry.line - 1);
+function buildBlameDecorationOptions(
+  entries: readonly BlameDecorationRenderEntry[],
+  getLineLength: (zeroBasedLine: number) => number,
+): vscode.DecorationOptions[] {
+  const layout = buildBlameDecorationLayout(entries, getLineLength);
+  return entries.map((entry, index) => {
+    const placed = layout[index];
+    const line = placed?.zeroBasedLine ?? Math.max(0, entry.line - 1);
+    const column = placed?.startChar ?? 0;
     const hover = new vscode.MarkdownString(entry.hoverMarkdown);
     // Scoped trust (T-206 criterion 3): only the specific command ids this
     // hover's own content declared (via `HoverContentBuilder.addCommandLink`)
@@ -191,8 +198,11 @@ function buildBlameDecorationOptions(entries: readonly BlameDecorationRenderEntr
     hover.isTrusted =
       entry.hoverEnabledCommands.length > 0 ? { enabledCommands: [...entry.hoverEnabledCommands] } : false;
     return {
-      range: new vscode.Range(line, 0, line, 0),
-      renderOptions: { after: { contentText: `  ${entry.contentText}` } },
+      range: new vscode.Range(line, column, line, column),
+      // No leading padding: horizontal spacing comes from the decoration
+      // type's `margin` alone (T-268). Prefixing spaces here would double
+      // the gap once the range is anchored at the end of the line.
+      renderOptions: { after: { contentText: entry.contentText } },
       hoverMessage: hover,
     };
   });
@@ -254,7 +264,20 @@ function createHistoryHost(): HistoryHost {
     setBlameDecorations(editor, entries): void {
       const realEditor = editor.raw as vscode.TextEditor | undefined;
       if (realEditor && vscode.window.visibleTextEditors.includes(realEditor)) {
-        realEditor.setDecorations(decorationType, buildBlameDecorationOptions(entries));
+        const document = realEditor.document;
+        realEditor.setDecorations(
+          decorationType,
+          buildBlameDecorationOptions(entries, (zeroBasedLine) => {
+            if (zeroBasedLine < 0 || zeroBasedLine >= document.lineCount) {
+              return 0;
+            }
+            try {
+              return document.lineAt(zeroBasedLine).text.length;
+            } catch {
+              return 0;
+            }
+          }),
+        );
       }
     },
 
