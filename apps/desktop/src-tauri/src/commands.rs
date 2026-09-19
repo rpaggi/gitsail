@@ -4607,6 +4607,12 @@ mod tests {
             git(dir.path(), &["init", "--quiet", "--initial-branch=main"]);
             git(dir.path(), &["config", "user.name", "Test User"]);
             git(dir.path(), &["config", "user.email", "test@example.com"]);
+            // Git for Windows defaults to core.autocrlf=true, so every
+            // checkout these tests drive (rebase, skip, reset --hard,
+            // revert) would rewrite the working tree with CRLF while the
+            // assertions below compare against the LF the test wrote.
+            // Pin it so the fixture means the same thing on every OS.
+            git(dir.path(), &["config", "core.autocrlf", "false"]);
             dir
         }
 
