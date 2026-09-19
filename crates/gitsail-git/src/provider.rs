@@ -2385,7 +2385,7 @@ impl RepositoryWritePort for GitCliProvider {
         let extra_env = vec![
             (
                 "GIT_SEQUENCE_EDITOR".to_string(),
-                sequence_editor.to_string_lossy().into_owned(),
+                shell_quoted_editor_command(&sequence_editor),
             ),
             (
                 "GITSAIL_REBASE_TODO_FILE".to_string(),
@@ -3104,6 +3104,28 @@ fn classify_patch_check_failure(err: &GitSailError) -> (ErrorCode, String) {
 /// opened over `\\wsl.localhost\...` — the repository is perfectly valid
 /// and one `safe.directory` line fixes it, but the old message sent the
 /// user looking for a nonexistent repository instead.
+/// Renders `editor` as something Git can actually run, because Git treats
+/// `GIT_SEQUENCE_EDITOR` as a *shell command*, not a path: it hands the
+/// value to `sh -c` (its own bundled `sh` on Windows). A Windows path
+/// therefore arrives full of backslashes the shell eats as escapes —
+/// `D:\a\gitsail\target\...` loses `\a`, `\g` and `\t` and the helper
+/// silently never runs, so `git rebase -i` keeps the default todo list and
+/// the plan is dropped without any error surfacing. Git accepts forward
+/// slashes on Windows, and quoting covers a path containing spaces (an
+/// installed build under `C:\Program Files\...`).
+///
+/// A single quote inside the path would break the quoting, but cannot
+/// appear here: this is always a path this crate resolved to its own
+/// helper binary, never repository-derived text.
+fn shell_quoted_editor_command(editor: &Path) -> String {
+    let path = editor.to_string_lossy();
+    if cfg!(windows) {
+        format!("'{}'", path.replace('\\', "/"))
+    } else {
+        format!("'{path}'")
+    }
+}
+
 fn classify_discover_failure(err: GitSailError) -> GitSailError {
     if err.code() != ErrorCode::ProcessFailure {
         return err;
@@ -5366,6 +5388,42 @@ mod tests {
             "git process exited with a non-zero status",
         )
         .with_source(RawStderr(stderr))
+    }
+
+    #[test]
+    fn the_sequence_editor_command_survives_the_shell_git_runs_it_through() {
+        let quoted = shell_quoted_editor_command(Path::new(if cfg!(windows) {
+            r"D:\a\gitsail\target\debug\gitsail-sequence-editor.exe"
+        } else {
+            "/tmp/a/gitsail/target/debug/gitsail-sequence-editor"
+        }));
+
+        // Quoted, so a path containing spaces stays one argument.
+        assert!(quoted.starts_with('\''), "must be quoted: {quoted}");
+        assert!(quoted.ends_with('\''), "must be quoted: {quoted}");
+        // No backslash may survive: Git's shell would consume it as an
+        // escape and run something that is not our helper.
+        assert!(
+            !quoted.contains('\\'),
+            "no backslash may reach Git's shell: {quoted}"
+        );
+        assert!(quoted.contains("gitsail-sequence-editor"));
+    }
+
+    #[test]
+    fn a_sequence_editor_path_with_spaces_stays_a_single_shell_word() {
+        let quoted = shell_quoted_editor_command(Path::new(if cfg!(windows) {
+            r"C:\Program Files\GitSail\gitsail-sequence-editor.exe"
+        } else {
+            "/opt/Program Files/GitSail/gitsail-sequence-editor"
+        }));
+
+        assert_eq!(
+            quoted.matches('\'').count(),
+            2,
+            "exactly one quoted word: {quoted}"
+        );
+        assert!(quoted.contains("Program Files"));
     }
 
     #[test]
