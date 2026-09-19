@@ -9,34 +9,33 @@ import {
   StatusBarItemLike,
   TextEditorLike,
 } from "../src/hostTypes";
-import { Envelope } from "../src/protocol";
-
-// `ExtensionController` orchestrates `cliLocator`/`cliClient` — both are
-// already covered by their own contract tests against real spawned
-// processes (`cliLocator.test.ts`, `cliClient.test.ts`). Here they are
-// mocked so these tests are about the *orchestration* (T-201/T-204
-// lifecycle, caching, notification throttling), deterministically and
-// without spawning anything.
-vi.mock("../src/cliLocator", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../src/cliLocator")>();
-  return { ...actual, probeCliBinary: vi.fn() };
+// `ExtensionController` orchestrates Git availability and repository
+// resolution. Both are covered against a real `git` elsewhere
+// (`gitProcess.test.ts`, `gitClient.test.ts`, `repositoryContext.test.ts`);
+// here they are mocked so these tests are about the *orchestration*
+// (T-201/T-204 lifecycle, caching, notification throttling),
+// deterministically and without spawning anything.
+//
+// ADR-025 note: the "binary" this controller used to locate is gone, so
+// what is mocked here is `probeGit` (can we run git at all) and `GitClient`
+// (the seven queries), rather than `probeCliBinary`/`GitSailCliClient`.
+vi.mock("../src/git/gitClient", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/git/gitClient")>();
+  return { ...actual, probeGit: vi.fn(), GitClient: vi.fn() };
 });
-vi.mock("../src/cliClient", () => ({ GitSailCliClient: vi.fn() }));
 
-import { probeCliBinary } from "../src/cliLocator"; // eslint-disable-line import/order
-import { GitSailCliClient } from "../src/cliClient"; // eslint-disable-line import/order
+import { GitClient, probeGit } from "../src/git/gitClient"; // eslint-disable-line import/order
+import type { DiscoveryOutcome } from "../src/git/gitClient"; // eslint-disable-line import/order
 
-const probeCliBinaryMock = probeCliBinary as unknown as ReturnType<typeof vi.fn>;
-const GitSailCliClientMock = GitSailCliClient as unknown as ReturnType<typeof vi.fn>;
+const probeGitMock = probeGit as unknown as ReturnType<typeof vi.fn>;
+const GitClientMock = GitClient as unknown as ReturnType<typeof vi.fn>;
 
-const okProbe = { status: "ok" as const, command: "gitsail", source: "path" as const, version: { raw: "0.0.0", major: 0, minor: 0, patch: 0 } };
+const okProbe = { status: "ok" as const, version: "2.43.0" };
 
-function repositoryEnvelope(rootPath: string, branch: string): Envelope<unknown> {
+function repositoryOutcome(rootPath: string, branch: string): DiscoveryOutcome {
   return {
-    status: "ok",
-    schemaVersion: 1,
-    requestId: "req-1",
-    data: {
+    kind: "repository",
+    repository: {
       id: rootPath,
       rootPath,
       worktreePath: rootPath,
@@ -47,12 +46,7 @@ function repositoryEnvelope(rootPath: string, branch: string): Envelope<unknown>
   };
 }
 
-const notFoundEnvelope: Envelope<unknown> = {
-  status: "error",
-  schemaVersion: 1,
-  requestId: "req-1",
-  error: { code: "repository_not_found", message: "not a Git repository" },
-};
+const noRepositoryOutcome: DiscoveryOutcome = { kind: "no-repository" };
 
 /** A minimal, fully in-memory `ExtensionHost` double with test helpers to
  * fire each event this controller subscribes to (T-201/T-204's DoD:
@@ -81,7 +75,7 @@ class FakeHost implements ExtensionHost {
     },
   };
   outputChannelDisposeCalls = 0;
-  configValues: Record<string, string> = { binaryPath: "" };
+  configValues: Record<string, string> = {};
 
   private readonly editorListeners = new Set<(editor: TextEditorLike | undefined) => void>();
   private readonly folderListeners = new Set<() => void>();
@@ -148,32 +142,32 @@ function editorFor(path: string, opts: Partial<{ isDirty: boolean; isUntitled: b
 }
 
 describe("ExtensionController", () => {
-  let runMock: ReturnType<typeof vi.fn>;
+  let discoverMock: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
-    runMock = vi.fn();
-    // A plain function (not an arrow function) so `new GitSailCliClient(...)`
+    discoverMock = vi.fn();
+    // A plain function (not an arrow function) so `new GitClient(...)`
     // works: returning an object from a constructor call overrides `this`,
     // which arrow functions — never constructible — cannot do.
-    GitSailCliClientMock.mockImplementation(function () {
-      return { run: runMock };
+    GitClientMock.mockImplementation(function () {
+      return { discover: discoverMock };
     });
-    probeCliBinaryMock.mockReset();
-    probeCliBinaryMock.mockResolvedValue(okProbe);
+    probeGitMock.mockReset();
+    probeGitMock.mockResolvedValue(okProbe);
   });
 
   it("activation resolves the initial active editor's repository and shows it in the status bar", async () => {
     const host = new FakeHost();
     host.workspaceFolders = [{ uri: { fsPath: "/workspace/project" } }];
     host.activeTextEditor = editorFor("/workspace/project/src/main.rs");
-    runMock.mockResolvedValue(repositoryEnvelope("/workspace/project", "main"));
+    discoverMock.mockResolvedValue(repositoryOutcome("/workspace/project", "main"));
 
     const controller = new ExtensionController(host);
     await controller.activate();
 
     expect(host.statusBarItem.visible).toBe(true);
     expect(host.statusBarItem.text).toContain("main");
-    expect(runMock).toHaveBeenCalledWith(["open", "--repo", "/workspace/project"]);
+    expect(discoverMock).toHaveBeenCalledWith("/workspace/project");
   });
 
   it("switching the active folder in a multi-root workspace re-resolves against the newly active folder", async () => {
@@ -183,10 +177,9 @@ describe("ExtensionController", () => {
       { uri: { fsPath: "/workspace/b" } },
     ];
     host.activeTextEditor = editorFor("/workspace/a/file.ts");
-    runMock.mockImplementation(async (args: readonly string[]) => {
-      const root = args[2];
-      return repositoryEnvelope(root as string, root === "/workspace/a" ? "branch-a" : "branch-b");
-    });
+    discoverMock.mockImplementation(async (root: string) =>
+      repositoryOutcome(root, root === "/workspace/a" ? "branch-a" : "branch-b"),
+    );
 
     const controller = new ExtensionController(host);
     await controller.activate();
@@ -200,7 +193,7 @@ describe("ExtensionController", () => {
     const host = new FakeHost();
     host.workspaceFolders = [{ uri: { fsPath: "/workspace/plain-folder" } }];
     host.activeTextEditor = editorFor("/workspace/plain-folder/notes.txt");
-    runMock.mockResolvedValue(notFoundEnvelope);
+    discoverMock.mockResolvedValue(noRepositoryOutcome);
 
     const controller = new ExtensionController(host);
     await controller.activate();
@@ -209,9 +202,9 @@ describe("ExtensionController", () => {
     expect(host.warnings).toHaveLength(0);
 
     // Switching to a second file under the SAME folder must hit the cache,
-    // not the CLI again (US-068 criterion 3).
+    // not re-run discovery (US-068 criterion 3).
     host.changeActiveEditor(editorFor("/workspace/plain-folder/other.txt"));
-    await vi.waitFor(() => expect(runMock).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(discoverMock).toHaveBeenCalledTimes(1));
     expect(host.warnings).toHaveLength(0);
   });
 
@@ -219,55 +212,79 @@ describe("ExtensionController", () => {
     const host = new FakeHost();
     host.workspaceFolders = [{ uri: { fsPath: "/workspace/project" } }];
     host.activeTextEditor = editorFor("/elsewhere/other-repo/file.rs");
-    runMock.mockResolvedValue(repositoryEnvelope("/elsewhere/other-repo", "feature"));
+    discoverMock.mockResolvedValue(repositoryOutcome("/elsewhere/other-repo", "feature"));
 
     const controller = new ExtensionController(host);
     await controller.activate();
 
-    expect(runMock).toHaveBeenCalledWith(["open", "--repo", "/elsewhere/other-repo"]);
+    expect(discoverMock).toHaveBeenCalledWith("/elsewhere/other-repo");
     expect(host.statusBarItem.text).toContain("feature");
   });
 
-  it("no active editor at all resolves to no-context without ever calling the CLI", async () => {
+  it("no active editor at all resolves to no-context without ever querying git", async () => {
     const host = new FakeHost();
     host.activeTextEditor = undefined;
 
     const controller = new ExtensionController(host);
     await controller.activate();
 
-    expect(runMock).not.toHaveBeenCalled();
+    expect(discoverMock).not.toHaveBeenCalled();
     expect(host.statusBarItem.visible).toBe(false);
   });
 
-  it("an untrusted workspace with a configured binaryPath is blocked and warns exactly once across repeated editor switches", async () => {
-    probeCliBinaryMock.mockResolvedValue({ status: "blocked-untrusted" });
+  it("an untrusted workspace runs no git query at all, and warns exactly once across repeated editor switches", async () => {
+    // ADR-025 strengthened this gate. It used to block only a configured
+    // `gitsail.binaryPath` (PATH discovery still ran); with that setting
+    // gone, the remaining workspace-controlled input is the repository
+    // itself, and running git honors that repository's own configuration —
+    // so nothing runs until the workspace is trusted, which is what
+    // package.json's `untrustedWorkspaces` description already promised.
     const host = new FakeHost();
     host.isWorkspaceTrusted = false;
-    host.configValues.binaryPath = "/opt/gitsail/gitsail";
     host.workspaceFolders = [{ uri: { fsPath: "/workspace/project" } }];
     host.activeTextEditor = editorFor("/workspace/project/a.ts");
 
     const controller = new ExtensionController(host);
     await controller.activate();
     expect(host.warnings).toHaveLength(1);
+    expect(host.warnings[0]).toMatch(/not trusted/i);
+    expect(probeGitMock).not.toHaveBeenCalled();
+    expect(discoverMock).not.toHaveBeenCalled();
 
     host.changeActiveEditor(editorFor("/workspace/project/b.ts"));
     await vi.waitFor(() => expect(host.outputLines.length).toBeGreaterThan(1));
     expect(host.warnings).toHaveLength(1); // still just the one toast
-    expect(probeCliBinaryMock).toHaveBeenCalledTimes(1); // never re-probed for a plain editor switch
+    expect(discoverMock).not.toHaveBeenCalled(); // still nothing ran
 
-    // Granting trust re-probes and allows a fresh notification if the
-    // (now-trusted) binary still cannot be used.
-    probeCliBinaryMock.mockResolvedValue({ status: "not-found", command: "/opt/gitsail/gitsail" });
+    // Granting trust re-probes and allows a fresh notification if git
+    // still cannot be used.
+    probeGitMock.mockResolvedValue({ status: "not-found" });
     host.grantTrust();
     await vi.waitFor(() => expect(host.warnings).toHaveLength(2));
+    expect(host.warnings[1]).toMatch(/install git/i);
+  });
+
+  it("a trusted workspace where git is missing warns once with actionable guidance", async () => {
+    probeGitMock.mockResolvedValue({ status: "not-found" });
+    const host = new FakeHost();
+    host.workspaceFolders = [{ uri: { fsPath: "/workspace/project" } }];
+    host.activeTextEditor = editorFor("/workspace/project/a.ts");
+
+    const controller = new ExtensionController(host);
+    await controller.activate();
+
+    expect(host.warnings).toHaveLength(1);
+    expect(host.warnings[0]).toMatch(/install git/i);
+    expect(host.warnings[0]).toMatch(/PATH/);
+    expect(host.statusBarItem.visible).toBe(false);
+    expect(discoverMock).not.toHaveBeenCalled();
   });
 
   it("a dirty (unsaved) buffer logs an explicit disk-vs-buffer note", async () => {
     const host = new FakeHost();
     host.workspaceFolders = [{ uri: { fsPath: "/workspace/project" } }];
     host.activeTextEditor = editorFor("/workspace/project/dirty.ts", { isDirty: true });
-    runMock.mockResolvedValue(repositoryEnvelope("/workspace/project", "main"));
+    discoverMock.mockResolvedValue(repositoryOutcome("/workspace/project", "main"));
 
     const controller = new ExtensionController(host);
     await controller.activate();
@@ -280,10 +297,10 @@ describe("ExtensionController", () => {
     host.workspaceFolders = [{ uri: { fsPath: "/workspace/project" } }];
     host.activeTextEditor = editorFor("/workspace/project/main.rs");
 
-    let resolveRun!: (value: Envelope<unknown>) => void;
-    runMock.mockImplementation(
+    let resolveRun!: (value: DiscoveryOutcome) => void;
+    discoverMock.mockImplementation(
       () =>
-        new Promise<Envelope<unknown>>((resolve) => {
+        new Promise<DiscoveryOutcome>((resolve) => {
           resolveRun = resolve;
         }),
     );
@@ -291,9 +308,9 @@ describe("ExtensionController", () => {
     const controller = new ExtensionController(host);
     const activatePromise = controller.activate();
 
-    await vi.waitFor(() => expect(runMock).toHaveBeenCalled());
+    await vi.waitFor(() => expect(discoverMock).toHaveBeenCalled());
     controller.dispose();
-    resolveRun(repositoryEnvelope("/workspace/project", "late-branch"));
+    resolveRun(repositoryOutcome("/workspace/project", "late-branch"));
 
     await activatePromise;
 
@@ -325,27 +342,27 @@ describe("ExtensionController", () => {
     // its listener — asserting on the host's own bookkeeping proves that,
     // independently of the controller's internals.
     expect(() => host.changeActiveEditor(editorFor("/workspace/anything.ts"))).not.toThrow();
-    expect(runMock).not.toHaveBeenCalled();
+    expect(discoverMock).not.toHaveBeenCalled();
   });
 });
 
 describe("ExtensionController.onRepositoryContextChanged (EPIC-15's hook into repository binding)", () => {
-  let runMock: ReturnType<typeof vi.fn>;
+  let discoverMock: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
-    runMock = vi.fn();
-    GitSailCliClientMock.mockImplementation(function () {
-      return { run: runMock };
+    discoverMock = vi.fn();
+    GitClientMock.mockImplementation(function () {
+      return { discover: discoverMock };
     });
-    probeCliBinaryMock.mockReset();
-    probeCliBinaryMock.mockResolvedValue(okProbe);
+    probeGitMock.mockReset();
+    probeGitMock.mockResolvedValue(okProbe);
   });
 
   it("fires immediately with the current binding for a listener registered after activation", async () => {
     const host = new FakeHost();
     host.workspaceFolders = [{ uri: { fsPath: "/workspace/project" } }];
     host.activeTextEditor = editorFor("/workspace/project/src/main.rs");
-    runMock.mockResolvedValue(repositoryEnvelope("/workspace/project", "main"));
+    discoverMock.mockResolvedValue(repositoryOutcome("/workspace/project", "main"));
 
     const controller = new ExtensionController(host);
     await controller.activate();
@@ -360,7 +377,7 @@ describe("ExtensionController.onRepositoryContextChanged (EPIC-15's hook into re
     const host = new FakeHost();
     host.workspaceFolders = [{ uri: { fsPath: "/workspace/plain-folder" } }];
     host.activeTextEditor = editorFor("/workspace/plain-folder/notes.txt");
-    runMock.mockResolvedValue(notFoundEnvelope);
+    discoverMock.mockResolvedValue(noRepositoryOutcome);
 
     const controller = new ExtensionController(host);
     await controller.activate();
@@ -378,10 +395,9 @@ describe("ExtensionController.onRepositoryContextChanged (EPIC-15's hook into re
       { uri: { fsPath: "/workspace/b" } },
     ];
     host.activeTextEditor = editorFor("/workspace/a/file.ts");
-    runMock.mockImplementation(async (args: readonly string[]) => {
-      const root = args[2];
-      return repositoryEnvelope(root as string, root === "/workspace/a" ? "branch-a" : "branch-b");
-    });
+    discoverMock.mockImplementation(async (root: string) =>
+      repositoryOutcome(root, root === "/workspace/a" ? "branch-a" : "branch-b"),
+    );
 
     const controller = new ExtensionController(host);
     await controller.activate();
@@ -398,7 +414,7 @@ describe("ExtensionController.onRepositoryContextChanged (EPIC-15's hook into re
     const host = new FakeHost();
     host.workspaceFolders = [{ uri: { fsPath: "/workspace/project" } }];
     host.activeTextEditor = editorFor("/workspace/project/main.rs");
-    runMock.mockResolvedValue(repositoryEnvelope("/workspace/project", "main"));
+    discoverMock.mockResolvedValue(repositoryOutcome("/workspace/project", "main"));
 
     const controller = new ExtensionController(host);
     await controller.activate();

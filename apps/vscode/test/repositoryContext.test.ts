@@ -1,53 +1,60 @@
+// `RepositoryContextResolver`'s own resolution and caching logic.
+//
+// `resolveQueryRoot` is pure path arithmetic and its tests are unchanged
+// from before ADR-025 — it decides *where* to ask, and that decision never
+// involved the CLI.
+//
+// `resolve` did change: it no longer reads a `repository_not_found` code
+// out of a JSON envelope, it interprets `git rev-parse`'s exit status. The
+// three-way outcome it must produce is the same one it always had, so each
+// of those tests survives with the same name and the same meaning:
+//  - a real repository resolves to `repository`;
+//  - "no repository here" is a routine, silent answer, never an error;
+//  - anything else (git missing, unreadable output) is `git-unavailable`,
+//    which is what `cli-unavailable` was called when the thing that could
+//    be unavailable was the CLI.
+
 import { describe, expect, it, vi } from "vitest";
 
-import { CliNotFoundError } from "../src/cliErrors";
-import { Envelope } from "../src/protocol";
+import { GitClient } from "../src/git/gitClient";
+import { GitNotFoundError } from "../src/git/errors";
 import { RepositoryContextResolver } from "../src/repositoryContext";
+import { TempRepo } from "./support/tempRepo";
 
-/** A `GitSailCliClient`-shaped stub: these tests are about
- * `RepositoryContextResolver`'s own resolution/caching logic, never about
- * process spawning (that is `cliClient.test.ts`'s job) — so `run` is a
- * plain function double instead of a real client. */
-function stubClient(run: (args: readonly string[]) => Promise<Envelope<unknown>>) {
-  return { run: vi.fn(run) } as unknown as import("../src/cliClient").GitSailCliClient;
+/** A `GitClient`-shaped stub, for the tests that are about the resolver's
+ * caching rather than about Git itself (those use a real repository). */
+function stubClient(discover: GitClient["discover"]): GitClient {
+  return { discover: vi.fn(discover) } as unknown as GitClient;
 }
 
-const okEnvelope = (rootPath: string): Envelope<unknown> => ({
-  status: "ok",
-  schemaVersion: 1,
-  requestId: "req-1",
-  data: {
-    id: rootPath,
-    rootPath,
-    worktreePath: rootPath,
-    isBare: false,
-    headState: { state: "attached", branch: "main" },
-    currentBranch: "main",
-  },
-});
-
-const notFoundEnvelope: Envelope<unknown> = {
-  status: "error",
-  schemaVersion: 1,
-  requestId: "req-1",
-  error: { code: "repository_not_found", message: "not a Git repository" },
-};
+const anyRepository = async () =>
+  ({
+    kind: "repository" as const,
+    repository: {
+      id: "/repo",
+      rootPath: "/repo",
+      worktreePath: "/repo",
+      isBare: false,
+      headState: { state: "attached" as const, branch: "main" },
+      currentBranch: "main",
+    },
+  });
 
 describe("RepositoryContextResolver.resolveQueryRoot (US-068 criterion 2)", () => {
   it("resolves to nothing when there is no active document", () => {
-    const resolver = new RepositoryContextResolver(stubClient(async () => okEnvelope("/x")));
+    const resolver = new RepositoryContextResolver(stubClient(anyRepository));
     expect(resolver.resolveQueryRoot(undefined, [])).toBeUndefined();
   });
 
   it("resolves to nothing for a non-file document (e.g. untitled/output)", () => {
-    const resolver = new RepositoryContextResolver(stubClient(async () => okEnvelope("/x")));
+    const resolver = new RepositoryContextResolver(stubClient(anyRepository));
     expect(
       resolver.resolveQueryRoot({ scheme: "untitled", fsPath: "/whatever" }, []),
     ).toBeUndefined();
   });
 
   it("resolves nested files to their containing workspace folder, not the file itself", () => {
-    const resolver = new RepositoryContextResolver(stubClient(async () => okEnvelope("/x")));
+    const resolver = new RepositoryContextResolver(stubClient(anyRepository));
     const folders = [{ uri: { fsPath: "/workspace/project-a" } }];
     const root = resolver.resolveQueryRoot(
       { scheme: "file", fsPath: "/workspace/project-a/src/deep/file.ts" },
@@ -57,7 +64,7 @@ describe("RepositoryContextResolver.resolveQueryRoot (US-068 criterion 2)", () =
   });
 
   it("picks the correct folder in a multi-root workspace", () => {
-    const resolver = new RepositoryContextResolver(stubClient(async () => okEnvelope("/x")));
+    const resolver = new RepositoryContextResolver(stubClient(anyRepository));
     const folders = [
       { uri: { fsPath: "/workspace/project-a" } },
       { uri: { fsPath: "/workspace/project-b" } },
@@ -71,7 +78,7 @@ describe("RepositoryContextResolver.resolveQueryRoot (US-068 criterion 2)", () =
   });
 
   it("never confuses sibling folders with a shared name prefix", () => {
-    const resolver = new RepositoryContextResolver(stubClient(async () => okEnvelope("/x")));
+    const resolver = new RepositoryContextResolver(stubClient(anyRepository));
     const folders = [{ uri: { fsPath: "/workspace/project" } }];
     // "/workspace/project-2/file.ts" is NOT under "/workspace/project" even
     // though the string has it as a prefix — a naive `startsWith` check
@@ -84,7 +91,7 @@ describe("RepositoryContextResolver.resolveQueryRoot (US-068 criterion 2)", () =
   });
 
   it("resolves a file outside every workspace folder to its own directory", () => {
-    const resolver = new RepositoryContextResolver(stubClient(async () => okEnvelope("/x")));
+    const resolver = new RepositoryContextResolver(stubClient(anyRepository));
     const folders = [{ uri: { fsPath: "/workspace/project-a" } }];
     const root = resolver.resolveQueryRoot(
       { scheme: "file", fsPath: "/elsewhere/other-repo/file.ts" },
@@ -95,68 +102,76 @@ describe("RepositoryContextResolver.resolveQueryRoot (US-068 criterion 2)", () =
 });
 
 describe("RepositoryContextResolver.resolve (US-068 criteria 1 and 3)", () => {
-  it("returns a repository context on a valid ok envelope", async () => {
-    const resolver = new RepositoryContextResolver(stubClient(async () => okEnvelope("/repo")));
-    const context = await resolver.resolve("/repo");
-    expect(context).toEqual({
-      kind: "repository",
-      queryRoot: "/repo",
-      repository: (okEnvelope("/repo") as Envelope<unknown> & { status: "ok" }).data,
-    });
+  it("returns a repository context for a real repository", async () => {
+    const repo = TempRepo.create();
+    try {
+      repo.write("a.txt", "one\n");
+      repo.commit("first");
+      const resolver = new RepositoryContextResolver(new GitClient());
+
+      const context = await resolver.resolve(repo.root);
+
+      expect(context.kind).toBe("repository");
+      if (context.kind !== "repository") return;
+      expect(context.queryRoot).toBe(repo.root);
+      expect(context.repository.currentBranch).toBe("main");
+      expect(context.repository.isBare).toBe(false);
+    } finally {
+      repo.dispose();
+    }
   });
 
-  it("returns no-repository (never an error) for repository_not_found", async () => {
-    const resolver = new RepositoryContextResolver(stubClient(async () => notFoundEnvelope));
+  it("returns no-repository (never an error) for a directory that is not in a repository", async () => {
+    const resolver = new RepositoryContextResolver(
+      stubClient(async () => ({ kind: "no-repository" as const })),
+    );
     const context = await resolver.resolve("/not-a-repo");
     expect(context).toEqual({ kind: "no-repository", queryRoot: "/not-a-repo" });
   });
 
-  it("treats any other domain error as a CLI-level problem, not a routine no-repository", async () => {
-    const resolver = new RepositoryContextResolver(
-      stubClient(async () => ({
-        status: "error",
-        schemaVersion: 1,
-        requestId: "req-1",
-        error: { code: "git_not_installed", message: "git executable not found" },
-      })),
-    );
-    const context = await resolver.resolve("/repo");
-    expect(context.kind).toBe("cli-unavailable");
-  });
-
-  it("surfaces a thrown client-level error as cli-unavailable", async () => {
+  it("surfaces an environment-level failure as git-unavailable, not as a routine no-repository", async () => {
     const resolver = new RepositoryContextResolver(
       stubClient(async () => {
-        throw new CliNotFoundError("/opt/gitsail/gitsail");
+        throw new GitNotFoundError();
       }),
     );
     const context = await resolver.resolve("/repo");
-    expect(context.kind).toBe("cli-unavailable");
-    if (context.kind === "cli-unavailable") {
-      expect(context.error).toBeInstanceOf(CliNotFoundError);
+    expect(context.kind).toBe("git-unavailable");
+    if (context.kind === "git-unavailable") {
+      expect(context.error).toBeInstanceOf(GitNotFoundError);
     }
   });
 
-  it("caches by query root: a second resolve() for the same root never re-invokes the client", async () => {
-    const run = vi.fn(async () => okEnvelope("/repo"));
-    const resolver = new RepositoryContextResolver(stubClient(run));
+  it("caches by query root: a second resolve() for the same root never re-queries", async () => {
+    const discover = vi.fn(anyRepository);
+    const resolver = new RepositoryContextResolver(stubClient(discover));
 
     await resolver.resolve("/repo");
     await resolver.resolve("/repo");
 
-    expect(run).toHaveBeenCalledTimes(1);
+    expect(discover).toHaveBeenCalledTimes(1);
+  });
+
+  it("caches a no-repository answer too, so an unrelated folder is not re-queried on every focus change", async () => {
+    const discover = vi.fn(async () => ({ kind: "no-repository" as const }));
+    const resolver = new RepositoryContextResolver(stubClient(discover));
+
+    await resolver.resolve("/not-a-repo");
+    await resolver.resolve("/not-a-repo");
+
+    expect(discover).toHaveBeenCalledTimes(1);
   });
 
   it("queries independently per root, and invalidateAll() forces a fresh query", async () => {
-    const run = vi.fn(async () => okEnvelope("/repo"));
-    const resolver = new RepositoryContextResolver(stubClient(run));
+    const discover = vi.fn(anyRepository);
+    const resolver = new RepositoryContextResolver(stubClient(discover));
 
     await resolver.resolve("/repo-a");
     await resolver.resolve("/repo-b");
-    expect(run).toHaveBeenCalledTimes(2);
+    expect(discover).toHaveBeenCalledTimes(2);
 
     resolver.invalidateAll();
     await resolver.resolve("/repo-a");
-    expect(run).toHaveBeenCalledTimes(3);
+    expect(discover).toHaveBeenCalledTimes(3);
   });
 });

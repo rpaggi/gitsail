@@ -17,7 +17,7 @@ request and is not one of the required-for-merge checks below) — see
 | --- | --- | --- |
 | `rust` | ubuntu-latest, windows-latest, macos-latest (matrix) | `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`, `cargo build --workspace` — the whole Rust workspace: `gitsail-domain`, `gitsail-application`, `gitsail-git`, `gitsail-protocol`, `gitsail-cli` (the mandatory v0.1 baseline), plus `gitsail-tui`, `gitsail-test-support` and `apps/desktop/src-tauri` (already regular `[workspace] members` in the root `Cargo.toml`, so they build/test in this same job for free). |
 | `desktop` | ubuntu-latest only | `apps/desktop` frontend: `npm ci`, `npm run test -- --run` (Vitest), `npm run build` (`vue-tsc --noEmit && vite build`). |
-| `vscode` | ubuntu-latest only | `apps/vscode` extension: `npm ci`, `npx vitest run`, `npx tsc -p ./`. |
+| `vscode` | ubuntu-latest only | `apps/vscode` extension: `npm ci`, `npx vitest run`, `npx tsc -p ./`. Also installs the Rust toolchain — not to build anything Rust, but because ADR-025's parity suite compiles the real `gitsail` CLI to check the extension's Git reader against it, and that suite skips itself when `cargo` is missing. Relying on the runner image's preinstalled Rust would mean the mitigation could vanish silently. |
 | `architecture-fitness` | ubuntu-latest only | Runs `scripts/ci/check-architecture.sh` — see below. |
 | `dependency-audit` | ubuntu-latest only | `cargo audit`, `npm audit` (both apps) — **informative only**, see below. |
 
@@ -87,6 +87,31 @@ tool. Two checks today, corresponding to US-121 criterion 2:
    the known limitation that a plain grep cannot see `#[cfg(test)]`
    boundaries inside that one allowlisted file.
 
+   **Extended to TypeScript (ADR-025).** This check originally scanned only
+   `*.rs`, which made it a half-truth once a second language in the same
+   repository started doing the very thing the check constrains: when the
+   VS Code extension moved off the `gitsail` CLI and began reading Git
+   directly, it did so through a *gap in this script* rather than by
+   permission. The check now also scans `apps/**/*.ts` for a
+   `node:child_process` call whose command argument is the literal `"git"`,
+   with exactly one named exception — `apps/vscode/src/git/process.ts`, the
+   extension's single Git process boundary, documented in the script beside
+   the Rust exceptions. `**/test/**`, `*.test.ts`, `*.d.ts`,
+   `node_modules`, `out` and `dist` are skipped; the test skip is the same
+   concession `**/tests/**.rs` already gets on the Rust side, and for the
+   same reason — those suites deliberately drive a *real* `git` against
+   real temporary repositories, and forbidding that would push them toward
+   a mock `git`, which is precisely what lets an adapter drift unnoticed.
+   Same known limitation as the Rust half: it is a literal-string grep, so
+   a command held in a variable would not be flagged. It earns its keep
+   against the accident, not against concealment.
+
+   Both `find` walks also skip `.claude/worktrees/`, where an agent harness
+   may create additional local checkouts of this same repository. Those are
+   git-excluded scratch and absent in CI, but a repo-root `find` descends
+   into them and reports every legitimate `crates/gitsail-git` file inside
+   them as a violation, since their paths do not match the allowed prefix.
+
 The third criterion-2 check — an **explicit protocol** — is *not*
 reimplemented here: `SCHEMA_VERSION`/compatibility tests already exist from
 T-172/ADR-016 (`crates/gitsail-protocol/tests/compatibility.rs`,
@@ -140,7 +165,10 @@ Windows/macOS runners, nothing that can trigger a live workflow run. What
 - `scripts/ci/check-architecture.sh` — run directly (passes), and verified
   against a deliberately planted violation (a throwaway file calling
   `Command::new("git")` outside `crates/gitsail-git`) to confirm it actually
-  fails when it should, not just when it happens to.
+  fails when it should, not just when it happens to. The TypeScript half
+  added by ADR-025 was verified the same way, with a throwaway
+  `apps/vscode/src/*.ts` calling `execFile("git", ...)`: the check reports
+  it and exits non-zero, and passes again once the file is removed.
 - `.github/workflows/ci.yml`'s YAML syntax — validated two ways:
   `python3 -c "import yaml; yaml.safe_load(open(...))"` (parses cleanly),
   and `actionlint` (installed via `go install

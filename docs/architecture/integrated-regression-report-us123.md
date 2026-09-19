@@ -11,6 +11,21 @@ forge account or network access for a local Git flow? Each of the three
 acceptance criteria below is answered with concrete `file:line` evidence,
 not narrative.
 
+> **Update, 2026-09-19 — the VS Code rows below are superseded by ADR-025
+> (which supersedes ADR-015).** This report is kept as the historical record
+> of the T-256/US-123 pass and is deliberately *not* rewritten. Read it with
+> one correction: at the time of writing, the extension reached Git by
+> spawning a separately-installed `gitsail` CLI binary, which is what the
+> installation matrix's first row, the interruption matrix's `cliClient.test.ts`
+> cells, and every `coreParity.test.ts` citation describe. The extension now
+> reads Git directly in TypeScript (`apps/vscode/src/git/`, single process
+> boundary `process.ts`), so `cliLocator.ts`/`cliClient.ts` and their tests
+> no longer exist; locating and version-checking a `gitsail` binary is no
+> longer a concern at all, and the Core-vs-extension parity guard is now
+> `apps/vscode/test/gitParity.test.ts`. The `git`-itself-missing row, which
+> was the actually-shared installation dependency, is unaffected — and is
+> now the extension's *only* one.
+
 ## Criterion 1 — the same scenario produces an equivalent Git state in TUI/Desktop
 
 **Method.** Read-only inspection first: `crates/gitsail-tui/src/worker.rs::spawn_one`

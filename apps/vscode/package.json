@@ -1,7 +1,7 @@
 {
   "name": "gitsail-vscode",
   "displayName": "GitSail",
-  "description": "Git context in the editor, backed entirely by the gitsail CLI — never a second, editor-side implementation of Git.",
+  "description": "Git context in the editor — inline blame, commit details, file and line history — reading the Git you already have installed. No extra binary to install.",
   "version": "0.0.0",
   "private": true,
   "publisher": "gitsail",
@@ -30,12 +30,6 @@
     "configuration": {
       "title": "GitSail",
       "properties": {
-        "gitsail.binaryPath": {
-          "type": "string",
-          "default": "",
-          "markdownDescription": "Absolute path to the `gitsail` CLI executable. Only honored in a **trusted** workspace. Leave empty to discover `gitsail` on `PATH` — see this extension's README (\"Binary distribution\") for why v0.4 does not bundle a binary.",
-          "scope": "resource"
-        },
         "gitsail.blame.enabled": {
           "type": "boolean",
           "default": true,
@@ -146,7 +140,7 @@
   "capabilities": {
     "untrustedWorkspaces": {
       "supported": "limited",
-      "description": "GitSail repository context and CLI queries are unavailable until the workspace is trusted."
+      "description": "GitSail runs no Git query — and therefore shows no repository context, blame, or history — until the workspace is trusted, because reading a repository with git honors that repository's own configuration."
     }
   },
   "scripts": {

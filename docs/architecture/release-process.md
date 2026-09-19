@@ -137,7 +137,8 @@ changes, and where, the next time this decision is revisited.
 
 ## Registered decision: VS Code Marketplace / Open VSX stay unpublished
 
-**Decision (ADR-023, extending ADR-015):** the `.vsix` built by this
+**Decision (ADR-023, originally extending ADR-015 — see ADR-025, which
+superseded ADR-015 and made the `.vsix` self-contained):** the `.vsix` built by this
 pipeline is attached to the GitHub Release and is the **official
 installation path today** — "Extensions" view → "..." menu → "Install from
 VSIX..." → pick the downloaded file (or `code --install-extension

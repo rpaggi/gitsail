@@ -91,9 +91,11 @@ same GitHub Release feed and show whether a newer tag exists — see
 - The VS Code extension is not published to the Marketplace or Open VSX —
   a deliberate, registered decision (ADR-023), not a gap. The `.vsix` this
   pipeline builds, installed via "Install from VSIX...", is the official
-  path for now. It still does not bundle a `gitsail` binary (ADR-015
-  unchanged) — the user installs the CLI separately, e.g. from this same
-  release's CLI/TUI archive.
+  path for now. There is nothing else to install alongside it: since
+  ADR-025 (supersedes ADR-015) the extension reads Git directly in
+  TypeScript rather than shelling out to a `gitsail` binary, so the
+  `.vsix` is self-contained and its only requirement is the user's own
+  Git ≥ 2.31 on `PATH`.
 - **No code signing or notarization** — Windows/macOS installers and
   binaries from this pipeline are unsigned; both OSes will show an
   unrecognized-publisher warning on first run. Recorded explicitly in
@@ -134,7 +136,7 @@ are noted as such:
 | Protocol envelope, cursor, and request correlation | **Resolved for v0.1** — `schemaVersion: 1`, `requestId`, and `nextCursor`/`hasMore` pagination are implemented and covered by compatibility tests (`docs/architecture/protocol-compatibility.md`). |
 | Desktop state management and preferences persistence | **Resolved** — Pinia stores plus JSON-file-backed preferences/keybindings/recent-repositories stores exist and are tested (see `troubleshooting.md`'s configuration-files table). |
 | Filesystem watcher | **Resolved as "not built, by design"** — manual refresh (on focus and after every mutation) is mandatory and implemented in every interface; an automatic filesystem watcher remains optional and is not implemented. This is a stated scope cut, not a gap. |
-| VS Code extension binary distribution | **Resolved** — the extension deliberately does not bundle a binary (ADR-015); see `vscode.md`. |
+| VS Code extension binary distribution | **Resolved — the question no longer has a subject.** ADR-025 (supersedes ADR-015) removed the extension's CLI dependency entirely: it reads Git directly in TypeScript (`apps/vscode/src/git/`), so there is no GitSail binary to bundle, discover, or version-check, and no `gitsail.binaryPath` setting. The `.vsix` is self-contained and needs only the user's own Git ≥ 2.31 on `PATH`; see `vscode.md`. |
 | **Submodules: in scope for v1.0, or explicitly post-v1.0?** | **Still open.** No code anywhere in this workspace implements submodule awareness (a single incidental code comment about diff type-changes is the only mention of the word in the whole codebase). The backlog states plainly that no story promises full submodule support and that expanding scope would need a PRD review and new story IDs — that review has not happened. Treat submodules as unsupported until this is explicitly decided. |
 | **Exact GitHub/GitLab host/scope boundaries beyond what's built** | **Partially open.** Read-only PR/MR listing is implemented and scoped (title/state/author/branches only); creating a PR/MR is deferred (see T-246 above). Which additional hosts/self-hosted instances are officially supported has not been separately delimited beyond what the existing adapters already handle. |
 | **IPC/daemon transport and a plugin policy** | **Open, but explicitly not urgent.** No daemon/IPC transport exists (the protocol's own version-compatibility scaffolding was deliberately built to be ready for one, see `protocol-compatibility.md`), and no plugin system or policy exists. The backlog itself states neither is a dependency for v1.0 — this is future evolution, not a v1.0 gap. |

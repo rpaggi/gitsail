@@ -160,10 +160,12 @@ None of these three gained any update-check code in this story:
   surface analogous to Desktop's `AppState`/`PreferencesPort` to hang a
   "check automatically" toggle and its throttle timestamp off of, and no
   natural place to show a persistent notice the way a GUI's sidebar can.
-- **The VS Code extension** already has its own, different kind of check —
-  `cliLocator.ts`'s `MINIMUM_SUPPORTED_CLI_VERSION` probe (ADR-015) — but
-  that verifies the *installed CLI binary* is new enough, it does not ask
-  GitHub whether a newer release exists.
+- **The VS Code extension** has no version check of any kind. It used to
+  probe a separately-installed CLI binary's version before running a
+  query, but ADR-025 (supersedes ADR-015) removed the CLI dependency
+  altogether — the extension now reads Git directly in TypeScript, so
+  there is no second GitSail artifact whose version could disagree with
+  it, and nothing that asks GitHub whether a newer release exists.
 
 Extracting `gitsail_application::update_check::CheckForUpdate` into these
 three surfaces later is not architecturally blocked — the use case is

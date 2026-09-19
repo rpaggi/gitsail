@@ -7,7 +7,7 @@
 
 ## ADR Index
 
-This document holds both the Software Architecture Document (§1–§38) and every Architecture Decision Record (after §38), in one file, by original design. This index exists so all 24 ADRs are accessible with their status from the top of the document, without scrolling past the SAD body first (T-264/US-131 criterion 2). All 24 are `Accepted`; none has been superseded or rejected as of this writing.
+This document holds both the Software Architecture Document (§1–§38) and every Architecture Decision Record (after §38), in one file, by original design. This index exists so all 25 ADRs are accessible with their status from the top of the document, without scrolling past the SAD body first (T-264/US-131 criterion 2). 24 are `Accepted`; ADR-015 is `Superseded by ADR-025` — the first superseded decision in this document, kept in place with its original text and a dated revision note, per `CONTRIBUTING.md`'s rule that an ADR is never deleted or renumbered.
 
 | ADR | Title | Status | Summary |
 | --- | --- | --- | --- |
@@ -25,7 +25,7 @@ This document holds both the Software Architecture Document (§1–§38) and eve
 | [ADR-012](#adr-012--cli-json-before-daemonipc) | CLI JSON before daemon/IPC | Accepted | Use CLI JSON as the first cross-process transport; revisit a local daemon/IPC later. |
 | [ADR-013](#adr-013--clap-for-cli-argument-parsing) | clap for CLI argument parsing | Accepted | `clap` (derive API) for `gitsail-cli`; usage errors keep clap's own exit code `2`, distinct from domain-error codes. |
 | [ADR-014](#adr-014--protocol-envelope-correlation-and-cursor-shape) | Protocol envelope, correlation and cursor shape | Accepted | `Envelope<T>` tagged by `status`, always carrying `schemaVersion` and `requestId`; opaque `nextCursor`/`hasMore` pagination. |
-| [ADR-015](#adr-015--vs-code-binary-distribution-for-v04) | VS Code binary distribution for v0.4 | Accepted | The extension discovers `gitsail`/`gitsail.exe` on `PATH` or an explicit setting, and verifies its version before use — no bundled binary. |
+| [ADR-015](#adr-015--vs-code-binary-distribution-for-v04) | VS Code binary distribution for v0.4 | Superseded by [ADR-025](#adr-025--the-vs-code-extension-reads-git-directly-and-no-longer-depends-on-the-gitsail-binary) | The extension discovered `gitsail`/`gitsail.exe` on `PATH` or an explicit setting, and verified its version before use — no bundled binary. The extension no longer uses that binary at all. |
 | [ADR-016](#adr-016--protocol-compatibility-policy-and-contract-tests) | Protocol compatibility policy and contract tests | Accepted | `SCHEMA_VERSION` bump policy: bump only for a change an existing consumer could misinterpret; additive changes don't bump it. |
 | [ADR-017](#adr-017--tracing-for-structured-local-logging-with-centralized-redaction) | `tracing` for structured local logging, with centralized redaction | Accepted | Adopt `tracing` as the structured logging facade; one process-wide subscriber, stderr only, never raw stdout/stderr content. |
 | [ADR-018](#adr-018--local-first-privacy-telemetry-opt-in-and-crash-report-consent) | Local-first privacy: telemetry opt-in and crash-report consent | Accepted | GitSail v0.1–v1.0 sends no telemetry and no crash report, period; verified by the absence of any network client dependency. |
@@ -35,6 +35,7 @@ This document holds both the Software Architecture Document (§1–§38) and eve
 | [ADR-022](#adr-022--multi-platform-ci-and-architectural-fitness-functions) | Multi-platform CI and architectural fitness functions | Accepted | `.github/workflows/ci.yml`'s five jobs (`rust` matrix, `desktop`, `vscode`, `architecture-fitness`, `dependency-audit`) and what each one checks. |
 | [ADR-023](#adr-023--github-releases-only-distribution-no-code-signing-or-marketplaceopen-vsx-publishing-yet) | GitHub Releases-only distribution; no code signing or Marketplace/Open VSX publishing yet | Accepted | `.github/workflows/release.yml` builds CLI/TUI archives, Desktop installers, and a VS Code `.vsix` on every `vX.Y.Z` tag, checksums them, and publishes a GitHub Release — signing/notarization and Marketplace/Open VSX publishing are deliberately deferred, pending external certificate/account resources. |
 | [ADR-024](#adr-024--desktop-update-checking-is-check-only-never-an-auto-installer-and-the-running-release-tag-is-embedded-at-build-time) | Desktop update checking is check-only, never an auto-installer; the running release tag is embedded at build time | Accepted | Desktop asks GitHub Releases whether a newer tag exists and shows it with a link and `SHA256SUMS.txt` — it never downloads or installs anything. `build.rs` embeds `RELEASE_TAG` as `GITSAIL_APP_VERSION` so a running build can know its own version despite ADR-021 pinning Cargo/`tauri.conf.json` at `0.0.0`. CLI/TUI/VS Code get no update check in this story. |
+| [ADR-025](#adr-025--the-vs-code-extension-reads-git-directly-and-no-longer-depends-on-the-gitsail-binary) | The VS Code extension reads Git directly, and no longer depends on the `gitsail` binary | Accepted | Supersedes ADR-015 and amends ADR-012/§16 for the VS Code boundary: the extension reads `git` itself through `apps/vscode/src/git/`, needs no GitSail binary and no `gitsail.binaryPath`, and accepts a small, read-only, parity-tested reimplementation as the cost of a self-contained `.vsix`. |
 
 **On ever splitting this document:** if the SAD and its ADRs are ever separated into different files (e.g. one file per ADR, or a `docs/architecture/adrs/` directory), the original text of every section and every ADR must be preserved verbatim, and ADR numbers must not be reassigned or reused — see `CONTRIBUTING.md`'s "Updating PRD/SAD/ADRs" section for the exact rule this index exists to keep enforceable. Nothing about that split needs to happen now; this paragraph only documents that the door stays open.
 
@@ -378,16 +379,19 @@ Longer term, a local daemon/IPC transport may be introduced without changing the
 
 ## 16. VS Code architecture
 
+> **Update (ADR-025, 2026-09-19):** this section originally described the extension as a consumer of the Core over CLI JSON, owning no Git parsing of any kind. That is no longer true, and the text below is the current arrangement. ADR-025 records why the boundary moved and what it costs; ADR-015 (superseded) records the arrangement this replaced.
+
 ```text
 VS Code Extension (TypeScript)
           |
-   GitSail Client
+   apps/vscode/src/git/
+   (seven read-only queries,
+    DTOs identical to gitsail-protocol's)
           |
- CLI JSON initially
+ apps/vscode/src/git/process.ts
+   (the one process boundary)
           |
- gitsail-protocol
-          |
- Application/Core
+        git
 ```
 
 The extension owns:
@@ -396,12 +400,14 @@ The extension owns:
 - commands
 - configuration
 - editor lifecycle
+- **reading Git for its own six read-only commands** (ADR-025): repository discovery, blame, commit history/file history, single-commit detail, commit diff, line history, and file contents at a revision
 
 It does not own:
-- Git log parsing
-- blame parsing
-- repository discovery rules
-- Git mutation semantics
+- Git mutation semantics — the extension is read-only, and every write path stays exclusively in the Rust core
+- the DTO shapes it produces: `apps/vscode/src/dto.ts` stays field-for-field identical to `gitsail-protocol`'s, and `apps/vscode/test/gitParity.test.ts` enforces that against the real `gitsail` CLI
+- the policies those DTOs encode, which are reproduced from the Core rather than re-invented (a commit diff's base is the empty tree for a root commit and the first parent otherwise; an all-zero blame hash means an uncommitted line)
+
+This is a deliberate, bounded exception to the "one core" rule the rest of this document describes, not a general licence: no other client reads Git itself, and this one does so only for reads. See ADR-025's Consequences for the drift risk it accepts and the three bounds that make it acceptable.
 
 ## 17. Desktop architecture
 
@@ -961,6 +967,10 @@ Use CLI JSON as the first cross-process transport. Revisit local daemon/IPC when
 ### Consequences
 Simple distribution and debugging initially, at the cost of process startup overhead.
 
+### Revision — 2026-09-19 (amended for the VS Code boundary by ADR-025)
+
+Still in force for every other cross-process consumer, and the "revisit a local daemon/IPC later" question remains open exactly as stated. What changed is the motivating case: this ADR's Context names VS Code as the consumer that needed access to the Rust core, and VS Code is no longer such a consumer. ADR-025 moved the extension onto `git` directly, so it speaks neither CLI JSON nor any other cross-process transport to GitSail — it consumes no envelope and no `schemaVersion`. Nothing here is retracted; the decision simply no longer applies to the boundary that prompted it.
+
 ## ADR-013 — clap for CLI argument parsing
 
 **Status:** Accepted
@@ -989,7 +999,7 @@ Consumers (the CLI's own `--json` mode today, VS Code/Desktop later) branch on `
 
 ## ADR-015 — VS Code binary distribution for v0.4
 
-**Status:** Accepted
+**Status:** Superseded by [ADR-025](#adr-025--the-vs-code-extension-reads-git-directly-and-no-longer-depends-on-the-gitsail-binary)
 
 ### Context
 EPIC-14/US-070 requires a registered decision on how the VS Code extension obtains the `gitsail-cli` binary it depends on (ADR-012), before the extension is packaged for v0.4. Two options exist: bundle a per-platform `gitsail-cli` build inside the `.vsix`, or require the user to install `gitsail` separately (PATH or an explicit configured path). EPIC-25 (Distribution & Updates) — the epic that would define a signed, per-OS/arch release pipeline — has not shipped at this point in the roadmap (v0.4), so there is no artifact this extension could bundle with verifiable origin.
@@ -999,6 +1009,14 @@ For v0.4, the VS Code extension does not bundle a `gitsail-cli` binary. It disco
 
 ### Consequences
 Users must install `gitsail` themselves before the extension is useful — a real onboarding cost, documented in `apps/vscode/README.md`. In exchange, the extension never silently trusts or executes a binary of unknown origin. This decision is revisited once EPIC-25 defines a signed-artifact pipeline the extension can safely embed per platform.
+
+### Revision — 2026-09-19 (superseded by ADR-025)
+
+Superseded in full. The Context and Decision above are preserved verbatim as the record of what was decided and why; none of it describes the extension as it ships today.
+
+What changed is not the reasoning but the conclusion it reached. This ADR framed the question as "which binary does the extension obtain, and how does it verify it," and answered it from the distribution side. The onboarding cost named in Consequences above turned out, in use, to be the extension's entire first impression — a fresh `.vsix` install does nothing but report that `gitsail.exe` could not be found. ADR-025 rejects the framing instead of re-answering the question: a read-only editor integration needs no GitSail binary, because it can read `git` directly the way comparable extensions do. The third option this ADR did not have available — bundle a per-platform binary — was reconsidered and explicitly declined for the reasons ADR-025 records.
+
+`gitsail.binaryPath`, the `--version` compatibility probe, and `MINIMUM_SUPPORTED_CLI_VERSION` no longer exist. Nothing in this ADR is a live constraint; read ADR-025 for the arrangement in force.
 
 ## ADR-016 — Protocol compatibility policy and contract tests
 
@@ -1012,6 +1030,8 @@ ADR-014 fixed the envelope's JSON shape and named `schemaVersion` as the mechani
 2. `crates/gitsail-protocol/tests/dto_wire_shape.rs` pins the exact serialized shape of one representative DTO per `#[serde(...)]` pattern in use, so a silent wire-shape change (e.g. dropping a `rename_all`, changing a `tag`) fails a test at the point of change rather than shipping unnoticed — forcing whoever touches a DTO to consciously apply policy 1.
 3. `gitsail_protocol::compat` (`parse_envelope`, `SUPPORTED_SCHEMA_VERSIONS`, `EnvelopeDecodeError`) gives Rust the same two-phase, reject-before-reading-`data` guard `protocol.ts` already has, for any future Rust consumer that crosses an independently-versioned process boundary (a daemon/IPC transport per ADR-012's "open" item). Today's in-process Rust consumers (TUI, Desktop) do not call it: neither crosses such a boundary — see `docs/architecture/protocol-compatibility.md`'s evaluation.
 4. `docs/architecture/protocol-compatibility.md` records, per release, which `schemaVersion`(s) each component (`gitsail-cli`, VS Code, TUI, Desktop) supports, and points at the fixtures in `docs/architecture/fixtures/protocol-compatibility/` shared by the Rust (`crates/gitsail-protocol/tests/compatibility.rs`, `crates/gitsail-cli/tests/protocol_compatibility.rs`) and TypeScript (`apps/vscode/test/protocolCompatibility.test.ts`) compatibility suites, including one real-producer/real-consumer end-to-end test and one hypothetical-incompatible-version rejection test.
+
+> **Update (ADR-025, 2026-09-19):** the TypeScript half of decision 4 no longer exists. `apps/vscode/test/protocolCompatibility.test.ts` and `apps/vscode/src/protocol.ts` were deleted when the VS Code extension stopped consuming the CLI's JSON envelope — it reads `git` directly and crosses no envelope boundary, so it is no longer a protocol consumer and has no `schemaVersion` to check. Everything else in this ADR stands unchanged: the policy, `dto_wire_shape.rs`, `gitsail_protocol::compat`, the shared fixtures and both Rust suites are untouched, and they remain the guard for `gitsail-cli` and for any future consumer that does cross such a boundary.
 
 ### Consequences
 Changing a DTO's wire shape now fails a fast, local test instead of only surfacing when a mismatched client/CLI pair meets in the field. The matrix and fixtures are release artifacts a maintainer updates deliberately (documented in the matrix's own "when this table must change" section) rather than being inferred after the fact. No actual schema change ships with this decision — `SCHEMA_VERSION` stays `1`; the hypothetical incompatible fixture (`unsupported-v2.json`) is explicitly synthetic, invented only to exercise the rejection path.
@@ -1146,6 +1166,28 @@ T-260/US-127 (EPIC-25 — Distribution & Updates) asks GitSail to let a user "up
 
 ### Consequences
 Positive: a GitSail Desktop user now knows when a newer release exists, with a verifiable origin and a checksum, without GitSail ever needing to be trusted with silent code execution — this is exactly the integrity story ADR-023's own no-signing decision can honestly support today. The ADR-021 "which version am I" gap is closed with a small, targeted build-time mechanism rather than a workaround. Trade-off: this is meaningfully less convenient than a real auto-updater (the person still downloads and runs an installer by hand, and still sees the OS's unsigned-publisher warning ADR-023 already documents) — accepted deliberately, the same way ADR-023 accepted the signing warning, rather than building a false sense of "handled automatically" on top of an unsigned channel. CLI/TUI/VS Code staying without any check is a real, stated scope gap (not a silent one) — a future story can extract `gitsail_application::update_check`'s use case into those surfaces once each has a natural home for the "check automatically" preference and its own throttle state.
+
+## ADR-025 — The VS Code extension reads Git directly, and no longer depends on the `gitsail` binary
+
+**Status:** Accepted — supersedes [ADR-015](#adr-015--vs-code-binary-distribution-for-v04); amends [ADR-012](#adr-012--cli-json-before-daemonipc) and §16 for the VS Code boundary only
+
+### Context
+ADR-015 decided that the VS Code extension would not bundle a `gitsail-cli` binary, and would instead discover one on `PATH` or read a `gitsail.binaryPath` setting, verifying its version before use. That decision was reasoned from the *distribution* side — EPIC-25 had not shipped, so there was no signed artifact to embed — and it was correct on those terms. What it did not weigh is what the arrangement costs the person installing the extension. In practice a user installs the `.vsix` and gets:
+
+> Could not run the GitSail CLI ("gitsail.exe"). Install gitsail so it is on your PATH, or set the "gitsail.binaryPath" setting to its full path.
+
+That is the extension's entire behavior until a second, separately-downloaded, platform-matched, unsigned executable is installed and located. ADR-015's own Consequences section names this ("a real onboarding cost") and accepts it as the price of never executing a binary of unknown provenance. The judgement being revised here is not that reasoning but its conclusion: for a read-only editor integration, the price is too high, and it buys less than it appears to. Every comparable extension — GitLens is the reference point — reads Git directly and requires nothing beyond the Git the user already has. ADR-023 (GitHub-Releases-only, no signing) means the binary ADR-015 asks users to fetch is itself unsigned, so the provenance the arrangement protects is weaker than it sounds; meanwhile the extension already, unavoidably, causes `git` to run — it simply did so one process further away.
+
+The alternative of bundling a per-platform binary in the `.vsix` was considered and explicitly declined: it would make the artifact platform-specific, re-raise everything ADR-023 defers about signing and notarization, and still leave the extension shipping an executable it cannot verify.
+
+### Decision
+1. **The VS Code extension reads Git directly, in TypeScript, and depends on no GitSail binary at all.** A new data-access module, `apps/vscode/src/git/`, implements the seven read-only queries the extension's six commands need — repository discovery, blame, commit history/file history, single-commit detail, commit diff, line history, and file contents at a revision — against `git` itself. `src/cliClient.ts`, `src/cliLocator.ts`, `src/cliErrors.ts`, `src/cliResult.ts` and `src/protocol.ts` are deleted rather than left in place behind a flag: keeping both backends would double the surface that can disagree, for no gain. The `gitsail.binaryPath` setting is removed. The extension's only external requirement is now `git` on `PATH` — the same `git` the person already uses.
+2. **`apps/vscode/src/git/process.ts` is the single process boundary, held to the same bar as `crates/gitsail-git/src/runner.rs`.** Never a shell; argv arrays only; `--` before every user-controlled path and `--end-of-options` before every revision; a timeout and `AbortSignal` cancellation on every query (the blame path is debounced and re-fired on cursor movement, so an abandoned query is killed rather than left running); captured output capped at 8 MiB per stream; and `git`'s stderr redacted through a TypeScript port of `gitsail_domain::redact` before it can reach a message, a hover or a log line. Every other file under `src/git/` is a pure parser that is handed a string. `scripts/ci/check-architecture.sh` enforces this: its "only designated modules may invoke the `git` binary" check now scans `apps/**/*.ts` as well as `*.rs`, with this one file as a named, commented exception.
+3. **The DTOs stay identical to `gitsail-protocol`'s, and a parity test keeps them honest.** `apps/vscode/src/dto.ts` is unchanged: the new module *produces* the same shapes the CLI's JSON envelope used to deliver, so the presentation layer, its tests, and the UX are untouched. `apps/vscode/test/gitParity.test.ts` builds the real `gitsail` CLI and requires it and `src/git/` to return equal DTOs for the same temporary repository — covering discovery, commit metadata (including git's variable-length `%h` abbreviation), blame line-by-line, file history, and the diff of root, ordinary and renamed commits. It skips itself where no Rust toolchain exists, matching the `vscode` CI job's Node-only design.
+4. **Workspace trust now gates every Git query, not just a configured path.** Previously only `gitsail.binaryPath` was trust-gated, because that setting could arrive from a `.vscode/settings.json` someone else committed. With the setting gone, the remaining workspace-controlled input is the repository itself, and running `git` in a repository honors that repository's own configuration. The extension therefore runs nothing until the workspace is trusted — which is what its `capabilities.untrustedWorkspaces` description in `package.json` already told users, and did not previously do.
+
+### Consequences
+Positive: installing the `.vsix` is now sufficient — no second download, no PATH surgery, no `gitsail.binaryPath`, no platform-matched artifact, and no per-query process launch of a second GitSail binary. The `.vsix` becomes platform-independent, which also removes the extension from the set of artifacts ADR-023's signing deferral affects. Trade-off, stated plainly because it is the real cost of this decision and not a detail: **the extension now contains a second implementation of a slice of Git reading, in a second language, which can drift from the Rust core — and preventing exactly that is why the "one core" architecture (ADR-001, ADR-002, ADR-012) exists.** A blame porcelain parser, a unified-diff parser and a `git log` record parser now exist in both `crates/gitsail-git` and `apps/vscode/src/git`, and a fix applied to one will not reach the other by itself. That cost is accepted on three grounds, each of which is a real bound and not a reassurance: the slice is **read-only** (no mutation semantics, no locking, no credential handling is duplicated — a drift here shows the user something wrong, it cannot corrupt a repository); it is **small and closed** (seven queries, fixed by the six commands the extension contributes, not a growing surface); and it is **tested against the core rather than in isolation** (decision 3), so a divergence fails a test instead of shipping. The honest residual risk is that the parity test only covers what it enumerates: a Git output shape neither implementation has met — an exotic patch format, an unusual encoding — can still be handled differently by the two, and nothing will notice until a user reports it. If this slice ever needs to grow beyond reading, or the parity suite starts needing a case added for every bug found in the field, that is the signal to revisit this ADR rather than to keep extending the TypeScript implementation.
 
 # 39. Open architecture decisions
 

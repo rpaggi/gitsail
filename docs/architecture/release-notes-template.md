@@ -2,7 +2,7 @@ Prebuilt binaries and installers for this release:
 
 - **CLI + TUI**: `gitsail-<tag>-linux-x86_64.tar.gz`, `gitsail-<tag>-windows-x86_64.zip`, `gitsail-<tag>-macos-aarch64.tar.gz` (Apple Silicon only for now — see "Known gaps" in `docs/architecture/release-process.md`). Requires a separately installed Git ≥ 2.31 on `PATH` — each archive includes a `README.txt` with per-OS install instructions.
 - **Desktop**: `.deb` / `.AppImage` (Linux), `.msi` / NSIS `.exe` (Windows), `.dmg` / `.app.zip` (macOS).
-- **VS Code extension**: `gitsail-vscode-<tag>.vsix` — install via VS Code's "Extensions: Install from VSIX..." command. Requires the `gitsail` CLI from this same release (or built from source) discoverable on `PATH`, or configured via the `gitsail.binaryPath` setting.
+- **VS Code extension**: `gitsail-vscode-<tag>.vsix` — install via VS Code's "Extensions: Install from VSIX..." command. Self-contained: it reads Git directly and needs nothing from this release but itself — the only requirement is a separately installed Git ≥ 2.31 on `PATH` (ADR-025, which supersedes ADR-015).
 
 **Verify before you run anything**: download `SHA256SUMS.txt` from this same release and confirm it against the asset(s) you downloaded (`sha256sum -c SHA256SUMS.txt` on Linux/macOS, or `Get-FileHash` on Windows).
 

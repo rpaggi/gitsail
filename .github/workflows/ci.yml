@@ -142,6 +142,18 @@ jobs:
           cache: npm
           cache-dependency-path: apps/vscode/package-lock.json
 
+      # ADR-025's parity suite (apps/vscode/test/gitParity.test.ts) builds
+      # the real `gitsail` CLI and requires it and the extension's own Git
+      # reader to agree, DTO for DTO. That suite skips itself when `cargo`
+      # is absent, so without this step it would quietly stop running the
+      # moment a runner image dropped its preinstalled Rust — and ADR-025's
+      # one mitigation against the extension drifting from the core would
+      # be gone with no failure to show for it.
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
       - run: npm ci
       - run: npx vitest run
       - run: npx tsc -p ./

@@ -1,9 +1,9 @@
-// File history browsing (T-207/US-074). Wraps `gitsail log --path <file>`
-// (US-018, already delivered) — this module never walks history itself,
-// it only assembles the query and types the paginated result.
+// File history browsing (T-207/US-074). Shapes the query and types the
+// paginated result; the `git log` invocation and its parsing live in
+// `git/gitClient.ts`.
 
-import { GitSailCliClient } from "./cliClient";
-import { CliResult, runCli } from "./cliResult";
+import { GitClient } from "./git/gitClient";
+import { GitResult, runGitQuery } from "./git/result";
 import { CommitDto, PageDto } from "./dto";
 
 export interface FileHistoryQuery {
@@ -16,9 +16,8 @@ export interface FileHistoryQuery {
   revision?: string;
   cursor?: string;
   limit?: number;
-  /** `false` stops history at rename boundaries (mirrors `gitsail log
-   * --no-follow`); defaults to following renames, matching the CLI's own
-   * default (US-074 criterion 3: a file's history survives its own
+  /** `false` stops history at rename boundaries; defaults to following
+   * renames (US-074 criterion 3: a file's history survives its own
    * renames). */
   followRenames?: boolean;
 }
@@ -26,24 +25,19 @@ export interface FileHistoryQuery {
 export type FileHistoryPage = PageDto<CommitDto>;
 
 export function getFileHistoryPage(
-  client: GitSailCliClient,
+  client: GitClient,
   query: FileHistoryQuery,
-): Promise<CliResult<FileHistoryPage>> {
-  const args: string[] = ["log", "--repo", query.repoRoot];
-  if (query.revision) {
-    args.push(query.revision);
-  }
-  args.push("--path", query.filePath);
-  if (query.limit !== undefined) {
-    args.push("--limit", String(query.limit));
-  }
-  if (query.cursor !== undefined) {
-    args.push("--cursor", query.cursor);
-  }
-  if (query.followRenames === false) {
-    args.push("--no-follow");
-  }
-  return runCli<FileHistoryPage>(client, args);
+): Promise<GitResult<FileHistoryPage>> {
+  return runGitQuery(() =>
+    client.getFileHistoryPage({
+      repoRoot: query.repoRoot,
+      filePath: query.filePath,
+      revision: query.revision,
+      cursor: query.cursor,
+      limit: query.limit,
+      followRenames: query.followRenames,
+    }),
+  );
 }
 
 export type FileHistoryOutcome =

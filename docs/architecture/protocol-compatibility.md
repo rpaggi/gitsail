@@ -16,20 +16,24 @@ together:
 
 | | What it identifies | Where it lives | Checked by |
 |---|---|---|---|
-| `schemaVersion` | The shape of one `Envelope<T>` on the wire | `gitsail_protocol::SCHEMA_VERSION` | `gitsail_protocol::parse_envelope` (Rust), `parseEnvelope`/`SUPPORTED_SCHEMA_VERSIONS` (`apps/vscode/src/protocol.ts`) |
-| `gitsail-cli` binary version | The CLI executable's own release version | `Cargo.toml` (`gitsail-cli`, currently `0.0.0` workspace-wide — ADR-013) | `apps/vscode/src/cliLocator.ts`'s `MINIMUM_SUPPORTED_CLI_VERSION` probe (ADR-015) |
+| `schemaVersion` | The shape of one `Envelope<T>` on the wire | `gitsail_protocol::SCHEMA_VERSION` | `gitsail_protocol::parse_envelope` (Rust) — the only runtime check that exists today |
+| `gitsail-cli` binary version | The CLI executable's own release version | `Cargo.toml` (`gitsail-cli`, currently `0.0.0` workspace-wide — ADR-013) | Nothing in this repository, since ADR-025 removed the VS Code extension's minimum-CLI-version probe along with its CLI dependency |
 
-A binary can be new enough per `cliLocator.ts` and still emit a
-`schemaVersion` a given extension build does not speak (or vice versa,
-once the CLI has a real release cadence ahead of `SCHEMA_VERSION` changes).
-The two checks are independent and both required.
+The two numbers still move independently — a binary can be new enough and
+still emit a `schemaVersion` a given consumer does not speak, or vice
+versa, once the CLI has a real release cadence ahead of `SCHEMA_VERSION`
+changes. What changed with ADR-025 (which supersedes ADR-015) is only
+*who* has to check: GitSail itself no longer runs the CLI from any of its
+own interfaces, so both checks now matter to an **external** consumer
+scripting `gitsail --json`, and to a future daemon/IPC transport, rather
+than to a shipped GitSail component.
 
 ## Supported `schemaVersion` per component, v0.4
 
 | Component | Role | Crosses an independently-versioned process boundary? | Supported `schemaVersion`(s) |
 |---|---|---|---|
 | `gitsail-cli` (`crates/gitsail-cli`) | Producer — the only thing that writes an `Envelope` to the outside world today | Yes — its stdout is read by other processes | Produces `1` (`gitsail_protocol::SCHEMA_VERSION`) |
-| VS Code extension (`apps/vscode`) | Consumer, over CLI JSON (ADR-012, ADR-015) | Yes — spawns a separately-installed `gitsail` binary | `[1]` (`SUPPORTED_SCHEMA_VERSIONS` in `apps/vscode/src/protocol.ts`) |
+| VS Code extension (`apps/vscode`) | **No longer a consumer** — since ADR-025 (supersedes ADR-015) it reads Git directly in TypeScript (`apps/vscode/src/git/`, single process boundary `process.ts`) instead of parsing `gitsail-cli` JSON | No — it never spawns `gitsail`; it spawns the user's own `git`, whose output is not an `Envelope` | Not applicable — the extension parses no envelope and pins no `schemaVersion`. Its DTO shape is instead held to the Rust core's by `apps/vscode/test/gitParity.test.ts` |
 | TUI (`crates/gitsail-tui`) | N/A — calls `gitsail-application`/`gitsail-domain` directly | No — single binary, one `Cargo.lock`, never links `gitsail-protocol` | Not applicable (SAD §18) |
 | Desktop (`apps/desktop`) | N/A on the wire — Tauri commands return `gitsail-protocol` DTOs straight to the Vue webview over Tauri's own IPC, not a `gitsail-cli`-produced `Envelope` | No — frontend and backend ship as one signed app build | Not applicable today (SAD §17); would need `schemaVersion` if/when Desktop's IPC is versioned independently of its Rust backend |
 | Future daemon/IPC transport (ADR-012, "open architecture decisions" §39) | Producer and/or consumer | Yes, by construction | Not built yet — `gitsail_protocol::parse_envelope`/`SUPPORTED_SCHEMA_VERSIONS` exist specifically so this transport has a ready-made runtime check instead of inventing one later |
@@ -48,10 +52,12 @@ invent this check from scratch — see its module doc comment.
 
 ## Compatibility fixtures
 
-`docs/architecture/fixtures/protocol-compatibility/` holds the payloads
-both the Rust and TypeScript compatibility suites assert against, so the
-two languages check the same bytes instead of two hand-maintained copies
-drifting apart:
+`docs/architecture/fixtures/protocol-compatibility/` holds the payloads the
+compatibility suites assert against, so every consumer checks the same
+bytes instead of hand-maintained copies drifting apart. (These fixtures
+were originally shared with a TypeScript half in `apps/vscode`; that half
+went away with ADR-025, and the fixtures are now exercised from Rust
+only.)
 
 - `ok-v1.json`, `error-v1.json` — a real `gitsail status --json` shape
   under `schemaVersion: 1`, the version this repository currently
@@ -77,15 +83,13 @@ See that directory's `README.md` for the exact rationale, and:
   `gitsail_protocol::parse_envelope` as consumer, plus one hand-crafted
   unsupported-version rejection (the real producer cannot yet emit an
   incompatible version, by this story's own design).
-- `apps/vscode/test/protocolCompatibility.test.ts` — the TypeScript half of
-  the same fixture-based contract, via `parseEnvelope`.
 
 ## When this table must change
 
 Whenever `SCHEMA_VERSION` moves (per the policy in `envelope.rs`), or a
-component's supported-version list changes (e.g. an extension release
-drops support for an old `schemaVersion`, or the CLI starts producing a
-new one before all consumers have caught up):
+component's supported-version list changes (e.g. a consumer drops support
+for an old `schemaVersion`, or the CLI starts producing a new one before
+all consumers have caught up):
 
 1. Update the relevant "supported `schemaVersion`(s)" cell(s) above.
 2. Add a new `docs/architecture/fixtures/protocol-compatibility/*.json`

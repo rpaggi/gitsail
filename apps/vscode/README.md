@@ -2,9 +2,10 @@
 
 EPIC-14 — VS Code Foundation (US-068–US-071) plus EPIC-15 — Blame & History
 (US-072–US-077). This extension gives VS Code repository context, inline
-blame, and commit/file/line history by asking the `gitsail-cli` process, and
-nothing else — it never re-implements Git detection, log parsing, diffing,
-or blame parsing on the extension side (SAD §16, ADR-007).
+blame, and commit/file/line history by reading the `git` you already have
+installed — like GitLens does. There is no GitSail binary to install and
+nothing to configure: install the `.vsix` and it works (ADR-025, which
+supersedes ADR-015).
 
 ## Installation (T-259/US-126)
 
@@ -26,35 +27,46 @@ publish`/`ovsx publish`. See
 Marketplace / Open VSX stay unpublished" section for the exact checklist to
 follow once those accounts exist.
 
-This extension also does not bundle the `gitsail` CLI itself — see "Binary
-distribution" below for why, and install `gitsail` separately from the same
-GitHub Release (or build it from source).
+**Requirements:** `git` on the `PATH` VS Code sees, and a trusted
+workspace. Nothing else — in particular, **no `gitsail` binary**. (Before
+ADR-025 this extension required a separately installed `gitsail` CLI and a
+`gitsail.binaryPath` setting; both are gone.)
 
 ## Architecture
 
 ```
 VS Code Extension (TypeScript)
           |
-   GitSail Client        (src/cliClient.ts — one process per query,
-          |                envelope/schemaVersion validated, US-069)
- CLI JSON initially
-          |
- gitsail-protocol         (src/protocol.ts, src/dto.ts — hand mirrors)
-          |
- Application/Core
+   src/git/              (seven read-only queries; produces the DTOs in
+          |                src/dto.ts, identical to gitsail-protocol's)
+   src/git/process.ts    (the ONE module allowed to spawn `git`:
+          |                no shell, argv arrays, timeout, cancellation,
+          |                capped output, redacted stderr)
+        git
 ```
+
+ADR-025 moved this boundary. The extension used to spawn `gitsail-cli` and
+parse its JSON envelope; it now reads `git` itself. The DTOs did not change,
+which is why every presentation module below is untouched — and
+`test/gitParity.test.ts` runs the real `gitsail` CLI side by side with
+`src/git/` and requires identical DTOs, so this second implementation
+cannot drift from the Rust core unnoticed. That drift risk, and the bounds
+that make it acceptable, are stated in full in ADR-025's Consequences.
 
 Module map (see each file's own doc comment for the acceptance criterion it
 implements):
 
 | File | Story | Responsibility |
 |---|---|---|
-| `src/protocol.ts` | US-069 | Envelope/schemaVersion validation — mirrors `gitsail-protocol`. |
-| `src/dto.ts` | US-069 | Hand-mirrored DTO shapes (currently just `RepositoryDto`). |
-| `src/cliClient.ts` | US-069 | Spawns `gitsail-cli --json`, one process per query; timeout/cancel/cleanup. |
-| `src/cliErrors.ts` | US-069 | Typed client-level failure hierarchy (never a domain error). |
-| `src/cliLocator.ts` | US-070 | Resolves and verifies the binary (PATH vs. configured path; version check). |
-| `src/repositoryContext.ts` | US-068 | Associates the active file with its repository via `gitsail open`. |
+| `src/dto.ts` | US-069 | The DTO shapes every presentation module consumes — field-for-field identical to `gitsail-protocol`'s. |
+| `src/git/process.ts` | ADR-025 | **The one module that spawns `git`.** No shell, argv arrays, timeout, `AbortSignal` cancellation, 8 MiB output cap, redacted stderr. Allowlisted by name in `scripts/ci/check-architecture.sh`. |
+| `src/git/gitClient.ts` | ADR-025 | The seven read-only queries: argument assembly (`--` before paths, `--end-of-options` before revisions) plus DTO construction. |
+| `src/git/parseCommit.ts` | ADR-025 | `git log`/`git show -s` record parsing (`%x1f`/`%x1e`-delimited), timestamps, decorations. Pure. |
+| `src/git/parseBlame.ts` | ADR-025 | `git blame --porcelain` parsing, including the repeated-header/omitted-metadata trap. Pure. |
+| `src/git/parseDiff.ts` | ADR-025 | Unified-patch parsing into `DiffDto`, with a per-file hunk cap. Pure. |
+| `src/git/redact.ts` | ADR-025 | TypeScript port of `gitsail_domain::redact` — keeps a credential-bearing URL in `git`'s stderr out of any message or log. Pure. |
+| `src/git/errors.ts` / `src/git/result.ts` | ADR-025 | Typed failure hierarchy and the `GitResult` wrapper; a cancelled query is never reported as a failure. |
+| `src/repositoryContext.ts` | US-068 | Associates the active file with its repository via `git rev-parse`. |
 | `src/workspaceTrust.ts` | US-071 | Wraps `vscode.workspace.isTrusted`/`onDidGrantWorkspaceTrust`. |
 | `src/documentState.ts` | US-071 | Classifies unsaved-buffer vs. on-disk state. |
 | `src/hostTypes.ts` / `src/controller.ts` | all four | The testable orchestration layer, decoupled from the real `vscode` module. |
@@ -66,7 +78,7 @@ implements):
 |---|---|---|
 | `src/blameFormat.ts` | US-072 | Config parsing (`gitsail.blame.*`) and pure text formatting for one blame line — never invents an author for an uncommitted line or a dirty buffer. |
 | `src/blamePlan.ts` | US-072 | Decides which lines get a decoration (current-line vs. all-visible-lines) from a full `BlameDto`. |
-| `src/blameService.ts` | US-072 | `gitsail blame` wrapper plus client-side caches (blame per content-version, commit subjects by hash). |
+| `src/blameService.ts` | US-072 | Blame wrapper plus client-side caches (blame per content-version, commit subjects by hash), and the cancellation that kills an abandoned debounced query. |
 | `src/hoverSanitizer.ts` | US-073 | Markdown escaping for repository text, plus `HoverContentBuilder.addCommandLink`'s scoped-trust command links — the security boundary preventing a malicious commit message from becoming an executable hover link. |
 | `src/commitDetailsUri.ts` / `src/commitDetailsText.ts` | US-073 | `gitsail-commit:` read-only virtual document (plain text, not Markdown) showing one commit's full details. |
 | `src/commitService.ts` | US-073/US-076 | `gitsail commit` / `gitsail commit-diff` / `gitsail show-file` wrappers. |
@@ -175,85 +187,77 @@ installs without carrying years of unrelated API baggage.
 
 ## Configuration
 
-- `gitsail.binaryPath` (string, default `""`): absolute path to the
-  `gitsail` executable. Only honored in a **trusted** workspace (see
-  "Workspace trust" below). Leave empty to discover `gitsail`/`gitsail.exe`
-  on `PATH`.
+No configuration is required. The extension's own settings are
+`gitsail.blame.*` (inline blame appearance and behavior) and
+`gitsail.desktop.path` (the optional "Open in GitSail Desktop" handoff).
 
-## Binary distribution (US-070 criterion 2)
+`gitsail.binaryPath` **no longer exists** (ADR-025). If you still have it in
+a `settings.json` from an earlier version, VS Code will flag it as an
+unknown setting; it is safe to delete.
 
-**Decision, registered before v0.4 packaging:** this extension does **not**
-bundle a per-platform `gitsail-cli` binary in v0.4. It requires the user to
-install `gitsail` themselves (the same binary EPIC-08 ships for the CLI/TUI)
-and either put it on `PATH` or point `gitsail.binaryPath` at it.
+## Requirements (ADR-025, superseding ADR-015)
 
-**Why:** at the time ADR-015 was accepted, EPIC-25 (Distribution & Updates)
-had not shipped any release pipeline at all. As of T-257 (US-124), a real
-pipeline now exists (`.github/workflows/release.yml`, ADR-023) and produces
-checksummed CLI/TUI archives per OS — but those archives are still
-**unsigned** (ADR-023 is an explicit "GitHub Releases only, no code signing
-yet" decision), and this extension's own `.vsix` is built and versioned by
-a separate job in that same pipeline, not bundled together with the CLI.
-Embedding an unsigned CLI binary inside the extension package would still
-undermine US-070 criterion 3 ("origin/version are verifiable; no silent
-download/execution of an untrusted file") in spirit — the extension would
-be trusting a binary bundled at `.vsix`-build time rather than one the user
-consciously installed and can verify (checksum, or a future signature)
-independently. Requiring an explicit, user-controlled install — from this
-same GitHub Release's CLI/TUI archive, or built from source — keeps that
-verification meaningful.
+Just `git`, on the `PATH` the VS Code process sees. The extension runs
+`git --version` once to confirm that, and reports a single, actionable
+message if it cannot — it never falls back to some other way of reading a
+repository.
 
-The full writeup lives in `docs/architecture/GitSail_SAD_and_ADRs_v0.1.md`,
-**ADR-015 — VS Code binary distribution for v0.4** and **ADR-023 — GitHub
-Releases-only distribution**. Revisit this decision once a code-signing
-pipeline exists for the CLI binary specifically.
-
-**Verification, not blind trust (criterion 3):** before ever calling
-`gitsail open`/etc., the extension spawns `<binary> --version`, parses the
-result, and compares it against a minimum supported version
-(`MINIMUM_SUPPORTED_CLI_VERSION` in `src/cliLocator.ts`). A missing binary,
-an unrecognized `--version` output (most likely a different program at that
-path), or a version below the minimum are all distinct, clearly reported
-states — none of them fall back to any alternate Git parsing.
+Before ADR-025, this section explained why the extension deliberately did
+not bundle a `gitsail-cli` binary and required you to install one yourself.
+That arrangement is gone: a read-only editor integration does not need a
+GitSail binary, and requiring one made a freshly installed `.vsix` do
+nothing but report that `gitsail.exe` was not found. Bundling a
+per-platform binary instead was considered and declined — see ADR-025 for
+the full reasoning, including the drift risk this decision accepts in
+exchange.
 
 ## Workspace trust (US-071 criterion 2)
 
 US-071 also depends on US-110 (EPIC-22 — Security & Safety), which has no
 corresponding epic/task in the board yet. Rather than block on that, this
 extension implements criterion 2 directly against VS Code's own native
-workspace trust API: an untrusted workspace's `gitsail.binaryPath` setting
-is never read (`src/cliLocator.ts::resolveBinaryCommand`), and the extension
-surfaces a clear, one-time notice instead of silently ignoring the setting.
-If/when US-110 defines a broader security policy, `src/workspaceTrust.ts`
-is the one place that would grow to also honor it.
+workspace trust API.
+
+**ADR-025 strengthened this gate.** Previously only a configured
+`gitsail.binaryPath` was trust-gated, since that setting could arrive from a
+`.vscode/settings.json` someone else committed; PATH-based discovery still
+ran. With that setting gone, the workspace-controlled input that remains is
+the repository itself — and running `git` in a repository honors that
+repository's own configuration. So the extension now runs **no Git query at
+all** until the workspace is trusted, surfacing one clear notice instead.
+That is what `package.json`'s `capabilities.untrustedWorkspaces`
+description always promised users, and now actually does. If/when US-110
+defines a broader security policy, `src/workspaceTrust.ts` is the one place
+that would grow to also honor it.
 
 ## Unsaved buffers (US-071 criterion 3)
 
-`gitsail-cli` only ever reads what is actually saved on disk. `src/documentState.ts` classifies the active document's dirty/saved state, and the
+`git` only ever reads what is actually saved on disk. `src/documentState.ts` classifies the active document's dirty/saved state, and the
 controller logs an explicit note whenever the active file has unsaved
-changes, instead of silently presenting CLI results as if they described
+changes, instead of silently presenting results as if they described
 the in-editor buffer. EPIC-15 attaches that same fact to concrete UI: blame
 decoration hovers (`blameFormat.ts`) and the line-history command
 (`lineHistoryService.ts`) both surface it as an explicit disclaimer instead
 of a silent, possibly-misleading result — see "Known limitations" above.
 
-## `gitsail-cli` commands this extension relies on (EPIC-15)
+## The seven Git queries this extension makes (ADR-025)
 
-EPIC-15 added four `gitsail-cli` subcommands the Core did not expose before
-(their underlying application use cases — `GetCommit`, `GetCommitDiff`,
-`GetLineHistory` — already existed; only the CLI/protocol surface was
-missing), plus a brand-new Core capability (`file_content`) added
-specifically for this epic:
+All read-only. Every one lives in `src/git/gitClient.ts`; nothing else in
+the package runs a process.
 
-- `gitsail commit <revision>` — a single commit's full details (US-073).
-- `gitsail commit-diff <revision>` — a commit's diff against its correctly
-  resolved base (root commit → empty tree, merge → first parent), never
-  re-derived on the extension side (US-076 criterion 1).
-- `gitsail line-history <file> --range START-END [--revision REV]` —
-  commit-level history of a line range (US-075).
-- `gitsail show-file <file> --revision REV` — a file's full content as of a
-  revision, returning `{kind: "text"|"binary"|"missing", ...}` — backs the
-  read-only historical documents above (US-076 criterion 3).
+| Query | Plumbing | Notes |
+|---|---|---|
+| Repository discovery | `git rev-parse --is-bare-repository --absolute-git-dir`, then `--show-toplevel` | Two calls, because `--show-toplevel` fails outright in a bare repository. |
+| Blame | `git blame --porcelain` | An all-zero hash means an uncommitted line, reported as `origin: "local"` — never given a fabricated author. |
+| File history | `git log --follow --pretty=format:…` | `%x1f`/`%x1e` separators that cannot occur in commit data; offset cursor, same as `gitsail log`'s. |
+| Single commit | `git show -s --format=…` | Same format string as the file-history query. |
+| Commit diff | `git diff <base> <target> -M -U3 --no-ext-diff` | `git show --patch` would print *nothing* for a merge; diffing the resolved first parent is the only form that implements the root→empty-tree / merge→first-parent policy. |
+| Line history | `git log -L <start>,<end>:<file>` | The revision is resolved to a real commit up front, so the result names what it actually traced. |
+| File at a revision | `git show <rev>:<path>` | Returns `{kind: "text"｜"binary"｜"missing"}`; binary and missing are values, never errors. |
+
+The corresponding `gitsail-cli` subcommands (`gitsail commit`,
+`commit-diff`, `line-history`, `show-file`) still exist and are still the
+Core's own surface — this extension simply no longer calls them.
 
 ## Testing
 
@@ -264,13 +268,26 @@ npm run build   # tsc -p ./
 npm test        # vitest run — unit + contract tests, no real vscode module
 ```
 
-All business logic (`protocol.ts`, `dto.ts`, `cliClient.ts`, `cliLocator.ts`,
-`repositoryContext.ts`, `workspaceTrust.ts`, `documentState.ts`,
-`controller.ts`) is covered by Vitest, either as pure unit tests or as
-contract tests against a real spawned process (`test/fixtures/fake-cli.js`,
-a small Node script standing in for `gitsail-cli`, mirroring
-`crates/gitsail-cli/tests/fixtures/fake-git`'s existing pattern in the Rust
-CLI's own integration tests).
+All business logic is covered by Vitest. Since ADR-025 the data-access
+suites run against **real temporary Git repositories** built by
+`test/support/tempRepo.ts` — never a mock `git`. That is a deliberate
+change of approach: a stub could faithfully reproduce a JSON envelope the
+CLI produced, but it can only ever emit the `git` output its author already
+believed `git` emits, and the bugs worth catching here are exactly the
+cases where that belief is wrong. This mirrors what `gitsail-test-support`
+already does on the Rust side.
+
+- `test/gitProcess.test.ts` — the process boundary: no shell, timeout,
+  cancellation, capped output, redacted stderr.
+- `test/gitClient.test.ts` — all seven queries against real repositories,
+  including bare/unborn/detached repositories, renames, merges, binary
+  files and uncommitted blame lines.
+- `test/gitParity.test.ts` — builds the real `gitsail` CLI and requires it
+  and `src/git/` to produce identical DTOs. Skips itself where `cargo` is
+  absent, matching the Node-only `vscode` CI job.
+- The controller suites keep using in-memory doubles, since they are about
+  orchestration (debounce, generation guards, quick-pick flow) rather than
+  about Git.
 
 ### Real extension-host test — sandbox limitation
 

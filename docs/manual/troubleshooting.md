@@ -69,7 +69,7 @@ The concrete files, as of this writing:
 | Desktop | Theme | `<OS config dir>/gitsail/desktop/preferences.json` |
 | Desktop | Keyboard shortcut overrides | `<OS config dir>/gitsail/desktop/keybindings.json` |
 | Desktop | Recent repositories | `<OS config dir>/gitsail/desktop/recent-repositories.json` |
-| VS Code | All `gitsail.*` settings (`gitsail.binaryPath`, `gitsail.blame.*`, `gitsail.desktop.path`) | VS Code's own `settings.json` (Settings UI, or `Ctrl/Cmd+,` → open as JSON) — GitSail contributes configuration keys to VS Code's existing store; it does not keep a separate file. VS Code itself keeps that file under its own per-OS user-data directory. |
+| VS Code | All `gitsail.*` settings (`gitsail.blame.*`, `gitsail.desktop.path`) | VS Code's own `settings.json` (Settings UI, or `Ctrl/Cmd+,` → open as JSON) — GitSail contributes configuration keys to VS Code's existing store; it does not keep a separate file. VS Code itself keeps that file under its own per-OS user-data directory. |
 
 `<OS config dir>` is whatever the OS-native config directory convention
 resolves to for the account running GitSail (e.g. `~/.config` on Linux,
@@ -129,14 +129,12 @@ never downloads or installs anything on your behalf. Concretely:
 - **VS Code extension**: the pipeline builds a checksummed `.vsix`
   (`docs/architecture/release-process.md`), installed via "Install from
   VSIX..." — still not published to the Marketplace or Open VSX (a
-  deliberate decision, ADR-023 — see `vscode.md`), and it still does not
-  bundle or fetch a `gitsail` binary on your behalf (ADR-015, unchanged).
-  What *is* implemented is a **verification** check, not an update
-  mechanism: before running any query, the extension spawns `<binary>
-  --version` and compares it against a minimum supported version, so a
-  too-old or unrecognized binary is reported clearly instead of silently
-  misbehaving — this checks compatibility, it does not fetch or install
-  anything, and there is no check against GitHub Releases either; check
+  deliberate decision, ADR-023 — see `vscode.md`). Since ADR-025
+  (supersedes ADR-015) the extension no longer runs a `gitsail` binary at
+  all: it reads Git directly in TypeScript, so there is **nothing to
+  install alongside the `.vsix`** and no CLI version to keep in step with
+  it. Its only requirement is the same `git` you already have on `PATH`.
+  There is no update check of any kind either — check
   https://github.com/rpaggi/gitsail/releases yourself.
 
 If you need a newer GitSail, rebuild/reinstall from source, or download the
@@ -181,17 +179,19 @@ See `docs/architecture/protocol-compatibility.md` for the full matrix and
 its compatibility-test inventory. Summary:
 
 - **`schemaVersion`** (the shape of the JSON envelope `gitsail-cli --json`
-  produces) is currently `1`, understood by the VS Code extension's
-  `SUPPORTED_SCHEMA_VERSIONS`. The TUI and Desktop never cross this boundary
-  at all — they call `gitsail-application`/`gitsail-domain` directly from
-  the same compiled binary, so Rust's own type system is the compatibility
-  check for them, not a runtime schema negotiation.
+  produces) is currently `1`. Nothing in this repository consumes it at
+  runtime today: the TUI and Desktop never cross that boundary at all —
+  they call `gitsail-application`/`gitsail-domain` directly from the same
+  compiled binary, so Rust's own type system is the compatibility check for
+  them — and since ADR-025 (supersedes ADR-015) the VS Code extension
+  reads Git directly in TypeScript instead of parsing CLI JSON, so it is
+  no longer a protocol consumer either. `schemaVersion` remains the
+  contract for anything outside this repository that scripts
+  `gitsail --json`, and for a future daemon/IPC transport.
 - **The `gitsail-cli` binary version** is a separate concern from
-  `schemaVersion` — the VS Code extension checks it independently via
-  `cliLocator.ts`'s `MINIMUM_SUPPORTED_CLI_VERSION` probe (see "Updates"
-  above). A binary can be new enough on that check and still, in principle,
-  emit a `schemaVersion` a given extension build does not speak; both
-  checks exist and are both required.
+  `schemaVersion`, and no GitSail component checks another's version at
+  runtime any more — the extension's old minimum-CLI-version probe went
+  away with the CLI dependency itself (ADR-025).
 - **Minimum Git version**: 2.31 (the floor GitSail's Git adapter actually
   needs, derived from the literal CLI arguments it passes — see ADR-021 and
   the root `README.md`'s Requirements section). **Rust MSRV**: 1.97.0,
@@ -223,11 +223,19 @@ SLA for every machine.
 3. **The TUI/CLI reports `GitNotInstalled` or an unsupported Git version** —
    install/upgrade Git to at least 2.31, or pass `--git-path` to point at a
    specific executable.
-4. **The VS Code extension reports the binary is missing/incompatible** —
-   install a `gitsail` build meeting `cliLocator.ts`'s minimum version and
-   either put it on `PATH` or set `gitsail.binaryPath` (trusted workspaces
-   only).
-5. **A destructive operation you didn't intend to run** — this should be
+4. **The VS Code extension reports that `git` could not be found** — since
+   ADR-025 the extension runs `git` itself, so it needs Git ≥ 2.31 on the
+   `PATH` **VS Code sees**, which is not always the shell's: an editor
+   launched from a desktop launcher (or a GUI login on macOS/Linux)
+   inherits the session environment, not your `.zshrc`/`.bashrc`. Restart
+   VS Code from a terminal where `git --version` works, or install Git
+   system-wide, and reload the window.
+5. **The VS Code extension shows nothing at all in a folder you just
+   opened** — check whether the workspace is trusted. The extension issues
+   **no** Git query whatsoever until you trust the workspace ("Manage
+   Workspace Trust" in the Command Palette); this is deliberate, since
+   every query spawns `git` against repository-controlled paths.
+6. **A destructive operation you didn't intend to run** — this should be
    structurally impossible: every `Moderate`/`Destructive` mutation, in
    every interface, always requires an explicit confirmation step first,
    and declining it leaves the repository completely untouched. If you ever

@@ -20,8 +20,14 @@ could quietly drift apart.
 Consumers:
 - Rust: `crates/gitsail-protocol/tests/compatibility.rs` (via
   `gitsail_protocol::parse_envelope`).
-- TypeScript: `apps/vscode/test/protocolCompatibility.test.ts` (via
-  `parseEnvelope` from `apps/vscode/src/protocol.ts`).
+- TypeScript: none. There was one — `apps/vscode/test/protocolCompatibility.test.ts`,
+  via `parseEnvelope` from `apps/vscode/src/protocol.ts` — and both files
+  were deleted by ADR-025, when the VS Code extension stopped consuming the
+  CLI's JSON envelope and began reading `git` directly. It crosses no
+  envelope boundary now, so there is nothing on that side to hold to this
+  contract. These fixtures are still shared, and still exist to be shared:
+  the next consumer that does cross such a boundary reads them from here
+  rather than inventing its own copy.
 
 See `docs/architecture/protocol-compatibility.md` for the supported-version
 matrix these fixtures back, and `crates/gitsail-protocol/src/envelope.rs`'s

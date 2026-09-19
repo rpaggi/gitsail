@@ -11,11 +11,8 @@ import {
   QuickPickItemLike,
   UriLike,
 } from "../src/historyHostTypes";
-import { Envelope } from "../src/protocol";
-
-function envelope<T>(data: T): Envelope<T> {
-  return { status: "ok", schemaVersion: 1, requestId: "req-1", data };
-}
+import { GitClient } from "../src/git/gitClient";
+import { BlameDto, CommitDiffDto, CommitDto, FileContentDto, LineHistoryDto, PageDto } from "../src/dto";
 
 class FakeHistoryHost implements HistoryHost {
   activeTextEditor: HistoryTextEditorLike | undefined;
@@ -147,8 +144,33 @@ function editorFor(
 
 const REPO_ROOT = "/repo";
 
-function makeClient(run: (args: readonly string[]) => Promise<Envelope<unknown>>) {
-  return { run: vi.fn(run) } as unknown as import("../src/cliClient").GitSailCliClient;
+/** ADR-025: the controller no longer speaks an argv/envelope protocol to a
+ * `gitsail` binary — it calls typed `GitClient` methods that resolve to a
+ * DTO or throw. A stub is therefore just the subset of those methods a
+ * given test's code path actually reaches. */
+function makeClient(overrides: Partial<Record<keyof GitClient, unknown>>): GitClient {
+  return overrides as unknown as GitClient;
+}
+
+/** `CommitDto` is total (twelve required fields); tests only ever care
+ * about one or two of them, so the rest get deterministic defaults here
+ * rather than being repeated at every call site. */
+function commitDto(partial: Partial<CommitDto> = {}): CommitDto {
+  return {
+    hash: "0".repeat(40),
+    shortHash: "00000000",
+    parents: [],
+    author: { name: "Ada", email: "a@x.com" },
+    committer: { name: "Ada", email: "a@x.com" },
+    authorDate: { secondsSinceEpoch: 0, utcOffsetMinutes: 0 },
+    commitDate: { secondsSinceEpoch: 0, utcOffsetMinutes: 0 },
+    subject: "subject",
+    body: "",
+    decorations: [],
+    isMerge: false,
+    isRoot: false,
+    ...partial,
+  };
 }
 
 describe("HistoryController: blame decorations (T-205/US-072)", () => {
@@ -163,18 +185,21 @@ describe("HistoryController: blame decorations (T-205/US-072)", () => {
   it("debounces recompute and decorates only the current line by default", async () => {
     const host = new FakeHistoryHost();
     host.configValues = { "blame.delayMs": 100 };
-    const client = makeClient(async (args) =>
-      args[0] === "blame"
-        ? envelope({
-            file: "a.ts",
-            revision: null,
-            lines: [
-              { finalLine: 1, originalLine: 1, commit: "a".repeat(40), author: { name: "Ada", email: "a@x.com" }, timestamp: { secondsSinceEpoch: 0, utcOffsetMinutes: 0 }, content: "x", origin: "committed" },
-              { finalLine: 2, originalLine: 2, commit: "b".repeat(40), author: { name: "Bob", email: "b@x.com" }, timestamp: { secondsSinceEpoch: 0, utcOffsetMinutes: 0 }, content: "y", origin: "committed" },
-            ],
-          })
-        : envelope({ hash: args[args.length - 1], subject: "A subject" }),
-    );
+    const client = makeClient({
+      getBlame: vi.fn(
+        async (): Promise<BlameDto> => ({
+          file: "a.ts",
+          revision: null,
+          lines: [
+            { finalLine: 1, originalLine: 1, commit: "a".repeat(40), author: { name: "Ada", email: "a@x.com" }, timestamp: { secondsSinceEpoch: 0, utcOffsetMinutes: 0 }, content: "x", origin: "committed" },
+            { finalLine: 2, originalLine: 2, commit: "b".repeat(40), author: { name: "Bob", email: "b@x.com" }, timestamp: { secondsSinceEpoch: 0, utcOffsetMinutes: 0 }, content: "y", origin: "committed" },
+          ],
+        }),
+      ),
+      getCommit: vi.fn(async (_repoRoot: string, revision: string) =>
+        commitDto({ hash: revision, subject: "A subject" }),
+      ),
+    });
 
     const controller = new HistoryController(host);
     controller.activate();
@@ -193,23 +218,26 @@ describe("HistoryController: blame decorations (T-205/US-072)", () => {
   it("all-visible-lines mode decorates every visible line", async () => {
     const host = new FakeHistoryHost();
     host.configValues = { "blame.delayMs": 0, "blame.mode": "allVisibleLines" };
-    const client = makeClient(async (args) =>
-      args[0] === "blame"
-        ? envelope({
-            file: "a.ts",
-            revision: null,
-            lines: [1, 2, 3].map((n) => ({
-              finalLine: n,
-              originalLine: n,
-              commit: "a".repeat(40),
-              author: { name: "Ada", email: "a@x.com" },
-              timestamp: { secondsSinceEpoch: 0, utcOffsetMinutes: 0 },
-              content: `line ${n}`,
-              origin: "committed" as const,
-            })),
-          })
-        : envelope({ hash: args[args.length - 1], subject: "subject" }),
-    );
+    const client = makeClient({
+      getBlame: vi.fn(
+        async (): Promise<BlameDto> => ({
+          file: "a.ts",
+          revision: null,
+          lines: [1, 2, 3].map((n) => ({
+            finalLine: n,
+            originalLine: n,
+            commit: "a".repeat(40),
+            author: { name: "Ada", email: "a@x.com" },
+            timestamp: { secondsSinceEpoch: 0, utcOffsetMinutes: 0 },
+            content: `line ${n}`,
+            origin: "committed" as const,
+          })),
+        }),
+      ),
+      getCommit: vi.fn(async (_repoRoot: string, revision: string) =>
+        commitDto({ hash: revision, subject: "subject" }),
+      ),
+    });
 
     const controller = new HistoryController(host);
     controller.activate();
@@ -223,11 +251,11 @@ describe("HistoryController: blame decorations (T-205/US-072)", () => {
     expect(lastCall!.entries.map((e) => e.line).sort()).toEqual([1, 2, 3]);
   });
 
-  it("disabling blame clears decorations instead of querying the CLI", async () => {
+  it("disabling blame clears decorations instead of running a git query", async () => {
     const host = new FakeHistoryHost();
     host.configValues = { "blame.enabled": false };
-    const run = vi.fn(async () => envelope({ file: "a.ts", revision: null, lines: [] }));
-    const client = makeClient(run);
+    const getBlame = vi.fn(async (): Promise<BlameDto> => ({ file: "a.ts", revision: null, lines: [] }));
+    const client = makeClient({ getBlame });
 
     const controller = new HistoryController(host);
     controller.activate();
@@ -236,19 +264,18 @@ describe("HistoryController: blame decorations (T-205/US-072)", () => {
 
     await vi.advanceTimersByTimeAsync(0);
 
-    expect(run).not.toHaveBeenCalled();
+    expect(getBlame).not.toHaveBeenCalled();
     expect(host.decorationCalls.at(-1)?.entries).toEqual([]);
   });
 
   it("T-255/US-122 criterion 3 (\"repo vazio\"): blaming a file in a repository with no commits yet (unborn HEAD) clears decorations without throwing", async () => {
     const host = new FakeHistoryHost();
     host.configValues = { "blame.delayMs": 0 };
-    const client = makeClient(async () => ({
-      status: "error" as const,
-      schemaVersion: 1,
-      requestId: "req-1",
-      error: { code: "invalid_repository_state", message: "HEAD is unborn — the repository has no commits yet" },
-    }));
+    const client = makeClient({
+      getBlame: vi
+        .fn()
+        .mockRejectedValue(new Error("HEAD is unborn — the repository has no commits yet")),
+    });
 
     const controller = new HistoryController(host);
     controller.activate();
@@ -258,7 +285,7 @@ describe("HistoryController: blame decorations (T-205/US-072)", () => {
     await vi.advanceTimersByTimeAsync(0);
     await vi.advanceTimersByTimeAsync(0);
 
-    // A blame failure — domain-level (unborn HEAD) here, client-level
+    // A blame failure — an unborn HEAD here, a missing/unusable `git`
     // elsewhere — is never surfaced as a per-line error toast (it would be
     // far too noisy on every cursor move); it silently clears decorations,
     // exactly like the "disabled" case above.
@@ -269,25 +296,26 @@ describe("HistoryController: blame decorations (T-205/US-072)", () => {
   it("never invents an author for an uncommitted line, and appends a disk-vs-buffer note for a dirty document", async () => {
     const host = new FakeHistoryHost();
     host.configValues = { "blame.delayMs": 0 };
-    const client = makeClient(async (args) =>
-      args[0] === "blame"
-        ? envelope({
-            file: "a.ts",
-            revision: null,
-            lines: [
-              {
-                finalLine: 1,
-                originalLine: 1,
-                commit: "0".repeat(40),
-                author: { name: "Not Committed Yet", email: "not.committed.yet" },
-                timestamp: { secondsSinceEpoch: 0, utcOffsetMinutes: 0 },
-                content: "x",
-                origin: "local",
-              },
-            ],
-          })
-        : envelope({}),
-    );
+    const client = makeClient({
+      getBlame: vi.fn(
+        async (): Promise<BlameDto> => ({
+          file: "a.ts",
+          revision: null,
+          lines: [
+            {
+              finalLine: 1,
+              originalLine: 1,
+              commit: "0".repeat(40),
+              author: { name: "Not Committed Yet", email: "not.committed.yet" },
+              timestamp: { secondsSinceEpoch: 0, utcOffsetMinutes: 0 },
+              content: "x",
+              origin: "local",
+            },
+          ],
+        }),
+      ),
+      getCommit: vi.fn(async () => commitDto()),
+    });
 
     const controller = new HistoryController(host);
     controller.activate();
@@ -307,28 +335,31 @@ describe("HistoryController: blame decorations (T-205/US-072)", () => {
     const host = new FakeHistoryHost();
     host.configValues = { "blame.delayMs": 0 };
     const maliciousHash = "c".repeat(40);
-    const client = makeClient(async (args) =>
-      args[0] === "blame"
-        ? envelope({
-            file: "a.ts",
-            revision: null,
-            lines: [
-              {
-                finalLine: 1,
-                originalLine: 1,
-                commit: maliciousHash,
-                author: { name: "[pwned](command:workbench.action.terminal.new)", email: "a@x.com" },
-                timestamp: { secondsSinceEpoch: 0, utcOffsetMinutes: 0 },
-                content: "x",
-                origin: "committed",
-              },
-            ],
-          })
-        : envelope({
-            hash: maliciousHash,
-            subject: "[Click here](command:workbench.action.terminal.new)",
-          }),
-    );
+    const client = makeClient({
+      getBlame: vi.fn(
+        async (): Promise<BlameDto> => ({
+          file: "a.ts",
+          revision: null,
+          lines: [
+            {
+              finalLine: 1,
+              originalLine: 1,
+              commit: maliciousHash,
+              author: { name: "[pwned](command:workbench.action.terminal.new)", email: "a@x.com" },
+              timestamp: { secondsSinceEpoch: 0, utcOffsetMinutes: 0 },
+              content: "x",
+              origin: "committed",
+            },
+          ],
+        }),
+      ),
+      getCommit: vi.fn(async () =>
+        commitDto({
+          hash: maliciousHash,
+          subject: "[Click here](command:workbench.action.terminal.new)",
+        }),
+      ),
+    });
 
     const controller = new HistoryController(host);
     controller.activate();
@@ -359,25 +390,26 @@ describe("HistoryController: blame decorations (T-205/US-072)", () => {
     // A normal, non-malicious message still renders its real content and
     // still gets the same two legitimate actions.
     const normalHash = "d".repeat(40);
-    const normalClient = makeClient(async (args) =>
-      args[0] === "blame"
-        ? envelope({
-            file: "a.ts",
-            revision: null,
-            lines: [
-              {
-                finalLine: 1,
-                originalLine: 1,
-                commit: normalHash,
-                author: { name: "Ada Lovelace", email: "ada@example.com" },
-                timestamp: { secondsSinceEpoch: 0, utcOffsetMinutes: 0 },
-                content: "x",
-                origin: "committed",
-              },
-            ],
-          })
-        : envelope({ hash: normalHash, subject: "Fix the pagination cursor" }),
-    );
+    const normalClient = makeClient({
+      getBlame: vi.fn(
+        async (): Promise<BlameDto> => ({
+          file: "a.ts",
+          revision: null,
+          lines: [
+            {
+              finalLine: 1,
+              originalLine: 1,
+              commit: normalHash,
+              author: { name: "Ada Lovelace", email: "ada@example.com" },
+              timestamp: { secondsSinceEpoch: 0, utcOffsetMinutes: 0 },
+              content: "x",
+              origin: "committed",
+            },
+          ],
+        }),
+      ),
+      getCommit: vi.fn(async () => commitDto({ hash: normalHash, subject: "Fix the pagination cursor" })),
+    });
     const normalHost = new FakeHistoryHost();
     normalHost.configValues = { "blame.delayMs": 0 };
     const normalController = new HistoryController(normalHost);
@@ -407,7 +439,9 @@ describe("HistoryController: toggling blame (US-072 criterion 2)", () => {
   it("persists the flipped gitsail.blame.enabled setting and clears decorations when turned off", async () => {
     const host = new FakeHistoryHost();
     host.configValues = { "blame.enabled": true, "blame.delayMs": 0 };
-    const client = makeClient(async () => envelope({ file: "a.ts", revision: null, lines: [] }));
+    const client = makeClient({
+      getBlame: vi.fn(async (): Promise<BlameDto> => ({ file: "a.ts", revision: null, lines: [] })),
+    });
     const controller = new HistoryController(host);
     controller.activate();
     controller.onRepositoryContextChanged(client, REPO_ROOT);
@@ -439,9 +473,9 @@ describe("HistoryController: toggling blame (US-072 criterion 2)", () => {
 });
 
 describe("HistoryController: commit details and hash copy (T-206/US-076 criterion 2)", () => {
-  it("opens a gitsail-commit: document, re-querying the CLI rather than reusing a decoration string", async () => {
+  it("opens a gitsail-commit: document, re-querying git rather than reusing a decoration string", async () => {
     const host = new FakeHistoryHost();
-    const client = makeClient(async () => envelope({}));
+    const client = makeClient({});
     const controller = new HistoryController(host);
     controller.activate();
     controller.onRepositoryContextChanged(client, REPO_ROOT);
@@ -468,7 +502,11 @@ describe("HistoryController: commit details and hash copy (T-206/US-076 criterio
 describe("HistoryController: file history (T-207/US-074)", () => {
   it("shows an explicit 'no history' state instead of an unexplained empty list", async () => {
     const host = new FakeHistoryHost();
-    const client = makeClient(async () => envelope({ items: [], hasMore: false }));
+    const client = makeClient({
+      getFileHistoryPage: vi.fn(
+        async (): Promise<PageDto<CommitDto>> => ({ items: [], hasMore: false }),
+      ),
+    });
     const controller = new HistoryController(host);
     controller.activate();
     controller.onRepositoryContextChanged(client, REPO_ROOT);
@@ -491,18 +529,20 @@ describe("HistoryController: file history (T-207/US-074)", () => {
   it("selecting a commit opens its diff for that same file", async () => {
     const host = new FakeHistoryHost();
     const commitHash = "a".repeat(40);
-    const client = makeClient(async (args) => {
-      if (args[0] === "log") {
-        return envelope({ items: [{ hash: commitHash, shortHash: "aaaaaaaa", parents: [], author: { name: "Ada", email: "a@x.com" }, committer: { name: "Ada", email: "a@x.com" }, authorDate: { secondsSinceEpoch: 0, utcOffsetMinutes: 0 }, commitDate: { secondsSinceEpoch: 0, utcOffsetMinutes: 0 }, subject: "subject", body: "", decorations: [], isMerge: false, isRoot: false }], hasMore: false });
-      }
-      if (args[0] === "commit-diff") {
-        return envelope({
+    const client = makeClient({
+      getFileHistoryPage: vi.fn(
+        async (): Promise<PageDto<CommitDto>> => ({
+          items: [commitDto({ hash: commitHash, shortHash: "aaaaaaaa" })],
+          hasMore: false,
+        }),
+      ),
+      getCommitDiff: vi.fn(
+        async (): Promise<CommitDiffDto> => ({
           target: commitHash,
           base: "b".repeat(40),
           diff: { files: [{ path: "a.ts", previousPath: null, changeType: "modified", isBinary: false, truncated: false, hunks: [] }] },
-        });
-      }
-      return envelope({});
+        }),
+      ),
     });
     const controller = new HistoryController(host);
     controller.activate();
@@ -517,14 +557,11 @@ describe("HistoryController: file history (T-207/US-074)", () => {
     expect(host.diffCalls[0].right).toContain(commitHash);
   });
 
-  it("T-255/US-122 criterion 3 (\"falha\"): a CLI-reported failure surfaces a clear error message instead of crashing or showing a bare empty list", async () => {
+  it("T-255/US-122 criterion 3 (\"falha\"): a failed git query surfaces a clear error message instead of crashing or showing a bare empty list", async () => {
     const host = new FakeHistoryHost();
-    const client = makeClient(async () => ({
-      status: "error" as const,
-      schemaVersion: 1,
-      requestId: "req-1",
-      error: { code: "internal", message: "git log failed unexpectedly" },
-    }));
+    const client = makeClient({
+      getFileHistoryPage: vi.fn().mockRejectedValue(new Error("git log failed unexpectedly")),
+    });
     const controller = new HistoryController(host);
     controller.activate();
     controller.onRepositoryContextChanged(client, REPO_ROOT);
@@ -539,29 +576,13 @@ describe("HistoryController: file history (T-207/US-074)", () => {
   it("T-255/US-122 criterion 3 (\"cancelamento\"): dismissing the quick pick (Escape) after real history items are shown does nothing — no diff opens, nothing throws", async () => {
     const host = new FakeHistoryHost();
     const commitHash = "a".repeat(40);
-    const client = makeClient(async (args) => {
-      if (args[0] === "log") {
-        return envelope({
-          items: [
-            {
-              hash: commitHash,
-              shortHash: "aaaaaaaa",
-              parents: [],
-              author: { name: "Ada", email: "a@x.com" },
-              committer: { name: "Ada", email: "a@x.com" },
-              authorDate: { secondsSinceEpoch: 0, utcOffsetMinutes: 0 },
-              commitDate: { secondsSinceEpoch: 0, utcOffsetMinutes: 0 },
-              subject: "subject",
-              body: "",
-              decorations: [],
-              isMerge: false,
-              isRoot: false,
-            },
-          ],
+    const client = makeClient({
+      getFileHistoryPage: vi.fn(
+        async (): Promise<PageDto<CommitDto>> => ({
+          items: [commitDto({ hash: commitHash, shortHash: "aaaaaaaa" })],
           hasMore: false,
-        });
-      }
-      return envelope({});
+        }),
+      ),
     });
     const controller = new HistoryController(host);
     controller.activate();
@@ -581,8 +602,15 @@ describe("HistoryController: file history (T-207/US-074)", () => {
 describe("HistoryController: line history (T-208/US-075)", () => {
   it("uses the editor's current selection as the queried range", async () => {
     const host = new FakeHistoryHost();
-    const run = vi.fn(async (args: readonly string[]) => envelope({ file: "a.ts", revision: "HEAD", range: { start: 5, end: 9 }, entries: [] }));
-    const client = makeClient(run);
+    const getLineHistory = vi.fn(
+      async (): Promise<LineHistoryDto> => ({
+        file: "a.ts",
+        revision: "HEAD",
+        range: { start: 5, end: 9 },
+        entries: [],
+      }),
+    );
+    const client = makeClient({ getLineHistory });
     const controller = new HistoryController(host);
     controller.activate();
     controller.onRepositoryContextChanged(client, REPO_ROOT);
@@ -590,15 +618,27 @@ describe("HistoryController: line history (T-208/US-075)", () => {
 
     await host.triggerCommand(COMMANDS.showLineHistory);
 
-    expect(run).toHaveBeenCalledWith(
-      ["line-history", "--repo", REPO_ROOT, "a.ts", "--range", "5-9"],
-      undefined,
-    );
+    expect(getLineHistory).toHaveBeenCalledWith({
+      repoRoot: REPO_ROOT,
+      filePath: "a.ts",
+      startLine: 5,
+      endLine: 9,
+      revision: undefined,
+    });
   });
 
   it("warns about disk-vs-buffer drift for a dirty document, without inventing an attribution", async () => {
     const host = new FakeHistoryHost();
-    const client = makeClient(async () => envelope({ file: "a.ts", revision: "HEAD", range: { start: 1, end: 1 }, entries: [] }));
+    const client = makeClient({
+      getLineHistory: vi.fn(
+        async (): Promise<LineHistoryDto> => ({
+          file: "a.ts",
+          revision: "HEAD",
+          range: { start: 1, end: 1 },
+          entries: [],
+        }),
+      ),
+    });
     const controller = new HistoryController(host);
     controller.activate();
     controller.onRepositoryContextChanged(client, REPO_ROOT);
@@ -614,13 +654,15 @@ describe("HistoryController: commit diff / open diff (T-209/US-076)", () => {
   it("root commit diff opens the target against an empty (root sentinel) left side", async () => {
     const host = new FakeHistoryHost();
     const commitHash = "a".repeat(40);
-    const client = makeClient(async () =>
-      envelope({
-        target: commitHash,
-        base: null,
-        diff: { files: [{ path: "a.ts", previousPath: null, changeType: "added", isBinary: false, truncated: false, hunks: [] }] },
-      }),
-    );
+    const client = makeClient({
+      getCommitDiff: vi.fn(
+        async (): Promise<CommitDiffDto> => ({
+          target: commitHash,
+          base: null,
+          diff: { files: [{ path: "a.ts", previousPath: null, changeType: "added", isBinary: false, truncated: false, hunks: [] }] },
+        }),
+      ),
+    });
     const controller = new HistoryController(host);
     controller.activate();
     controller.onRepositoryContextChanged(client, REPO_ROOT);
@@ -630,7 +672,7 @@ describe("HistoryController: commit diff / open diff (T-209/US-076)", () => {
     expect(host.diffCalls).toHaveLength(1);
     expect(host.diffCalls[0].title).toMatch(/root commit/i);
     // The resolver for the left (root/empty) URI must resolve to "" without
-    // ever calling the CLI for it.
+    // ever running a git query for it.
     const leftUri = new URL(host.diffCalls[0].left);
     const content = await host.resolveContent({ scheme: "gitsail-history", path: leftUri.pathname, query: leftUri.search.slice(1) });
     expect(content).toBe("");
@@ -638,7 +680,7 @@ describe("HistoryController: commit diff / open diff (T-209/US-076)", () => {
 
   it("copies the full hash and offers it when GitSail Desktop is not configured", async () => {
     const host = new FakeHistoryHost();
-    const client = makeClient(async () => envelope({}));
+    const client = makeClient({});
     const controller = new HistoryController(host);
     controller.activate();
     controller.onRepositoryContextChanged(client, REPO_ROOT);
@@ -653,9 +695,13 @@ describe("HistoryController: commit diff / open diff (T-209/US-076)", () => {
 });
 
 describe("HistoryController: content provider dispatch", () => {
-  it("resolves gitsail-history: text content via show-file", async () => {
+  it("resolves gitsail-history: text content from the file at that revision", async () => {
     const host = new FakeHistoryHost();
-    const client = makeClient(async () => envelope({ kind: "text", path: "a.ts", revision: "abc", content: "hello" }));
+    const client = makeClient({
+      getFileContentAtRevision: vi.fn(
+        async (): Promise<FileContentDto> => ({ kind: "text", path: "a.ts", revision: "abc", content: "hello" }),
+      ),
+    });
     const controller = new HistoryController(host);
     controller.activate();
     controller.onRepositoryContextChanged(client, REPO_ROOT);
@@ -668,22 +714,11 @@ describe("HistoryController: content provider dispatch", () => {
 
   it("resolves gitsail-commit: content via the commit use case", async () => {
     const host = new FakeHistoryHost();
-    const client = makeClient(async () =>
-      envelope({
-        hash: "a".repeat(40),
-        shortHash: "aaaaaaaa",
-        parents: [],
-        author: { name: "Ada", email: "a@x.com" },
-        committer: { name: "Ada", email: "a@x.com" },
-        authorDate: { secondsSinceEpoch: 0, utcOffsetMinutes: 0 },
-        commitDate: { secondsSinceEpoch: 0, utcOffsetMinutes: 0 },
-        subject: "A subject",
-        body: "",
-        decorations: [],
-        isMerge: false,
-        isRoot: false,
-      }),
-    );
+    const client = makeClient({
+      getCommit: vi.fn(async () =>
+        commitDto({ hash: "a".repeat(40), shortHash: "aaaaaaaa", subject: "A subject" }),
+      ),
+    });
     const controller = new HistoryController(host);
     controller.activate();
     controller.onRepositoryContextChanged(client, REPO_ROOT);

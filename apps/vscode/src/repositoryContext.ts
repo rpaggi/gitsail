@@ -1,13 +1,17 @@
 // Associating the active file with "its" repository (US-068).
 //
-// This module never inspects the filesystem for `.git` itself (criterion
-// 1) — it only ever asks `gitsail open --repo <dir> --json`, i.e. the same
-// discovery `gitsail-cli` already exposes to every other client, and
-// forwards whatever answer the Core gives back.
+// Before ADR-025 this module's contract was "never inspect the filesystem
+// for `.git` yourself — ask `gitsail open`". That rule survives ADR-025
+// almost intact, and it is worth being precise about what changed: this
+// module still never walks directories looking for `.git`, still never
+// stats a path, and still never decides for itself what counts as a
+// repository. It asks `git rev-parse` — i.e. Git itself — through
+// `git/gitClient.ts`, and forwards whatever answer comes back. What it no
+// longer does is route that question through a second GitSail process.
 
 import path from "node:path";
 
-import { GitSailCliClient } from "./cliClient";
+import { GitClient } from "./git/gitClient";
 import type { RepositoryDto } from "./dto";
 
 export interface WorkspaceFolderLike {
@@ -21,16 +25,16 @@ export interface DocumentUriLike {
 
 export type RepositoryContext =
   | { kind: "repository"; queryRoot: string; repository: RepositoryDto }
-  /** A valid, structured "not a repository" answer from the Core — the
-   * expected, silent case (US-068 criterion 3), never an error. */
+  /** A valid, structured "not a repository" answer — the expected, silent
+   * case (US-068 criterion 3), never an error. */
   | { kind: "no-repository"; queryRoot: string }
   /** No active editor, or a document that is not a plain file on disk
    * (untitled, output channel, diff view, ...) — nothing to resolve. */
   | { kind: "no-context" }
-  /** The CLI itself could not be trusted (missing/incompatible binary, bad
-   * schema, ...) — a client-level problem, never shown per-file/repeatedly
-   * by this module; see `cliClient`'s error types. */
-  | { kind: "cli-unavailable"; queryRoot: string; error: Error };
+  /** Git itself could not be run or could not be trusted (missing
+   * executable, unreadable output, timeout) — an environment-level problem,
+   * never shown per-file/repeatedly by this module. */
+  | { kind: "git-unavailable"; queryRoot: string; error: Error };
 
 interface CacheEntry {
   promise: Promise<RepositoryContext>;
@@ -38,32 +42,31 @@ interface CacheEntry {
 
 /**
  * Resolves and caches "which repository does this query root belong to,
- * if any" by delegating to `gitsail open` (criterion 1).
+ * if any".
  *
  * Caches by query root (US-068 criterion 3): re-focusing files under a
  * folder that was already resolved — including a folder with no
- * repository — never re-invokes the CLI or re-surfaces a failure on every
+ * repository — never re-runs `git` or re-surfaces a failure on every
  * keystroke/focus change. Call `invalidateAll()` whenever something that
- * could actually change the answer changes (workspace folders, binary
- * configuration, workspace trust) — the extension controller owns that
- * decision, not this class.
+ * could actually change the answer changes (workspace folders, workspace
+ * trust) — the extension controller owns that decision, not this class.
  */
 export class RepositoryContextResolver {
   private readonly cache = new Map<string, CacheEntry>();
 
-  constructor(private readonly client: GitSailCliClient) {}
+  constructor(private readonly client: GitClient) {}
 
   invalidateAll(): void {
     this.cache.clear();
   }
 
   /**
-   * Picks the directory to ask `gitsail open` about for a given active
-   * document (criterion 2: correct even across a multi-root workspace).
+   * Picks the directory to run discovery in for a given active document
+   * (criterion 2: correct even across a multi-root workspace).
    *
    * - A document inside one of `workspaceFolders` resolves to that
-   *   folder's root, regardless of how deeply nested the file is —
-   *   `gitsail open` walks upward from there itself.
+   *   folder's root, regardless of how deeply nested the file is — `git
+   *   rev-parse` walks upward from there itself.
    * - A document outside every workspace folder ("external file", e.g.
    *   opened directly via File > Open) still resolves — to its own
    *   containing directory — since it may belong to an entirely different
@@ -98,22 +101,18 @@ export class RepositoryContextResolver {
 
   private async query(queryRoot: string): Promise<RepositoryContext> {
     try {
-      const envelope = await this.client.run<RepositoryDto>(["open", "--repo", queryRoot]);
-      if (envelope.status === "ok") {
-        return { kind: "repository", queryRoot, repository: envelope.data };
-      }
-      // `repository_not_found` (`gitsail_domain::ErrorCode`) is the one
-      // expected, silent "this folder has no repository" outcome
-      // (criterion 3). Any other domain error `open` could report (e.g.
-      // `git_not_installed`, `internal`) is an environment/CLI-level
-      // problem worth surfacing, not a routine "no repo here" — it takes
-      // the same path as a client-level failure below.
-      if (envelope.error.code === "repository_not_found") {
+      const outcome = await this.client.discover(queryRoot);
+      // "This folder has no repository" is the one expected, silent outcome
+      // (criterion 3) — `git rev-parse` exiting non-zero for a path that is
+      // not inside a repository is a routine answer, not a fault. Anything
+      // else that goes wrong (git missing, unparseable output, timeout) is
+      // an environment problem worth surfacing, and takes the path below.
+      if (outcome.kind === "no-repository") {
         return { kind: "no-repository", queryRoot };
       }
-      return { kind: "cli-unavailable", queryRoot, error: new Error(envelope.error.message) };
+      return { kind: "repository", queryRoot, repository: outcome.repository };
     } catch (error) {
-      return { kind: "cli-unavailable", queryRoot, error: error as Error };
+      return { kind: "git-unavailable", queryRoot, error: error as Error };
     }
   }
 }

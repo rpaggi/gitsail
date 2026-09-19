@@ -51,8 +51,7 @@ export interface SpawnDesktopLaunchResult {
   error?: NodeJS.ErrnoException;
 }
 
-/** Injected so tests never spawn a real process (mirrors
- * `cliLocator.ts`'s `SpawnVersionProbe` pattern). Resolves once the child
+/** Injected so tests never spawn a real process. Resolves once the child
  * process either reports a spawn error or is confirmed spawned — this
  * function's job ends there; it never waits for the Desktop process to
  * exit (US-077 criterion 2: no background daemon, but also no blocking on
@@ -86,9 +85,8 @@ export const defaultSpawnDesktopLaunch: SpawnDesktopLaunch = (command, args) =>
  * Attempts to open GitSail Desktop at `repoRoot`, selecting `commitHash`
  * (US-077 criterion 1). `configuredPath` is the `gitsail.desktop.path`
  * setting's raw value — there is no PATH-based discovery for a GUI app
- * bundle the way `cliLocator.ts` discovers the CLI, so an unset path is
- * "not configured", not "not found" (criterion 3: a clearly different,
- * actionable state).
+ * bundle, so an unset path is "not configured", not "not found"
+ * (criterion 3: a clearly different, actionable state).
  */
 export async function launchDesktopForCommit(
   configuredPath: string | undefined,

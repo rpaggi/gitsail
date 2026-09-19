@@ -10,9 +10,15 @@
 // `controller.onRepositoryContextChanged` into
 // `historyController.onRepositoryContextChanged` — and then drives
 // activation -> blame decoration -> opening full commit details -> file
-// history, end to end, against a single fake CLI client (no real `vscode`,
+// history, end to end, against a single fake git client (no real `vscode`,
 // no spawned process — same "testable orchestration" doubles
 // `controller.test.ts`/`historyController.test.ts` already establish).
+//
+// ADR-025 note: the double is now a `GitClient` with typed methods rather
+// than a CLI client returning JSON envelopes. What this test proves is
+// unchanged — that `extension.ts`'s wiring hands one resolved client and
+// repository root from `ExtensionController` to `HistoryController`, and
+// that the whole chain runs off that single binding.
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -36,30 +42,20 @@ import {
   QuickPickItemLike,
   UriLike,
 } from "../src/historyHostTypes";
-import { Envelope } from "../src/protocol";
+import type { BlameDto, CommitDto, PageDto } from "../src/dto";
 
-vi.mock("../src/cliLocator", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../src/cliLocator")>();
-  return { ...actual, probeCliBinary: vi.fn() };
+vi.mock("../src/git/gitClient", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/git/gitClient")>();
+  return { ...actual, probeGit: vi.fn(), GitClient: vi.fn() };
 });
-vi.mock("../src/cliClient", () => ({ GitSailCliClient: vi.fn() }));
 
-import { probeCliBinary } from "../src/cliLocator"; // eslint-disable-line import/order
-import { GitSailCliClient } from "../src/cliClient"; // eslint-disable-line import/order
+import { GitClient, probeGit } from "../src/git/gitClient"; // eslint-disable-line import/order
+import type { DiscoveryOutcome } from "../src/git/gitClient"; // eslint-disable-line import/order
 
-const probeCliBinaryMock = probeCliBinary as unknown as ReturnType<typeof vi.fn>;
-const GitSailCliClientMock = GitSailCliClient as unknown as ReturnType<typeof vi.fn>;
+const probeGitMock = probeGit as unknown as ReturnType<typeof vi.fn>;
+const GitClientMock = GitClient as unknown as ReturnType<typeof vi.fn>;
 
-const okProbe = {
-  status: "ok" as const,
-  command: "gitsail",
-  source: "path" as const,
-  version: { raw: "0.0.0", major: 0, minor: 0, patch: 0 },
-};
-
-function envelope<T>(data: T): Envelope<T> {
-  return { status: "ok", schemaVersion: 1, requestId: "req-1", data };
-}
+const okProbe = { status: "ok" as const, version: "2.43.0" };
 
 /** A minimal in-memory `ExtensionHost` double — trimmed to what this
  * lifecycle flow actually needs (activation, one active editor, no
@@ -204,19 +200,21 @@ function historyEditorFor(fsPath: string): HistoryTextEditorLike {
 }
 
 describe("Extension lifecycle: activation -> blame -> commit details -> file history (T-255/US-122)", () => {
-  let runMock: ReturnType<typeof vi.fn>;
+  let clientStub: Record<string, ReturnType<typeof vi.fn>>;
+  let discoverMock: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
     vi.useFakeTimers();
-    runMock = vi.fn();
-    GitSailCliClientMock.mockImplementation(function (this: unknown) {
-      return { run: runMock };
+    clientStub = {};
+    discoverMock = vi.fn();
+    GitClientMock.mockImplementation(function (this: unknown) {
+      return clientStub;
     });
-    probeCliBinaryMock.mockReset();
-    probeCliBinaryMock.mockResolvedValue(okProbe);
+    probeGitMock.mockReset();
+    probeGitMock.mockResolvedValue(okProbe);
   });
 
-  it("wires ExtensionController into HistoryController exactly like extension.ts, and a single fake CLI client answers the whole chain", async () => {
+  it("wires ExtensionController into HistoryController exactly like extension.ts, and a single fake git client answers the whole chain", async () => {
     const repoRoot = "/workspace/project";
     const filePath = `${repoRoot}/src/main.rs`;
     const commitHash = "a".repeat(40);
@@ -227,60 +225,55 @@ describe("Extension lifecycle: activation -> blame -> commit details -> file his
 
     const historyHost = new FakeHistoryHost();
 
-    runMock.mockImplementation(async (args: readonly string[]) => {
-      switch (args[0]) {
-        case "open":
-          return envelope({
-            id: repoRoot,
-            rootPath: repoRoot,
-            worktreePath: repoRoot,
-            isBare: false,
-            headState: { state: "attached", branch: "main" },
-            currentBranch: "main",
-          });
-        case "blame":
-          return envelope({
-            file: "src/main.rs",
-            revision: null,
-            lines: [
-              {
-                finalLine: 1,
-                originalLine: 1,
-                commit: commitHash,
-                author: { name: "Ada", email: "ada@example.com" },
-                timestamp: { secondsSinceEpoch: 0, utcOffsetMinutes: 0 },
-                content: "fn main() {}",
-                origin: "committed" as const,
-              },
-            ],
-          });
-        case "log":
-          return envelope({
-            items: [
-              {
-                hash: commitHash,
-                shortHash: commitHash.slice(0, 8),
-                parents: [],
-                author: { name: "Ada", email: "ada@example.com" },
-                committer: { name: "Ada", email: "ada@example.com" },
-                authorDate: { secondsSinceEpoch: 0, utcOffsetMinutes: 0 },
-                commitDate: { secondsSinceEpoch: 0, utcOffsetMinutes: 0 },
-                subject: "Initial commit",
-                body: "",
-                decorations: [],
-                isMerge: false,
-                isRoot: true,
-              },
-            ],
-            hasMore: false,
-          });
-        default:
-          // The commit-subject cache (for blame hovers) and the commit
-          // details lookup both fall through here, exactly like the
-          // equivalent fallback in `historyController.test.ts`.
-          return envelope({ hash: args[args.length - 1], subject: "Initial commit" });
-      }
-    });
+    const commit: CommitDto = {
+      hash: commitHash,
+      shortHash: commitHash.slice(0, 8),
+      parents: [],
+      author: { name: "Ada", email: "ada@example.com" },
+      committer: { name: "Ada", email: "ada@example.com" },
+      authorDate: { secondsSinceEpoch: 0, utcOffsetMinutes: 0 },
+      commitDate: { secondsSinceEpoch: 0, utcOffsetMinutes: 0 },
+      subject: "Initial commit",
+      body: "",
+      decorations: [],
+      isMerge: false,
+      isRoot: true,
+    };
+    const blame: BlameDto = {
+      file: "src/main.rs",
+      revision: null,
+      lines: [
+        {
+          finalLine: 1,
+          originalLine: 1,
+          commit: commitHash,
+          author: { name: "Ada", email: "ada@example.com" },
+          timestamp: { secondsSinceEpoch: 0, utcOffsetMinutes: 0 },
+          content: "fn main() {}",
+          origin: "committed",
+        },
+      ],
+    };
+    const historyPage: PageDto<CommitDto> = { items: [commit], hasMore: false };
+
+    discoverMock.mockResolvedValue({
+      kind: "repository",
+      repository: {
+        id: repoRoot,
+        rootPath: repoRoot,
+        worktreePath: repoRoot,
+        isBare: false,
+        headState: { state: "attached", branch: "main" },
+        currentBranch: "main",
+      },
+    } satisfies DiscoveryOutcome);
+
+    // One stub object, shared by ExtensionController and HistoryController
+    // — that sharing is the thing this test exists to prove.
+    clientStub.discover = discoverMock;
+    clientStub.getBlame = vi.fn(async () => blame);
+    clientStub.getCommit = vi.fn(async () => commit);
+    clientStub.getFileHistoryPage = vi.fn(async () => historyPage);
 
     // -- 1. Activation: exactly `extension.ts::activate()`'s own sequence.
     const controller = new ExtensionController(host);
@@ -294,7 +287,7 @@ describe("Extension lifecycle: activation -> blame -> commit details -> file his
 
     expect(host.statusBarItem.visible).toBe(true);
     expect(host.statusBarItem.text).toContain("main");
-    expect(runMock).toHaveBeenCalledWith(["open", "--repo", repoRoot]);
+    expect(discoverMock).toHaveBeenCalledWith(repoRoot);
 
     // -- 2. Blame: the active editor's line 1 gets decorated from the
     // repository context `ExtensionController` just resolved and handed
@@ -310,7 +303,7 @@ describe("Extension lifecycle: activation -> blame -> commit details -> file his
     expect(decorated!.entries[0].hoverMarkdown).toContain("Initial commit");
 
     // -- 3. Commit details: opening the full details for the blamed commit
-    // re-queries the CLI through the same bound client (never a decoration
+    // re-queries git through the same bound client (never a decoration
     // string reused as if it were the full commit).
     await historyHost.triggerCommand(COMMANDS.openCommitDetails, { hash: commitHash });
     expect(historyHost.documentOpens).toHaveLength(1);

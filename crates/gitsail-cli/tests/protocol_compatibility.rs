@@ -7,8 +7,16 @@
 //! hand-written fixtures to the consumer-side helper), this test spawns
 //! the real, compiled `gitsail` binary as the producer and feeds its
 //! actual stdout straight into `gitsail_protocol::parse_envelope` as the
-//! consumer — the same two real endpoints VS Code's `cliClient.ts`
-//! connects in production, minus the TypeScript process boundary.
+//! consumer.
+//!
+//! This used to be described as the same two endpoints VS Code's
+//! `cliClient.ts` connected in production. That is no longer true: ADR-025
+//! moved the VS Code extension onto `git` directly, so it consumes no
+//! envelope at all and that file is gone. The contract this test pins is
+//! unaffected — `gitsail --json` is still a real producer with real
+//! consumers (any scripted/automated use of the CLI, and any future
+//! consumer across a versioned process boundary), and the rejection of an
+//! unknown schema still has to hold for them.
 
 use std::path::PathBuf;
 use std::process::Command;

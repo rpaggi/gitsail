@@ -1,21 +1,32 @@
-// Hand-written mirror of the wire shapes `gitsail-protocol` defines in
-// `crates/gitsail-protocol/src/dto.rs` (source of truth). Shape mirrors
-// only, never logic: no Git rule is reimplemented here (US-069 criterion 2),
-// just field names/types matching the Rust DTOs' `#[serde(rename_all =
-// "camelCase")]` wire format.
+// The shapes every presentation module in this extension consumes
+// (`blameFormat.ts`, `historyPresentation.ts`, `commitDetailsText.ts`,
+// `historyController.ts`), still field-for-field identical to
+// `crates/gitsail-protocol/src/dto.rs`.
 //
-// This is now the *third* hand-written copy of these shapes (the Rust
-// source of truth, `apps/desktop/src/services/dto.ts`, and this file) —
-// `apps/desktop`'s own dto.ts already flags this exact risk ("if a second
-// consumer... makes hand-maintaining two clients painful, revisit codegen").
-// A third copy makes that revisit overdue: EPIC-15 does push this file
-// considerably further (commit/diff/blame/line-history/file-content DTOs
-// below) — the codegen revisit flagged above is now genuinely due, but out
-// of scope for this epic; tracked as follow-up rather than blocking six
-// stories on a tooling migration.
+// **What these are now, after ADR-025.** They used to be a mirror of a wire
+// format: this extension received them as JSON from `gitsail-cli --json`
+// and only had to agree with the Rust DTOs about field names and types. It
+// no longer receives them from anywhere — `src/git/` *produces* them from
+// `git`'s own output. So agreement with the Rust side is no longer a
+// deserialization concern that a mismatch would announce loudly; it is a
+// semantic one, and a divergence would be silent: the same commit rendering
+// with a different author, a different short hash, or a different diff base
+// in VS Code than in the TUI.
+//
+// That is precisely the cost ADR-025 accepts, and the reason these shapes
+// were kept rather than redesigned around what `git` happens to emit. Two
+// things hold the line: these types stay a faithful copy of `dto.rs`, and
+// `test/gitParity.test.ts` runs the real `gitsail` CLI against the same
+// temporary repository as `src/git/` and asserts the two produce the same
+// DTOs. Changing a field here without changing `dto.rs` — or the reverse —
+// is a bug, not a local decision.
+//
+// One field is no longer filled the same way: `PageDto.nextCursor` remains
+// an opaque cursor, but nothing outside `src/git/gitClient.ts` may assume
+// what is inside it (it is an offset today, exactly as `gitsail log`'s was).
 //
 // EPIC-14 (repository identity) plus EPIC-15 (blame/history/diff for the
-// editor) are mirrored so far.
+// editor) are covered so far.
 
 export type HeadStateDto =
   | { state: "attached"; branch: string }

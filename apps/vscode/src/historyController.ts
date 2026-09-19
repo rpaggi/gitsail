@@ -4,13 +4,11 @@
 // `controller.ts` established for EPIC-14. `extension.ts` is the only file
 // that adapts the real `vscode` module to `HistoryHost` and hands it here.
 //
-// This controller owns no repository-detection or CLI-discovery logic of
-// its own (that remains `ExtensionController`'s job, T-201..T-204) — it is
-// fed the resolved `GitSailCliClient`/repository root via
+// This controller owns no repository-detection or Git-availability logic
+// of its own (that remains `ExtensionController`'s job, T-201..T-204) — it
+// is fed the resolved `GitClient`/repository root via
 // `onRepositoryContextChanged`, wired by `extension.ts` from
 // `ExtensionController`'s own hook.
-
-import path from "node:path";
 
 import {
   BlameDecorationTarget,
@@ -19,8 +17,8 @@ import {
 } from "./blamePlan";
 import { readBlameDisplayConfig } from "./blameFormat";
 import { BlameQueryCache, CommitSubjectCache, resolveCommitSubjects } from "./blameService";
-import { GitSailCliClient } from "./cliClient";
-import { describeCliFailure } from "./cliResult";
+import { GitClient, relativeToRepo } from "./git/gitClient";
+import { describeGitFailure, isCancellation } from "./git/result";
 import {
   buildCommitDetailsUriString,
   parseCommitDetailsUri,
@@ -66,7 +64,7 @@ const CONFIG_SECTION = "gitsail";
 const FILE_HISTORY_PAGE_SIZE = 20;
 
 interface RepositoryBinding {
-  client: GitSailCliClient;
+  client: GitClient;
   repoRoot: string;
 }
 
@@ -133,8 +131,12 @@ export class HistoryController {
   }
 
   /** Wired by `extension.ts` from `ExtensionController`'s own repository
-   * context hook — this controller never resolves a repository itself. */
-  onRepositoryContextChanged(client: GitSailCliClient | undefined, repoRoot: string | undefined): void {
+   * context hook — this controller never resolves a repository itself.
+   * Replacing a binding aborts whatever the previous one still had in
+   * flight (`BlameQueryCache.invalidateAll`), so switching repositories
+   * never leaves a `git blame` running against the old one. */
+  onRepositoryContextChanged(client: GitClient | undefined, repoRoot: string | undefined): void {
+    this.blameQueryCache?.invalidateAll();
     if (client && repoRoot) {
       this.binding = { client, repoRoot };
       this.blameQueryCache = new BlameQueryCache(client);
@@ -185,9 +187,16 @@ export class HistoryController {
       return;
     }
     if (blameResult.kind !== "ok") {
-      // A blame failure is not surfaced as a decoration error toast per
-      // line — it would be far too noisy on every cursor move; the CLI
-      // client's own client-level problems are already surfaced once by
+      // A cancelled blame is this controller's own doing (the cursor moved
+      // and a newer recompute superseded this one) — leave the decorations
+      // the newer recompute is about to set, rather than clearing them and
+      // making the line flicker.
+      if (isCancellation(blameResult)) {
+        return;
+      }
+      // Any other blame failure is not surfaced as a decoration error toast
+      // per line — it would be far too noisy on every cursor move; a
+      // standing environment problem is already surfaced once by
       // `ExtensionController`. Silently show no decorations instead.
       this.host.setBlameDecorations(editor, []);
       return;
@@ -288,14 +297,14 @@ export class HistoryController {
         fileParams.filePath,
         fileParams.revision,
       );
-      return renderFileContentResult(result.kind === "ok" ? result.value : undefined, result.kind !== "ok" ? describeCliFailure(result) : undefined);
+      return renderFileContentResult(result.kind === "ok" ? result.value : undefined, result.kind !== "ok" ? describeGitFailure(result) : undefined);
     }
 
     const commitParams = parseCommitDetailsUri(uri);
     if (commitParams && this.binding) {
       const result = await getCommit(this.binding.client, commitParams.repoRoot, commitParams.hash);
       if (result.kind !== "ok") {
-        return `(Could not load commit ${commitParams.hash}: ${describeCliFailure(result)})`;
+        return `(Could not load commit ${commitParams.hash}: ${describeGitFailure(result)})`;
       }
       return renderCommitDetailsText(result.value);
     }
@@ -327,7 +336,7 @@ export class HistoryController {
       limit: FILE_HISTORY_PAGE_SIZE,
     });
     if (result.kind !== "ok") {
-      void this.host.showErrorMessage(`Could not load history for ${filePath}: ${describeCliFailure(result)}`);
+      void this.host.showErrorMessage(`Could not load history for ${filePath}: ${describeGitFailure(result)}`);
       return;
     }
     const items = buildFileHistoryQuickPickItems(describeFileHistoryOutcome(result.value));
@@ -361,7 +370,7 @@ export class HistoryController {
       range: { startLine: editor.selection.startLine, endLine: editor.selection.endLine },
     });
     if (result.kind !== "ok") {
-      void this.host.showErrorMessage(`Could not load line history: ${describeCliFailure(result)}`);
+      void this.host.showErrorMessage(`Could not load line history: ${describeGitFailure(result)}`);
       return;
     }
     const items = buildLineHistoryQuickPickItems(result.value);
@@ -383,7 +392,7 @@ export class HistoryController {
     }
     const result = await getCommitDiff(this.binding.client, this.binding.repoRoot, hash);
     if (result.kind !== "ok") {
-      void this.host.showErrorMessage(`Could not load the diff for ${hash}: ${describeCliFailure(result)}`);
+      void this.host.showErrorMessage(`Could not load the diff for ${hash}: ${describeGitFailure(result)}`);
       return;
     }
     const commitDiff = result.value;
@@ -447,15 +456,6 @@ export class HistoryController {
       await this.copyCommitHash(hash);
     }
   }
-}
-
-/** `path.relative` (not manual string-prefix slicing) so this is correct on
- * Windows (drive letters, backslashes) the same way `repositoryContext.ts`'s
- * `isUnderPath` already is — then normalized to forward slashes, since
- * every `gitsail-cli` path argument in this file is a POSIX-style relative
- * path (matching `--path`'s own examples in `cli.rs`). */
-function relativeToRepo(repoRoot: string, absolutePath: string): string {
-  return path.relative(repoRoot, absolutePath).split(path.sep).join("/");
 }
 
 function renderFileContentResult(content: FileContentDto | undefined, failureMessage: string | undefined): string {

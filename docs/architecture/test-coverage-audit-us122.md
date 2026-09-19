@@ -9,6 +9,25 @@ this one is primarily an audit — most of the suite already existed and did
 not need re-auditing from scratch (DoD-G: "cada release anterior já aplica
 sua parte pela DoD global").
 
+
+> **Update (ADR-025, 2026-09-19):** this is a historical audit record and is
+> deliberately left as written. For the VS Code extension it is now partly
+> out of date: ADR-025 moved the extension off the `gitsail` CLI onto `git`
+> directly, deleting `src/cliClient.ts`, `src/cliLocator.ts`,
+> `src/cliResult.ts` and `src/protocol.ts` together with
+> `test/cliClient.test.ts`, `test/cliLocator.test.ts`,
+> `test/cliResult.test.ts`, `test/protocol.test.ts`,
+> `test/protocolCompatibility.test.ts`, `test/coreParity.test.ts` and the
+> `test/fixtures/fake-cli.js` stub. Every citation of those files below
+> should be read as describing the suite as it stood at the time of the
+> audit. The coverage itself was not dropped: the data-access suites were
+> rewritten against real temporary repositories (`test/gitProcess.test.ts`,
+> `test/gitClient.test.ts`, plus the rewritten service suites), and
+> `test/gitParity.test.ts` added a check the suite did not previously have
+> — the extension's own DTOs compared against the real `gitsail` CLI's. The
+> audit's *findings* about which flows needed covering are unaffected; only
+> the file names and the layer they sit at changed.
+
 ## Method
 
 Three independent read-only surveys (one per interface) inventoried every
