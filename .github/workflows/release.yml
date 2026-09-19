@@ -331,7 +331,16 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
+          # A semver prerelease tag (a hyphen after the version core, e.g.
+          # v0.1.0-alpha.1) is marked as a GitHub prerelease automatically
+          # — it never shows up as "Latest" and is clearly labeled, without
+          # anyone having to remember to pass a flag by hand each time.
+          prerelease_flag=()
+          if [[ "$RELEASE_TAG" == *-* ]]; then
+            prerelease_flag=(--prerelease)
+          fi
           gh release create "$RELEASE_TAG" \
             --title "GitSail $RELEASE_TAG" \
             --notes-file docs/architecture/release-notes-template.md \
+            "${prerelease_flag[@]}" \
             release/*
