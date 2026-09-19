@@ -5,7 +5,7 @@
 mod support;
 
 use gitsail_application::{GetRepositoryStatus, OpenRepository};
-use gitsail_tui::{ui, Action, App, Command, OperationState};
+use gitsail_tui::{ui, Action, App, Command};
 use ratatui::backend::TestBackend;
 use ratatui::Terminal;
 use support::{buffer_text, git, init_repo_with_initial_commit, read_port, write_port, TempDir};
@@ -171,6 +171,10 @@ fn everyday_scenario_stages_a_file_and_commits_it_successfully() {
 #[test]
 fn a_failing_pre_commit_hook_preserves_the_message_and_the_staged_index() {
     use std::os::unix::fs::PermissionsExt;
+    // Scoped here for the same reason as `PermissionsExt`: this is the only
+    // test that inspects `OperationState`, and at module scope it is a dead
+    // import on Windows, where this `cfg(unix)` test does not compile.
+    use gitsail_tui::OperationState;
 
     let dir = TempDir::new("commit-hook-failure");
     init_repo_with_initial_commit(dir.path());

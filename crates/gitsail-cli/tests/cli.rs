@@ -8,9 +8,8 @@
 //! never a mock — following the same fixture convention as
 //! `gitsail-git`'s own integration tests.
 
-use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
+use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -325,6 +324,13 @@ fn a_short_timeout_terminates_a_slow_git_invocation_with_a_distinct_exit_code() 
 #[cfg(unix)]
 #[test]
 fn ctrl_c_cancels_an_in_flight_diff_and_kills_the_child_process() {
+    // Scoped to this test rather than the module: it is the only user of
+    // either, and at module scope both are dead imports on Windows, where
+    // this `cfg(unix)` test does not compile — which fails `clippy -D
+    // warnings` on that CI leg alone.
+    use std::io::Read;
+    use std::process::Stdio;
+
     let dir = TempDir::new("cancel");
     let child = Command::new(bin())
         .args([

@@ -5,7 +5,11 @@
 //! long-running command so the test does not depend on any particular Git
 //! behavior sleeping.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
+// Only the `cfg(unix)` helpers below take a `&Path`, so at unconditional
+// module scope this is a dead import on Windows.
+#[cfg(unix)]
+use std::path::Path;
 use std::time::Duration;
 
 use gitsail_domain::ErrorCode;

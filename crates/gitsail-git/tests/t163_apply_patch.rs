@@ -347,6 +347,11 @@ fn apply_patch_rejects_an_absolute_path_patch_and_creates_nothing_outside_the_re
     assert_eq!(status_porcelain(repo_dir.path()), "");
 }
 
+// Unix-only by nature: the escape it exercises is a real symlink, which
+// needs privileges Windows does not grant by default. It used to compile
+// everywhere and `panic!` on Windows, which both failed that CI leg and
+// left unreachable code after the panic.
+#[cfg(unix)]
 #[test]
 fn apply_patch_rejects_a_symlink_escape_patch_and_creates_nothing_outside_the_repository() {
     let repo_dir = init_repo("apply-symlink-escape");
@@ -361,10 +366,7 @@ fn apply_patch_rejects_a_symlink_escape_patch_and_creates_nothing_outside_the_re
     ));
     std::fs::create_dir_all(&outside_dir).unwrap();
 
-    #[cfg(unix)]
     std::os::unix::fs::symlink(&outside_dir, repo_dir.path().join("link_to_outside")).unwrap();
-    #[cfg(not(unix))]
-    panic!("symlink-escape test requires a Unix target");
 
     commit_all(repo_dir.path(), "init");
     let provider = provider();
