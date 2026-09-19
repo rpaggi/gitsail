@@ -114,18 +114,18 @@ function riskLabel(risk: string): string {
   z-index: 1000;
 }
 .confirmation-dialog {
-  background: #2a2a2a;
-  border: 1px solid #555;
+  background: var(--color-surface-alt);
+  border: 1px solid var(--color-border-strong);
   border-radius: 4px;
   padding: 1rem 1.25rem;
   min-width: 20rem;
   max-width: 32rem;
 }
 .confirmation-dialog.risk-destructive {
-  border-color: #c0392b;
+  border-color: var(--color-danger);
 }
 .confirmation-dialog.risk-moderate {
-  border-color: #e0a030;
+  border-color: var(--color-warning);
 }
 .risk-badge {
   display: inline-block;
@@ -143,10 +143,10 @@ function riskLabel(risk: string): string {
   margin: 0 0 0.75rem;
 }
 .success {
-  color: #2ecc71;
+  color: var(--color-success);
 }
 .failure {
-  color: #e74c3c;
+  color: var(--color-danger);
 }
 .actions {
   display: flex;

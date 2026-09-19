@@ -27,7 +27,6 @@ onMounted(() => {
 
 <template>
   <div class="pull-requests-panel">
-    <h3>Pull/Merge Requests</h3>
 
     <p v-if="pullRequests.status === 'idle' || pullRequests.status === 'loading'" class="pull-requests-panel__status">
       Loading…
@@ -107,10 +106,10 @@ onMounted(() => {
   opacity: 0.85;
 }
 .pull-requests-panel__status--warning {
-  color: #d4a017;
+  color: var(--color-warning);
 }
 .pull-requests-panel__status--error {
-  color: #c0392b;
+  color: var(--color-danger);
 }
 .pull-requests-panel__list {
   list-style: none;
@@ -121,7 +120,7 @@ onMounted(() => {
   gap: 0.5rem;
 }
 .pull-requests-panel__item {
-  border: 1px solid #444;
+  border: 1px solid var(--color-border);
   border-radius: 4px;
   padding: 0.5rem;
   display: flex;
@@ -133,20 +132,26 @@ onMounted(() => {
   align-items: center;
   gap: 0.5rem;
 }
+/* Solid fills with white text, so the state reads the same in both themes
+   rather than needing a per-theme pair. These are chosen for white-text
+   contrast (all >= 4.5:1), not sampled from the surface palette. */
 .pull-requests-panel__badge {
-  font-size: 0.75rem;
+  font-size: 0.72rem;
+  font-weight: 600;
   padding: 0.1rem 0.4rem;
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: #fff;
 }
 .pull-requests-panel__badge--open {
-  background: #2e7d32;
+  background: #1a7f37;
 }
 .pull-requests-panel__badge--merged {
-  background: #6a1b9a;
+  background: var(--color-badge-alt);
 }
 .pull-requests-panel__badge--closed {
-  background: #757575;
+  background: var(--color-badge-neutral);
 }
 .pull-requests-panel__title {
   font-weight: 600;

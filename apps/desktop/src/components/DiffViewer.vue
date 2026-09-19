@@ -188,7 +188,7 @@ function originSymbol(origin: string): string {
 }
 .diff-viewer__file-header {
   padding: 0.25rem 0;
-  border-top: 1px solid #444;
+  border-top: 1px solid var(--color-border);
 }
 .diff-viewer__banner {
   margin-left: 0.5rem;
@@ -202,10 +202,10 @@ function originSymbol(origin: string): string {
   white-space: pre;
 }
 .diff-viewer__line--addition {
-  background: rgba(46, 204, 113, 0.15);
+  background: var(--color-diff-add-bg);
 }
 .diff-viewer__line--deletion {
-  background: rgba(231, 76, 60, 0.15);
+  background: var(--color-diff-del-bg);
 }
 .diff-viewer__lineno {
   width: 3rem;
@@ -226,9 +226,9 @@ function originSymbol(origin: string): string {
   min-width: 0;
 }
 .diff-viewer__cell--changed {
-  background: rgba(224, 160, 48, 0.15);
+  background: var(--color-warning-contrast);
 }
 .error {
-  color: #c0392b;
+  color: var(--color-danger);
 }
 </style>

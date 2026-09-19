@@ -21,7 +21,6 @@ onMounted(() => {
 
 <template>
   <div class="sync-panel">
-    <h3>Sync</h3>
 
     <p v-if="sync.resolveError" class="error">{{ sync.resolveError.message }}</p>
     <p v-else-if="sync.resolvedTarget" class="sync-panel__target">
@@ -92,6 +91,6 @@ onMounted(() => {
   opacity: 0.85;
 }
 .error {
-  color: #c0392b;
+  color: var(--color-danger);
 }
 </style>

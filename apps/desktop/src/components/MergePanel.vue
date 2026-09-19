@@ -278,7 +278,7 @@ onMounted(() => {
   opacity: 0.85;
 }
 .merge-panel__result.conflict {
-  color: #e0a030;
+  color: var(--color-warning);
   font-weight: 600;
   opacity: 1;
 }
@@ -288,7 +288,7 @@ onMounted(() => {
   padding: 0;
 }
 .merge-panel__conflict {
-  border-top: 1px solid #444;
+  border-top: 1px solid var(--color-border);
   padding: 0.35rem 0;
 }
 .merge-panel__conflict-header {
@@ -325,6 +325,6 @@ onMounted(() => {
   font: inherit;
 }
 .error {
-  color: #c0392b;
+  color: var(--color-danger);
 }
 </style>

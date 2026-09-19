@@ -121,7 +121,7 @@ function confirm(): void {
   display: flex;
   flex-direction: column;
   gap: 0.4rem;
-  border-top: 1px solid #444;
+  border-top: 1px solid var(--color-border);
   padding-top: 0.5rem;
 }
 .rebase-plan__summary {
@@ -134,7 +134,7 @@ function confirm(): void {
   padding: 0;
 }
 .rebase-plan__entry {
-  border-top: 1px solid #333;
+  border-top: 1px solid var(--color-border);
   padding: 0.35rem 0;
 }
 .rebase-plan__entry-row {
@@ -159,7 +159,7 @@ function confirm(): void {
   min-height: 2.5rem;
 }
 .rebase-plan__error {
-  color: #c0392b;
+  color: var(--color-danger);
   margin: 0;
 }
 .rebase-plan__actions {

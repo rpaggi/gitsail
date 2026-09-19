@@ -151,7 +151,7 @@ function onDrop(event: DragEvent, zone: StagingZone): void {
 .staging-panel__column {
   flex: 1;
   min-height: 6rem;
-  border: 1px dashed #444;
+  border: 1px dashed var(--color-border-strong);
   padding: 0.5rem;
 }
 .staging-panel__column ul {

@@ -57,7 +57,7 @@ async function openAndRefresh(): Promise<void> {
   align-items: center;
 }
 .error {
-  color: #c0392b;
+  color: var(--color-danger);
   margin: 0;
 }
 </style>

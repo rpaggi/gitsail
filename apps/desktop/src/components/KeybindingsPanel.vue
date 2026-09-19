@@ -78,7 +78,6 @@ function conflictPartnerLabels(actionId: string): string[] {
 <template>
   <div class="keybindings-panel">
     <div class="keybindings-panel__header">
-      <h3 class="keybindings-panel__title">Keyboard shortcuts</h3>
       <button type="button" @click="keybindings.resetAll()">Restore all defaults</button>
     </div>
 
@@ -120,10 +119,6 @@ function conflictPartnerLabels(actionId: string): string[] {
   justify-content: space-between;
   gap: 0.5rem;
   margin-bottom: 0.5rem;
-}
-.keybindings-panel__title {
-  margin: 0;
-  font-size: 0.9rem;
 }
 .keybindings-panel__list {
   list-style: none;

@@ -125,8 +125,8 @@ function requestReset(): void {
   z-index: 999;
 }
 .history-editing-dialog {
-  background: #2a2a2a;
-  border: 1px solid #555;
+  background: var(--color-surface-alt);
+  border: 1px solid var(--color-border-strong);
   border-radius: 4px;
   padding: 1rem 1.25rem;
   min-width: 22rem;
@@ -156,7 +156,7 @@ function requestReset(): void {
 }
 .history-editing-mode__loss {
   grid-column: 2;
-  color: #c0392b;
+  color: var(--color-danger);
   font-weight: 600;
   font-size: 0.9rem;
 }

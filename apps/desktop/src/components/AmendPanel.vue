@@ -64,6 +64,6 @@ const operation = useOperationStore();
   opacity: 0.8;
 }
 .error {
-  color: #c0392b;
+  color: var(--color-danger);
 }
 </style>

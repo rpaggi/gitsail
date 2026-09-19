@@ -48,7 +48,7 @@ function formatLastOpened(unixSeconds: number): string {
   align-items: center;
 }
 .error {
-  color: #c0392b;
+  color: var(--color-danger);
 }
 .last-opened {
   opacity: 0.7;

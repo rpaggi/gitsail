@@ -38,7 +38,16 @@ const subViews: SubView[] = [
   { id: "stash", label: "Stash" },
 ];
 
-const activeIndex = ref(0);
+// The shell's sidebar offers Tags, Remotes and Stashes as three separate
+// destinations, so it needs to say which one this panel should open on.
+// Only the *initial* sub-view: once mounted the tablist owns the choice,
+// so switching tabs inside the panel is not fought by the prop.
+const props = withDefaults(
+  defineProps<{ initialView?: SubView["id"] }>(),
+  { initialView: "tags" },
+);
+
+const activeIndex = ref(Math.max(0, subViews.findIndex((view) => view.id === props.initialView)));
 const activeView = computed(() => subViews[activeIndex.value].id);
 const tabButtonEls = ref<(HTMLButtonElement | null)[]>([]);
 
@@ -73,7 +82,6 @@ onMounted(() => {
 
 <template>
   <section class="references-panel" aria-label="Tags, remotes and stash">
-    <h2 class="references-panel__title">References</h2>
 
     <div class="references-panel__tablist" role="tablist" aria-label="Tags, remotes, stash">
       <button
@@ -155,13 +163,6 @@ onMounted(() => {
 </template>
 
 <style scoped>
-.references-panel__title {
-  margin: 0 0 0.5rem;
-  font-size: 0.85rem;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  color: var(--color-text-muted);
-}
 .references-panel__tablist {
   display: flex;
   gap: 0.25rem;

@@ -10,67 +10,138 @@
  * rather than hard-coded per component, so a component never needs its own
  * per-theme branching.
  *
- * The palette itself is this identity's "sea and navigation" reading of the
- * nautical concept (`docs/product/brand-identity.md`: sail + Git graph) —
- * dark is a deep sea-blue background with a lighter "sail cloth" accent,
- * light is a pale sea-foam background with a deeper "sail cloth" accent —
- * rather than an arbitrary palette pair, without introducing any new image
- * asset.
+ * The dark palette's concrete values are sampled from the product mockup
+ * (`assets/mockups/gitsail_gui_mockup.png`), which is the approved visual
+ * spec for this app; light is a re-derivation of the same hues onto a pale
+ * sea-foam base rather than a brightness inversion, which would push the
+ * accent below its text-contrast threshold.
  *
  * **Contrast verification** (US-106 criterion 3: "graph, diff, foco e
- * estados mantêm contraste... nos dois temas"): every text-bearing pair
- * below (`--color-text`/`--color-text-muted`/`--color-danger`/
- * `--color-warning`/`--color-success`/`--color-accent` against both
- * `--color-bg` and `--color-surface`) was checked against WCAG 2.1's
- * relative-luminance formula and is >= 4.5:1 (normal text) in *both*
- * themes — the dark theme's own ratios are noted where each token is
- * defined; the light theme's ratios are noted in its own block below.
- * `--color-border`/`--color-accent-strong` are decorative (a 1px border, an
- * SVG stroke) and are not text, so WCAG's 3:1 non-text-contrast threshold
- * applies there instead — both exceed it.
+ * estados mantêm contraste... nos dois temas"): every text-bearing token
+ * below was re-checked against WCAG 2.1's relative-luminance formula after
+ * the mockup re-palette and is >= 4.5:1 (normal text) on both
+ * `--color-bg` and `--color-surface` in *both* themes; ratios are noted
+ * where each token is defined. Decorative tokens (1px borders, SVG
+ * strokes, graph lane colors) carry WCAG's 3:1 non-text threshold instead.
+ *
+ * Note on elevation direction: in the mockup the large content cards sit
+ * *slightly darker* than the page they float on, while the small stat
+ * tiles and inputs sit *lighter*. That is deliberate and reproduced here
+ * via two separate tokens (`--color-surface` vs `--color-surface-raised`)
+ * rather than a single surface ramp.
  */
 
 :root {
-  /* Surfaces (deep sea blue, darkest to lightest) */
-  --color-bg: #0f1720;
-  --color-surface: #16212c;
-  --color-surface-alt: #1c2a37;
-  --color-border: #2c3e4c;
+  /* Surfaces. `--color-surface` is the big content card; `--color-chrome`
+     is the top bar and sidebar (a touch lighter than the page, so the
+     chrome reads as a frame around the content). */
+  --color-bg: #0e141c;
+  --color-surface: #131a24;
+  --color-surface-alt: #182130;
+  --color-surface-raised: #1b2330;
+  --color-chrome: #141b25;
+  --color-border: #222c3a;
+  --color-border-strong: #2c3849;
 
-  /* Text. Verified contrast: --color-text 15.27:1 on --color-bg, 13.8:1 on
-     --color-surface; --color-text-muted 8.09:1 / 7.31:1. Both far exceed
-     WCAG's 4.5:1 normal-text threshold. */
-  --color-text: #e6edf3;
-  --color-text-muted: #9fb0bd;
+  /* Text. Verified contrast: --color-text 15.84:1 on --color-bg, 14.98:1
+     on --color-surface; --color-text-muted 7.19:1 / 6.80:1. Both far
+     exceed WCAG's 4.5:1 normal-text threshold. */
+  --color-text: #e8eef6;
+  --color-text-muted: #94a3b5;
+  --color-text-faint: #6b7a8c;
 
-  /* Accent ("sail cloth" cyan-blue — the mast/sail line in the logo).
-     --color-accent (used as text, e.g. active tab/link) is 7.9:1 on
-     --color-bg, 7.13:1 on --color-surface. --color-accent-strong is
-     decorative only (an SVG stroke; 8.89:1 on --color-surface, well past
-     the 3:1 non-text threshold anyway). */
-  --color-accent: #4fb6e8;
-  --color-accent-strong: #7cc9ee;
-  --color-accent-contrast: #06222e;
+  /* Accent. Two tokens with different jobs, because one value cannot do
+     both: `--color-accent` is the accent *as text/icon* on a dark surface
+     (6.68:1 on --color-bg, 6.31:1 on --color-surface), while
+     `--color-accent-solid` is the accent *as a fill* behind white text —
+     the mockup's active nav pill and Sync button (white on it: 5.97:1).
+     Using the text-safe light blue as a fill would wash the white label
+     out; using the fill blue as text would land at 4.38:1 and fail. */
+  --color-accent: #4d9dff;
+  --color-accent-strong: #7cc0ff;
+  --color-accent-solid: #0b5cd6;
+  --color-accent-solid-hover: #1668e3;
+  --color-accent-contrast: #ffffff;
+  /* Translucent accent washes (selected row, soft button backgrounds).
+     Alpha over an unknown surface, so never used to carry text contrast
+     on its own — the text on top always keeps its own token. */
+  --color-accent-soft: rgba(77, 157, 255, 0.14);
+  --color-accent-soft-strong: rgba(77, 157, 255, 0.24);
 
-  /* Semantic feedback colors — always paired with text/an icon elsewhere in
-     the markup (US-055 criterion 3: "estados usam texto/ícone além de
+  /* Semantic feedback colors — always paired with text/an icon elsewhere
+     in the markup (US-055 criterion 3: "estados usam texto/ícone além de
      cor"), never the only signal. Verified contrast (on --color-bg /
-     --color-surface): danger 6.5:1 / 5.88:1; warning 10.08:1 / 9.11:1;
-     success 9.54:1 / 8.62:1 — all past the 4.5:1 normal-text threshold. */
+     --color-surface): danger 6.66:1 / 6.30:1; warning 10.33:1 / 9.77:1;
+     success 9.51:1 / 8.99:1. */
   --color-danger: #ff6b6b;
   --color-danger-contrast: #3a0d0d;
   --color-warning: #f2b84b;
   --color-warning-contrast: #3a2a06;
-  --color-success: #57d38c;
+  --color-success: #56d17a;
   --color-success-contrast: #042313;
 
+  /* Diff tinting. The backgrounds are sampled from the mockup's File
+     Changes card; the foreground tokens are what actually carries the
+     +/- text and both clear 4.5:1 on their own tinted background, so a
+     diff stays readable if a person cannot separate the two tints. */
+  --color-diff-add-bg: #12301f;
+  --color-diff-add-border: #1d5236;
+  --color-diff-add-text: #7ee29b;
+  --color-diff-del-bg: #331820;
+  --color-diff-del-border: #63252f;
+  --color-diff-del-text: #ff8f9a;
+
+  /* Commit-graph lanes and activity dots — sampled from the mockup's own
+     graph gutter, which uses fully saturated hues rather than the muted
+     ones the rest of the UI runs on: the lane ribbon is the screen's
+     signature element and has to read as a graph from across the room.
+     Decorative (a 3.5px stroke and a 13px node, never text), so WCAG's
+     3:1 non-text threshold applies; each clears it against both
+     --color-bg and --color-surface (lowest here is 4.38:1).
+
+     The one departure from the mockup is lane 5: its purple (#7e25eb)
+     lands at 2.95:1 on this background and fails, so the same hue is
+     lightened to #9b5cf6 (4.38:1). Cycled by index, so the count is what
+     bounds how many adjacent lanes stay distinguishable. */
+  --color-lane-1: #0f9bf2;
+  --color-lane-2: #f8ad16;
+  --color-lane-3: #f339eb;
+  --color-lane-4: #5cbf61;
+  --color-lane-5: #9b5cf6;
+  --color-lane-6: #ff5347;
+
+  /* Avatar discs. A separate ramp from the lanes on purpose: an avatar
+     carries dark initials on top of it, so it must stay light enough for
+     that text (all >= 5.99:1 against the disc's own ink), while a lane is
+     a bare stroke that wants maximum saturation. One palette cannot do
+     both — the vivid lane purple and red are far too dark to letter on. */
+  --color-avatar-1: #4d9dff;
+  --color-avatar-2: #f5a742;
+  --color-avatar-3: #e05fc4;
+  --color-avatar-4: #56d17a;
+  --color-avatar-5: #a97cf0;
+  --color-avatar-6: #f2d04b;
+  --color-avatar-ink: #0b1018;
+
+  /* Badge fills for ref chips (local branch vs. remote/other ref). White
+     text on each: 5.42:1 and 8.28:1. */
+  --color-badge-branch: #0464dd;
+  --color-badge-alt: #5633b5;
+  --color-badge-neutral: #2c3849;
+
   /* Focus ring (US-055 criterion 1: "foco visível") — one token, applied
-     globally below, so every native interactive element (button, input,
-     select, textarea, link, and anything with an explicit tabindex) gets
-     the same visible outline without each component styling it itself.
-     Non-text (an outline, not a glyph): 11.31:1 on --color-surface, well
-     past WCAG's 3:1 non-text threshold. */
+     globally below, so every native interactive element gets the same
+     visible outline without each component styling it itself. Non-text:
+     12.13:1 on --color-surface, well past WCAG's 3:1 non-text threshold. */
   --color-focus-ring: #ffd166;
+
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-pill: 999px;
+
+  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.32);
+  --shadow-pop: 0 12px 32px rgba(0, 0, 0, 0.5);
 
   --font-sans: system-ui, -apple-system, "Segoe UI", sans-serif;
   --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
@@ -78,60 +149,96 @@
 
 /*
  * Light theme (T-248/US-106) — every token above overridden with a pale
- * sea-foam reading of the same nautical identity: a deep, saturated
- * "sail cloth" blue accent over a near-white foam background, rather than
- * a naive brightness-inversion of the dark palette. Applied by
- * `theme.ts`'s `applyEffectiveTheme` setting `data-theme="light"` on
- * `<html>` (`stores/preferences.ts` is the only caller — see that store
- * for when: on load, and on every explicit switch).
+ * sea-foam reading of the same identity: a deep, saturated "sail cloth"
+ * blue accent over a near-white foam background, rather than a naive
+ * brightness-inversion of the dark palette. Applied by `theme.ts`'s
+ * `applyEffectiveTheme` setting `data-theme="light"` on `<html>`
+ * (`stores/preferences.ts` is the only caller).
  *
- * Fonts/focus-ring behavior are intentionally NOT redefined here: only
- * color tokens differ between themes (US-106 DoD: no arbitrary/custom
- * theming, just the two palettes), everything else — type scale, spacing,
- * the global `:focus-visible` rule, the skip link's structure — is shared.
+ * The elevation direction flips here: on a light page the big content
+ * cards go *lighter* (white) rather than darker, since "darker than the
+ * page" reads as a hole rather than a card once the page itself is pale.
+ *
+ * Fonts, radii, shadows and focus-ring behavior are intentionally NOT
+ * redefined: only color tokens differ between themes (US-106 DoD).
  */
 :root[data-theme="light"] {
-  /* Surfaces (pale sea-foam, lightest to a firmer card/panel tone). */
-  --color-bg: #f4f8fb;
+  --color-bg: #eef3f8;
   --color-surface: #ffffff;
-  --color-surface-alt: #e8eef3;
-  --color-border: #c3d1db;
+  --color-surface-alt: #e7eef5;
+  --color-surface-raised: #ffffff;
+  --color-chrome: #ffffff;
+  --color-border: #d3dde6;
+  --color-border-strong: #b8c6d3;
 
-  /* Text. Verified contrast: --color-text 15.02:1 on --color-bg, 16.04:1 on
-     --color-surface; --color-text-muted 6.07:1 / 6.48:1. Both exceed
-     WCAG's 4.5:1 normal-text threshold. */
+  /* Text. Verified contrast: --color-text 14.44:1 on --color-bg, 16.04:1
+     on --color-surface; --color-text-muted 5.85:1 / 6.50:1. */
   --color-text: #14232e;
-  --color-text-muted: #51606c;
+  --color-text-muted: #4e5e6c;
+  --color-text-faint: #6b7a88;
 
-  /* Accent ("sail cloth" blue) — deeper/more saturated than the dark
-     theme's accent, since a light background needs a darker hue to hold
-     the same 4.5:1 text contrast. --color-accent is 5.10:1 on --color-bg,
-     5.45:1 on --color-surface (used as text, e.g. active tab/link).
-     --color-accent-strong is decorative only (an SVG stroke). */
-  --color-accent: #0d6fa8;
-  --color-accent-strong: #085682;
+  /* Accent. Same two-token split as dark: --color-accent is the accent as
+     text (5.32:1 on --color-bg, 5.91:1 on --color-surface);
+     --color-accent-solid is the fill behind white text (5.35:1). */
+  --color-accent: #0a62a6;
+  --color-accent-strong: #084b80;
+  --color-accent-solid: #0b5cd6;
+  --color-accent-solid-hover: #0a52bd;
   --color-accent-contrast: #ffffff;
+  --color-accent-soft: rgba(11, 92, 214, 0.1);
+  --color-accent-soft-strong: rgba(11, 92, 214, 0.18);
 
-  /* Semantic feedback colors — same "never color alone" rule as the dark
-     theme (US-055 criterion 3), darkened/desaturated just enough to keep
-     >= 4.5:1 as text on a light background. Verified contrast (on
-     --color-bg / --color-surface): danger 6.12:1 / 6.54:1; warning 5.55:1
-     / 5.93:1; success 6.06:1 / 6.47:1. The `-contrast` tokens are for the
-     inverse pairing (this color as a background, `-contrast` as the text
-     on top of it — not used anywhere in this crate yet, kept for parity
-     with the dark theme's own token set) and are each >= 4.5:1 against
-     their own base color. */
+  /* Semantic feedback — same "never color alone" rule (US-055 criterion
+     3), darkened just enough to keep >= 4.5:1 on a light background.
+     On --color-bg / --color-surface: danger 6.12:1 / 6.80:1; warning
+     5.55:1 / 6.17:1; success 5.29:1 / 5.88:1. */
   --color-danger: #b3261e;
   --color-danger-contrast: #fdecea;
   --color-warning: #8a5a00;
   --color-warning-contrast: #fdf3e0;
-  --color-success: #146c3f;
+  --color-success: #12713f;
   --color-success-contrast: #e6f5ec;
+
+  /* Diff tinting — pale washes; the +/- text tokens carry the contrast
+     (5.12:1 and 5.70:1 on their own tint). */
+  --color-diff-add-bg: #e4f6ea;
+  --color-diff-add-border: #a7d8bb;
+  --color-diff-add-text: #10633a;
+  --color-diff-del-bg: #fdeaec;
+  --color-diff-del-border: #f0b6bc;
+  --color-diff-del-text: #a3232c;
+
+  /* Lanes/dots — the same six hues, darkened so a 3.5px stroke and a solid
+     node still clear 3:1 against white (lowest here is 4.22:1). */
+  --color-lane-1: #0b7fd0;
+  --color-lane-2: #b36a00;
+  --color-lane-3: #c21fae;
+  --color-lane-4: #1f7a35;
+  --color-lane-5: #6d28d9;
+  --color-lane-6: #cc2b20;
+
+  /* Avatar discs keep the dark theme's lighter ramp: the disc is a solid
+     fill carrying dark initials, so it wants to stay light on a light
+     page too — darkening it here would only hurt the text on it. */
+  --color-avatar-1: #4d9dff;
+  --color-avatar-2: #f5a742;
+  --color-avatar-3: #e05fc4;
+  --color-avatar-4: #56d17a;
+  --color-avatar-5: #a97cf0;
+  --color-avatar-6: #f2d04b;
+  --color-avatar-ink: #0b1018;
+
+  --color-badge-branch: #0b5cd6;
+  --color-badge-alt: #5633b5;
+  --color-badge-neutral: #5c6b7a;
 
   /* Focus ring — darkened from the dark theme's bright yellow, which would
      itself fail non-text contrast against a light background. Non-text:
-     4.61:1 on --color-surface, past WCAG's 3:1 non-text threshold. */
+     4.61:1 on --color-surface. */
   --color-focus-ring: #b35f00;
+
+  --shadow-card: 0 1px 2px rgba(20, 35, 46, 0.08);
+  --shadow-pop: 0 12px 32px rgba(20, 35, 46, 0.18);
 }
 
 * {
@@ -149,6 +256,13 @@ body {
   font-family: var(--font-sans);
   background: var(--color-bg);
   color: var(--color-text);
+  font-size: 14px;
+  line-height: 1.5;
+  /* The shell is a fixed-viewport application layout with its own internal
+     scroll regions (sidebar, commit list, right rail), not a document that
+     scrolls as a whole — a page-level scrollbar here would double up with
+     those and let the top bar scroll away. */
+  overflow: hidden;
 }
 
 button,
@@ -156,6 +270,7 @@ input,
 select,
 textarea {
   font-family: inherit;
+  font-size: inherit;
   color: inherit;
 }
 
@@ -167,23 +282,22 @@ textarea {
 :focus-visible {
   outline: 2px solid var(--color-focus-ring);
   outline-offset: 2px;
+  border-radius: var(--radius-sm);
 }
 
 /* A skip link (`AppShell.vue`) — off-screen until it receives focus, the
    standard pattern for letting keyboard users jump straight past the
-   sidebar's many controls to the main graph/changes area (US-055 criterion
-   1: "ações principais" reachable without stepping through everything
-   ahead of them every time). */
+   sidebar's many controls to the main content area (US-055 criterion 1). */
 .skip-link {
   position: absolute;
   left: 0;
   top: 0;
   transform: translateY(-150%);
-  background: var(--color-accent);
+  background: var(--color-accent-solid);
   color: var(--color-accent-contrast);
   padding: 0.5rem 1rem;
   z-index: 2000;
-  border-radius: 0 0 4px 0;
+  border-radius: 0 0 var(--radius-sm) 0;
   font-weight: 600;
   text-decoration: none;
 }
@@ -209,4 +323,197 @@ textarea {
   clip: rect(0, 0, 0, 0);
   white-space: nowrap;
   border: 0;
+}
+
+/*
+ * ---------------------------------------------------------------------
+ * Shared control/card chrome.
+ *
+ * These are global (not `<style scoped>`) on purpose: the ~20 panel
+ * components predate the mockup redesign and each style only their own
+ * structure. Giving the *primitives* they all use — buttons, inputs,
+ * selects, headings, lists, tables, code — one definition here is what
+ * makes a restyled shell and an untouched panel look like the same
+ * product, without editing twenty files to say the same thing. Scoped
+ * component styles still win where a panel genuinely needs something
+ * specific.
+ * ---------------------------------------------------------------------
+ */
+
+:where(#gitsail-app) :where(button) {
+  font: inherit;
+  padding: 0.38rem 0.75rem;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--color-border-strong);
+  background: var(--color-surface-raised);
+  color: var(--color-text);
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease;
+}
+
+:where(#gitsail-app) :where(button:hover:not(:disabled)) {
+  background: var(--color-surface-alt);
+  border-color: var(--color-accent);
+}
+
+:where(#gitsail-app) :where(button:disabled) {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Opt-in primary: the one filled, accent-colored action in a given
+   context (Sync, Commit). Never applied by element type, so a panel with
+   five buttons doesn't end up with five primaries. */
+:where(#gitsail-app) .btn-primary {
+  background: var(--color-accent-solid);
+  border-color: var(--color-accent-solid);
+  color: var(--color-accent-contrast);
+  font-weight: 600;
+}
+
+:where(#gitsail-app) .btn-primary:hover:not(:disabled) {
+  background: var(--color-accent-solid-hover);
+  border-color: var(--color-accent-solid-hover);
+}
+
+/* Icon-only button. Always requires an `aria-label`/`.sr-only` name in the
+   markup — this class only sizes the hit area, it cannot supply a name. */
+:where(#gitsail-app) .btn-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  color: var(--color-text-muted);
+}
+
+:where(#gitsail-app) .btn-icon:hover:not(:disabled) {
+  color: var(--color-text);
+}
+
+:where(#gitsail-app) .btn-ghost {
+  background: transparent;
+  border-color: transparent;
+  color: var(--color-text-muted);
+}
+
+:where(#gitsail-app) .btn-ghost:hover:not(:disabled) {
+  background: var(--color-surface-alt);
+  border-color: transparent;
+  color: var(--color-text);
+}
+
+:where(#gitsail-app) :where(input[type="text"]),
+:where(#gitsail-app) :where(input[type="search"]),
+:where(#gitsail-app) :where(input:not([type])),
+:where(#gitsail-app) :where(select),
+:where(#gitsail-app) :where(textarea) {
+  padding: 0.38rem 0.6rem;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--color-border-strong);
+  background: var(--color-surface-raised);
+  color: var(--color-text);
+}
+
+:where(#gitsail-app) :where(input::placeholder),
+:where(#gitsail-app) :where(textarea::placeholder) {
+  color: var(--color-text-faint);
+}
+
+:where(#gitsail-app) :where(code),
+:where(#gitsail-app) :where(pre),
+:where(#gitsail-app) :where(kbd) {
+  font-family: var(--font-mono);
+}
+
+:where(#gitsail-app) :where(kbd) {
+  font-size: 0.72rem;
+  padding: 0.1rem 0.35rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--color-border-strong);
+  background: var(--color-surface-alt);
+  color: var(--color-text-muted);
+}
+
+:where(#gitsail-app) :where(a) {
+  color: var(--color-accent);
+}
+
+/* Panel headings. The existing panel components each render their own
+   `<h2>`/`<h3>`; this gives those one consistent card-header treatment
+   instead of browser-default serif-ish sizing inside a card. */
+:where(#gitsail-app) :where(h2),
+:where(#gitsail-app) :where(h3),
+:where(#gitsail-app) :where(h4) {
+  margin: 0 0 0.6rem;
+  font-size: 0.94rem;
+  font-weight: 650;
+  letter-spacing: 0.01em;
+  color: var(--color-text);
+}
+
+:where(#gitsail-app) :where(ul),
+:where(#gitsail-app) :where(ol) {
+  margin: 0;
+  padding-left: 1.1rem;
+}
+
+:where(#gitsail-app) :where(fieldset) {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+}
+
+:where(#gitsail-app) :where(table) {
+  border-collapse: collapse;
+  width: 100%;
+}
+
+:where(#gitsail-app) :where(th),
+:where(#gitsail-app) :where(td) {
+  text-align: left;
+  padding: 0.3rem 0.5rem;
+  border-bottom: 1px solid var(--color-border);
+}
+
+/* Inline error text. Global because ~8 panels each declared their own
+   identical rule; one definition means a theme change cannot leave some of
+   them behind. Paired with `role="alert"` in the markup, so the failure is
+   announced rather than only colored (US-055 criterion 3). */
+:where(#gitsail-app) .error {
+  color: var(--color-danger);
+  font-size: 0.83rem;
+}
+
+/* Thin, unobtrusive scrollbars — the mockup's scroll regions read as part
+   of the dark surface rather than as OS chrome sitting on top of it. */
+:where(#gitsail-app) :where(::-webkit-scrollbar) {
+  width: 10px;
+  height: 10px;
+}
+
+:where(#gitsail-app) :where(::-webkit-scrollbar-thumb) {
+  background: var(--color-border-strong);
+  border-radius: var(--radius-pill);
+  border: 3px solid transparent;
+  background-clip: content-box;
+}
+
+:where(#gitsail-app) :where(::-webkit-scrollbar-thumb:hover) {
+  background: var(--color-text-faint);
+  background-clip: content-box;
+}
+
+:where(#gitsail-app) :where(::-webkit-scrollbar-track) {
+  background: transparent;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  #gitsail-app *,
+  #gitsail-app *::before,
+  #gitsail-app *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }

@@ -56,7 +56,6 @@ onMounted(() => {
 
 <template>
   <div class="branch-panel">
-    <h3>Branches</h3>
     <p v-if="branches.lastError" class="error">{{ branches.lastError.message }}</p>
     <ul>
       <li v-for="branch in branches.branches" :key="branch.name" :class="{ current: branch.isCurrent }">
@@ -128,6 +127,6 @@ onMounted(() => {
   gap: 0.5rem;
 }
 .error {
-  color: #c0392b;
+  color: var(--color-danger);
 }
 </style>
