@@ -11,7 +11,10 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
+// Only the `cfg(unix)` timeout/cancellation tests measure elapsed time.
+#[cfg(unix)]
+use std::time::{Duration, Instant};
 
 struct TempDir(PathBuf);
 
@@ -286,10 +289,19 @@ fn unknown_subcommand_is_a_usage_error_with_exit_code_two() {
 // the child process rather than hanging.
 // ---------------------------------------------------------------------
 
+// `tests/fixtures/fake-git` is a `#!/bin/sh` script, so the two tests that
+// stand a slow Git up against it are Unix-only. On Windows it is not
+// executable at all and the run fails as a spawn error (exit 4) long
+// before any timeout could fire, which is why this used to redden that CI
+// leg. Known gap: timeout/cancellation therefore has no end-to-end
+// coverage on Windows — closing it needs a `.cmd` equivalent of the
+// fixture, not a `cfg` change here.
+#[cfg(unix)]
 fn fake_git_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake-git")
 }
 
+#[cfg(unix)]
 #[test]
 fn a_short_timeout_terminates_a_slow_git_invocation_with_a_distinct_exit_code() {
     let dir = TempDir::new("timeout");
