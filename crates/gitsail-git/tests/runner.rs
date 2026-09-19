@@ -112,12 +112,22 @@ fn sleep_command(seconds: &str) -> (PathBuf, Vec<String>) {
 
 #[cfg(windows)]
 fn sleep_command(seconds: &str) -> (PathBuf, Vec<String>) {
+    // Not `timeout /T`: it refuses to run at all when stdin is redirected
+    // ("ERROR: Input redirection is not supported"), which is exactly how
+    // this runner spawns every process — so it exited instantly with a
+    // failure and the timeout/cancellation under test never happened.
+    // `ping` against the loopback address has no such requirement and
+    // waits about a second between echoes, so N+1 echoes sleep ~N seconds.
+    let echoes = seconds
+        .parse::<u32>()
+        .expect("sleep_command takes a whole number of seconds")
+        + 1;
     (
-        PathBuf::from("timeout"),
+        PathBuf::from("ping"),
         vec![
-            "/T".to_string(),
-            seconds.to_string(),
-            "/NOBREAK".to_string(),
+            "-n".to_string(),
+            echoes.to_string(),
+            "127.0.0.1".to_string(),
         ],
     )
 }
