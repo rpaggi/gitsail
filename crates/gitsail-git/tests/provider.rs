@@ -416,7 +416,14 @@ fn opens_a_repository_whose_own_path_contains_unicode_and_spaces() {
         .discover(&repo_path)
         .expect("discover should succeed for a Unicode, space-containing repo path");
 
-    assert_eq!(repo.root_path, repo_path.canonicalize().unwrap());
+    // Canonicalize both sides: the point is that discovery found *this*
+    // directory despite the Unicode and spaces, and the two spellings
+    // legitimately differ on Windows (Git reports `C:/Users/...`,
+    // `canonicalize` yields the verbatim `\\?\C:\Users\...`).
+    assert_eq!(
+        repo.root_path.canonicalize().unwrap(),
+        repo_path.canonicalize().unwrap()
+    );
     let status = provider.status(&repo).expect("status should succeed");
     assert!(status.is_clean());
 }
