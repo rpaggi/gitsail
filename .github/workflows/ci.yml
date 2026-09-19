@@ -44,6 +44,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Every fixture in this workspace builds a real repository and writes
+      # LF, then asserts on the bytes Git leaves in the working tree. Git
+      # for Windows defaults to core.autocrlf=true and rewrites those files
+      # as CRLF on checkout, so stash/worktree/merge/rebase assertions fail
+      # on this leg for a reason that has nothing to do with the code under
+      # test. Pin the assumption once here rather than in ~30 fixture call
+      # sites; see docs/architecture/ci-policy.md.
+      - name: Pin Git line endings so fixtures mean the same on every OS
+        if: runner.os == 'Windows'
+        run: git config --global core.autocrlf false
+
       # Tauri's `apps/desktop/src-tauri` crate is a workspace member, so
       # `cargo build/test --workspace` needs its Linux system libraries even
       # though this job never packages a Tauri bundle. GitHub's hosted

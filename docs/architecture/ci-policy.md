@@ -113,6 +113,16 @@ separate job reruns them.
   install step is added for either. This is a documented assumption, not
   independently verified against a live Windows/macOS runner from this
   sandbox (see below).
+- **Test fixtures assume LF in the working tree.** Fixtures across the
+  workspace write LF into a real repository and then assert on the bytes
+  Git leaves there after an operation (stash restore, worktree checkout,
+  rebase, reset, revert). Git for Windows defaults to
+  `core.autocrlf=true`, which rewrites those files as CRLF on checkout and
+  fails the assertions for reasons unrelated to the code under test, so
+  the `rust` job pins `core.autocrlf=false` globally on the Windows leg.
+  Running the suite by hand on Windows needs the same setting; the
+  alternative — repeating the config in every one of the ~30 fixture
+  call sites — was judged worse than stating the assumption once here.
 
 ## Sandbox verification limits
 
