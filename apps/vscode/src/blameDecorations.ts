@@ -19,6 +19,22 @@ export interface BlameDecorationLayoutInput {
   contentText: string;
 }
 
+/** Horizontal gap between the last code character and the blame
+ * annotation. Single-sourced here so the decoration type
+ * (`createBlameDecorationType`) and every per-line call
+ * (`buildBlameDecorationOptions`) stay identical — they must, because a
+ * per-decoration `renderOptions.after` replaces the type's `after`
+ * wholesale instead of merging into it. */
+export const BLAME_ANNOTATION_MARGIN = "0 0 0 1.5em";
+
+/** Annotation text color: neutral mid-gray at 50% opacity. A `ThemeColor`
+ * cannot carry opacity, and every fixed theme token renders solid — so the
+ * softness is done with alpha instead. Because half of the final pixel
+ * comes from the editor background itself, the result stays neutral
+ * relative to the background in any theme (dark, light, or custom),
+ * instead of fighting it. */
+export const BLAME_ANNOTATION_COLOR = "rgba(128, 128, 128, 0.5)";
+
 export interface BlameDecorationLayout {
   /** 0-based line number for `vscode.Range`. */
   zeroBasedLine: number;
@@ -26,9 +42,10 @@ export interface BlameDecorationLayout {
   startChar: number;
   endChar: number;
   /** Annotation text verbatim — no leading padding. Horizontal spacing
-   * comes from the decoration type's `margin` alone
-   * (`createBlameDecorationType`), so prefixing spaces here would double
-   * the gap once the anchor is correct. */
+   * comes from `BLAME_ANNOTATION_MARGIN` alone (applied both on the
+   * decoration type and on every per-line call, since the latter replaces
+   * the former), so prefixing spaces here would double the gap once the
+   * anchor is correct. */
   contentText: string;
 }
 

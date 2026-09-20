@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  BLAME_ANNOTATION_COLOR,
+  BLAME_ANNOTATION_MARGIN,
   buildBlameDecorationLayout,
   normalizeBlameAnchorColumn,
 } from "../src/blameDecorations";
@@ -52,6 +54,14 @@ describe("blame decoration layout (T-268)", () => {
       [4, 0, 0],
       [9, 30, 30],
     ]);
+  });
+
+  it("keeps a single gap between code and annotation, owned by the margin constant", () => {
+    expect(BLAME_ANNOTATION_MARGIN).toBe("0 0 0 1.5em");
+  });
+
+  it("renders the annotation in neutral gray at 50% opacity", () => {
+    expect(BLAME_ANNOTATION_COLOR).toBe("rgba(128, 128, 128, 0.5)");
   });
 
   it("normalizes unsafe line lengths to a safe column", () => {

@@ -18,7 +18,7 @@ import * as vscode from "vscode";
 
 import { ExtensionController } from "./controller";
 import { COMMIT_DETAILS_URI_SCHEME } from "./commitDetailsUri";
-import { buildBlameDecorationLayout } from "./blameDecorations";
+import { buildBlameDecorationLayout, BLAME_ANNOTATION_COLOR, BLAME_ANNOTATION_MARGIN } from "./blameDecorations";
 import { HistoryController } from "./historyController";
 import {
   BlameDecorationRenderEntry,
@@ -167,15 +167,17 @@ function adaptHistoryDocument(document: vscode.TextDocument): HistoryDocumentLik
 }
 
 /** The one decoration type every blame decoration reuses (creating a new
- * `TextEditorDecorationType` per render would leak one every time). Its
- * options are set per-call via `DecorationOptions.renderOptions`, so the
- * type itself carries no fixed styling beyond what VS Code always shows for
- * an "after" content-text decoration. */
+ * `TextEditorDecorationType` per render would leak one every time). It
+ * carries the base `after` styling, but every per-line call in
+ * `buildBlameDecorationOptions` repeats the same `margin`/`color`
+ * explicitly: a per-decoration `renderOptions.after` replaces the type's
+ * `after` wholesale (it is not deep-merged), so relying on the type alone
+ * would silently drop both. */
 function createBlameDecorationType(): vscode.TextEditorDecorationType {
   return vscode.window.createTextEditorDecorationType({
     after: {
-      margin: "0 0 0 1.5em",
-      color: new vscode.ThemeColor("editorCodeLens.foreground"),
+      margin: BLAME_ANNOTATION_MARGIN,
+      color: BLAME_ANNOTATION_COLOR,
     },
   });
 }
@@ -199,10 +201,18 @@ function buildBlameDecorationOptions(
       entry.hoverEnabledCommands.length > 0 ? { enabledCommands: [...entry.hoverEnabledCommands] } : false;
     return {
       range: new vscode.Range(line, column, line, column),
-      // No leading padding: horizontal spacing comes from the decoration
-      // type's `margin` alone (T-268). Prefixing spaces here would double
-      // the gap once the range is anchored at the end of the line.
-      renderOptions: { after: { contentText: entry.contentText } },
+      // `contentText` verbatim (no leading spaces), with the soft
+      // 50%-opacity neutral gray and the standard margin repeated per
+      // line: this `after` object replaces the decoration type's own
+      // `after` wholesale, so omitting `color`/`margin` here would render
+      // the annotation in the full-strength editor foreground with no gap.
+      renderOptions: {
+        after: {
+          contentText: entry.contentText,
+          margin: BLAME_ANNOTATION_MARGIN,
+          color: BLAME_ANNOTATION_COLOR,
+        },
+      },
       hoverMessage: hover,
     };
   });
